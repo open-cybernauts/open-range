@@ -1,6 +1,6 @@
 # OpenRange
 
-**Multi-agent cyber gymnasium with real enterprise networks, golden-path validation, and self-evolving infrastructure.**
+**Multi-agent cyber range with validated company snapshots, coupled Red/Blue rewards, and evolving enterprise worlds.**
 
 The first cybersecurity environment in the [OpenEnv](https://github.com/meta-pytorch/OpenEnv) ecosystem.
 
@@ -8,29 +8,31 @@ The first cybersecurity environment in the [OpenEnv](https://github.com/meta-pyt
 
 ## What is this?
 
-OpenRange drops Red and Blue agents into a **real enterprise network** -- firewalls, web apps, databases, directory services, mail servers, VPNs, SIEM -- then lets them fight. An LLM Builder generates the vulnerable infrastructure. A Validator confirms it's actually exploitable. And on every `reset()`, the Builder **mutates** the range with entirely different vulnerabilities, so agents can never memorize their way to victory.
+OpenRange drops Red and Blue agents into a **real enterprise network** -- firewalls, web apps, databases, directory services, mail servers, VPNs, SIEM -- then lets them fight. The environment is not a single static benchmark and it is not a free-form LLM sandbox. A manifest defines a legal family of company worlds. A constrained builder/mutator proposes candidate snapshots inside that family. A validator admits only snapshots that boot, remain coherent, and are actually solvable. `reset()` then selects a **frozen validated snapshot** for the next episode, while background mutation prepares future snapshots asynchronously.
 
 ```
-You write a YAML manifest describing what you want:
-  "Corporate network: DMZ with web app + mail, internal DB + file server,
-   firewall between zones, AD for auth, SIEM for monitoring"
+You define the legal company family:
+  topology, identities, services, bug families, task families, difficulty knobs
 
-The Builder LLM generates it:
-  Real nginx reverse proxy -> PHP app -> MySQL backend -> LDAP auth
-  Postfix mail -> iptables firewall rules -> Rsyslog to SIEM
-  Golden path: 12 steps from external recon to domain flag
+The builder/mutator proposes a candidate snapshot:
+  add billing-api -> seed SSRF -> derive exploit/remediation chain -> emit evidence
 
-The Validator confirms it works:
-  LLM review + 7 scripted checks including inverse mutation testing
+The validator admits only runnable snapshots:
+  build/run, exploitability, patchability, evidence sufficiency, reward checks
 
-Red attacks from outside. Blue defends from inside. Reset. New vulns. Repeat.
+The OpenEnv runtime stays standard:
+  reset() -> pick frozen snapshot + sample task
+  step(action) -> act inside that snapshot
 ```
 
-## Three Roles
+## Core Components
 
-| Role | What it does | Entry point |
+| Component | What it does | Typical implementation |
 |------|-------------|-------------|
-| **Builder** | Generates and mutates vulnerable enterprise infrastructure from YAML manifests | LLM + templates |
+| **Manifest compiler** | Defines the legal world space: topology, services, identities, bug families, task families, difficulty knobs | YAML schema + templates |
+| **Builder / mutator** | Applies graph mutations, seeds bugs or misconfigs, derives truth graphs, evidence, and tasks | Rules, search, templates, optional LLM-generated artifacts |
+| **Validator gate** | Proves a candidate snapshot is runnable, coherent, and solvable before admission | Executable checks first, optional LLM realism review second |
+| **Snapshot manager** | Publishes admitted company snapshots and hands a frozen one to `reset()` | Background queue + snapshot store |
 | **Red** | External attacker. Recon, exploit, pivot, escalate, exfiltrate. | Outside the firewall -- no creds, no access |
 | **Blue** | Internal defender. SIEM analysis, patching, firewall rules, incident response. | SOC workstation on management network |
 
@@ -39,28 +41,50 @@ Red and Blue operate on the **same infrastructure simultaneously**. Red's stealt
 ## Architecture
 
 ```mermaid
-flowchart TD
-    A[YAML Manifest<br/>Enterprise topology + vuln slots] --> B[Builder LLM<br/>Generates configs, plants vulns, writes golden path]
-    B --> C{Hybrid Validator}
-    C -->|Phase A| D[LLM Review<br/>Exploitability, alignment, difficulty]
-    C -->|Phase B| E[7-Check Scripted<br/>Services, flags, isolation,<br/>golden path, inverse mutation]
-    D --> F{PASS?}
+flowchart LR
+    A[Base company family<br/>AcmeCorp repo, infra, docs, tools] --> B
+    M[Manifest / mutation policy<br/>allowed services, bug families, task families] --> B
+    S[Curriculum / failure stats<br/>what Red or Blue is weak at] --> B
+
+    B[Company mutator / builder<br/>generate next snapshot<br/>graph mutations, bug seeding, task derivation] --> C
+
+    subgraph C[Candidate snapshot artifacts]
+        C1[Topology graph<br/>hosts, services, users, trust edges]
+        C2[Truth graph<br/>bug, exploit chain, blast radius, remediation]
+        C3[Evidence spec<br/>logs, alerts, files, tickets, docs]
+        C4[Task set<br/>exploit, investigate, patch, report]
+    end
+
+    C --> D
+    D{Validator gate<br/>build/run, exploitability,<br/>patchability, evidence, reward} -->|fail| B
+    D -->|pass| E[Frozen validated snapshot<br/>Acme v_k]
+
+    subgraph R[OpenEnv runtime]
+        F[reset()<br/>select frozen snapshot + sample task + init episode]
+        G[Red / Blue agents]
+        H[step(action)<br/>run command or tool on current frozen snapshot]
+        I[Observation + reward]
+        J[Rollout results<br/>solve rate, evidence quality, patch validity]
+    end
+
     E --> F
-    F -->|Yes| G[OpenEnv Server<br/>FastAPI: /reset, /step, /state, /ws]
-    F -->|No| B
-    G --> H[Red Agent<br/>External attacker]
-    G --> I[Blue Agent<br/>SOC defender]
-    G --> J[NPC Traffic<br/>Employees, services, cron]
-    H --> K[(Enterprise Range<br/>10+ containers across 4 network zones)]
-    I --> K
-    J --> K
+    F --> G
+    G --> H
+    H --> I
+    I --> G
+    H --> J
+
+    J -. async evolve next snapshot .-> S
 
     style A fill:#4a9eff,color:#fff
+    style M fill:#4a9eff,color:#fff
     style B fill:#ff6b6b,color:#fff
-    style C fill:#ffd93d,color:#333
-    style G fill:#6bcb77,color:#fff
-    style K fill:#7c73e6,color:#fff
+    style D fill:#ffd93d,color:#333
+    style E fill:#6bcb77,color:#fff
+    style R fill:#7c73e611,stroke:#7c73e6
 ```
+
+The generator here is the **builder/mutator pipeline**, not one magical model. Core world logic should stay manifest-constrained and mechanically checkable. LLMs are useful for optional artifact generation -- service code, docs, tickets, alert text -- but not for deciding whether the exploit chain is real or whether reward should be granted.
 
 ## Network Topology
 
@@ -126,25 +150,30 @@ Every service is real. The web app queries the database. Users authenticate agai
 
 ```mermaid
 sequenceDiagram
+    participant W as Background Mutator
+    participant V as Validator
+    participant S as Snapshot Store
     participant T as Training Loop
     participant E as OpenEnv Server
-    participant B as Builder LLM
-    participant V as Validator
-    participant C as Enterprise Range
+    participant C as Frozen Company Snapshot
+
+    W->>W: Apply legal mutations from manifest
+    W->>W: Seed bug chain, evidence, and tasks
+    W->>V: Candidate snapshot + truth graph
+    V->>V: Build/run, exploitability, patchability, reward checks
+    alt PASS
+        V->>S: Publish Acme v_k
+    else FAIL
+        V-->>W: Retry with failure context
+    end
 
     T->>E: reset()
-    E->>B: Manifest + mutation directive
-    B->>B: Generate structured JSON spec
-    B->>C: Render templates, hot-swap configs
-    C->>C: Restart affected services
-    E->>V: Validate range
-    V->>V: Phase A: LLM review
-    V->>C: Phase B: 7 scripted checks
-    V-->>E: PASS
-    E-->>T: RangeObservation with challenge briefing
+    E->>S: Select validated snapshot + task
+    S-->>E: Frozen snapshot Acme v_k
+    E-->>T: RangeObservation with task briefing
 
     rect rgb(255, 107, 107, 0.1)
-        Note over T,C: Red Team Operations
+        Note over T,C: Red Team Operations on the frozen snapshot
         T->>E: step Red: nmap perimeter scan
         E->>C: docker exec attacker nmap -sV fw
         C-->>E: 80, 443, 25 open
@@ -167,7 +196,7 @@ sequenceDiagram
     end
 
     rect rgb(74, 158, 255, 0.1)
-        Note over T,C: Blue Team Operations
+        Note over T,C: Blue Team Operations on the same frozen snapshot
         T->>E: step Blue: check SIEM alerts
         E->>C: docker exec siem tail alerts
         C-->>E: anomalous queries from web to db
@@ -184,40 +213,42 @@ sequenceDiagram
         E-->>T: observation + patch reward
     end
 
-    Note over T,C: Rewards computed with coupling
+    Note over W,S: Background mutation affects future resets only
+    Note over T,C: Rewards computed from container state and action logs
 ```
 
-## Reset = Mutation
+## Episodes vs Evolution
 
-Every call to `reset()` triggers a **mutation** -- the Builder LLM swaps vulnerability classes across the entire enterprise. The topology stays the same, but the attack surface is completely different.
+`reset()` does **not** rebuild the world in the hot path. It selects a prevalidated company snapshot and starts a new task session on that frozen state. Mutation and admission happen between episodes, so OpenRange stays compatible with the normal OpenEnv `reset()`, `step()`, and `state()` contract without collapsing into a static benchmark.
 
 ```mermaid
 flowchart LR
-    subgraph ep1 [Episode 1]
+    subgraph ep1 [Episode A]
         direction TB
-        A1[SQLi in web search] --> B1[Pivot to internal DB]
-        B1 --> C1[Exfil flag from DB]
-    end
-    subgraph ep2 [Episode 2]
-        direction TB
-        A2[SSRF in web API] --> B2[Access internal file server]
-        B2 --> C2[Read flag from SMB share]
-    end
-    subgraph ep3 [Episode 3]
-        direction TB
-        A3[Phish creds via mail] --> B3[LDAP priv escalation]
-        B3 --> C3[Domain admin, flag in AD]
+        A1[reset() selects Acme v12] --> B1[Red and Blue act inside frozen snapshot]
     end
 
-    ep1 -->|reset| ep2
-    ep2 -->|reset| ep3
+    subgraph bg [Between Episodes]
+        direction TB
+        M1[Mutator proposes Acme v13] --> M2{Validator gate}
+        M2 -->|fail| M1
+        M2 -->|pass| M3[Publish Acme v13]
+    end
+
+    subgraph ep2 [Episode B]
+        direction TB
+        A2[future reset() selects Acme v13] --> B2[New task on next frozen snapshot]
+    end
+
+    ep1 -->|episode ends| bg
+    bg -->|next reset()| ep2
 
     style ep1 fill:#ff6b6b22,stroke:#ff6b6b
-    style ep2 fill:#ffd93d22,stroke:#ffd93d
-    style ep3 fill:#6bcb7722,stroke:#6bcb77
+    style bg fill:#ffd93d22,stroke:#ffd93d
+    style ep2 fill:#6bcb7722,stroke:#6bcb77
 ```
 
-Agents must **generalize** across vulnerability classes, attack vectors, and pivot chains -- not memorize a single exploit.
+Agents still have to **generalize** across vulnerability classes, pivot chains, evidence patterns, and remediation paths -- but each episode remains coherent because the active world is frozen while the agent interacts with it.
 
 ## Quick Start
 
@@ -274,28 +305,27 @@ flowchart TB
     style coupling fill:#ffd93d11,stroke:#ffd93d,stroke-dasharray: 5 5
 ```
 
-## Golden Path Validation
+## Validation Gate
 
-Every generated range passes a **7-check validation pipeline** before any agent touches it:
+Every candidate snapshot passes an **executable admission pipeline** before any agent touches it. Mechanical checks are primary. LLM review, if used at all, is secondary realism critique rather than ground truth.
 
 ```mermaid
 flowchart LR
-    S1[1. Services up<br/>nc -z ports] --> S2[2. Flags exist<br/>docker exec cat]
-    S2 --> S3[3. Network isolation<br/>zones enforced]
-    S3 --> S4[4. Golden path<br/>full exploit chain works]
-    S4 --> S5[5. Difficulty<br/>steps within 20%]
-    S5 --> S6[6. No leaks<br/>grep description]
-    S6 --> S7[7. Inverse mutation<br/>revert vuln, step fails]
+    S1[1. Build + boot<br/>services start and healthchecks pass] --> S2[2. Exploitability<br/>truth path or golden path works]
+    S2 --> S3[3. Patchability<br/>fix or revert breaks the exploit path]
+    S3 --> S4[4. Evidence sufficiency<br/>logs, files, tickets support investigation]
+    S4 --> S5[5. Reward check<br/>rubrics grounded in container state]
+    S5 --> S6[6. Isolation + leakage<br/>no impossible refs or answer leaks]
 
-    S7 -->|All pass| PASS[VALID]
-    S7 -->|Any fail| FAIL[RETRY<br/>Builder gets error context]
+    S6 -->|All pass| PASS[ADMIT SNAPSHOT]
+    S6 -->|Any fail| FAIL[REJECT + RETRY]
 
     style PASS fill:#6bcb77,color:#fff
     style FAIL fill:#ff6b6b,color:#fff
-    style S7 fill:#ffd93d,color:#333
+    style S3 fill:#ffd93d,color:#333
 ```
 
-Check 7 is from [Self-Play SWE-RL](https://arxiv.org/abs/2512.18552): it proves each planted vulnerability actually contributes to the challenge.
+Inverse mutation still matters here: if reverting or patching the planted bug does not break the exploit path, the vulnerability is decorative and the snapshot should be rejected.
 
 ## Tier System
 
@@ -348,7 +378,7 @@ sequenceDiagram
     participant Range as Enterprise Range
     participant Blue as Blue Agent
 
-    Note over Red,Blue: Episode begins - Builder mutated range
+    Note over Red,Blue: Episode begins - reset() selected a frozen validated snapshot
 
     Red->>Range: nmap perimeter scan
     Range-->>Red: firewall: 80,443,25 open
@@ -388,9 +418,9 @@ sequenceDiagram
 open-range/
 ├── manifests/          YAML enterprise range definitions
 ├── vulns/              Vulnerability catalog (plantable vuln templates)
-├── builder/            Builder LLM + Mutator + rendering templates
-├── validator/          Hybrid validator (LLM review + 7-check scripted)
-├── server/             OpenEnv server (Environment, models, rewards, app.py)
+├── builder/            Manifest compiler, mutator, templates, optional artifact generation
+├── validator/          Mechanical admission checks + optional realism review
+├── server/             OpenEnv server (Environment, models, rewards, snapshot runtime)
 ├── client/             Typed OpenEnv client
 ├── docs/               Architecture docs and guides
 ├── examples/           Demo scripts
@@ -400,7 +430,7 @@ open-range/
 ## Built On
 
 - [OpenEnv](https://github.com/meta-pytorch/OpenEnv) -- standardized agentic execution environments
-- Lessons from [R2E-Gym](https://arxiv.org/abs/2504.07164) (hybrid verification) and [Self-Play SWE-RL](https://arxiv.org/abs/2512.18552) (formal specs, inverse mutation testing, frontier-calibrating rewards)
+- Design ideas from PAIRED / UED (generate inside a legal family), POET (mutate plus admit), [R2E-Gym](https://arxiv.org/abs/2504.07164) (executable verification), and [Self-Play SWE-RL](https://arxiv.org/abs/2512.18552) (formal specs and inverse mutation testing)
 
 ## License
 
