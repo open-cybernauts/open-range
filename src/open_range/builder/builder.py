@@ -15,7 +15,7 @@ import logging
 import os
 import random
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -1199,6 +1199,7 @@ def render_template_payloads(
     if vuln_types.intersection({"path_traversal", "credential_reuse"}):
         files["web:/var/www/portal/download.php"] = _download_php(
             path_flag=_flag_value_for_type(snapshot, "path_traversal"),
+            flag_names=_flag_names_for_type(snapshot, "path_traversal"),
         )
 
     if "idor" in vuln_types:
@@ -1248,13 +1249,39 @@ def _flag_value_for_type(
     snapshot: SnapshotSpec,
     vuln_type: str,
 ) -> str:
-    for vuln in snapshot.truth_graph.vulns:
+    paired = _flag_for_type(snapshot, vuln_type)
+    if paired is not None:
+        return paired.value
+    return snapshot.flags[0].value if snapshot.flags else "FLAG{placeholder}"
+
+
+def _flag_names_for_type(
+    snapshot: SnapshotSpec,
+    vuln_type: str,
+) -> list[str]:
+    paired = _flag_for_type(snapshot, vuln_type)
+    if paired is None:
+        return ["flag1.txt"]
+    if paired.path.startswith("db:"):
+        return ["flag1.txt"]
+    return [PurePosixPath(paired.path).name]
+
+
+def _flag_for_type(
+    snapshot: SnapshotSpec,
+    vuln_type: str,
+) -> FlagSpec | None:
+    for index, vuln in enumerate(snapshot.truth_graph.vulns):
         if vuln.type != vuln_type:
             continue
+        if index < len(snapshot.flags):
+            return snapshot.flags[index]
         for flag in snapshot.flags:
             if flag.host == vuln.host:
-                return flag.value
-    return snapshot.flags[0].value if snapshot.flags else "FLAG{placeholder}"
+                return flag
+    if snapshot.flags:
+        return snapshot.flags[0]
+    return None
 
 
 def _append_sql(existing: str, fragment: str) -> str:
@@ -1327,8 +1354,15 @@ if (stripos($q, "union") !== false || stripos($q, "flag") !== false) {{
 ?>"""
 
 
-def _download_php(path_flag: str) -> str:
+def _download_php(path_flag: str, flag_names: list[str] | None = None) -> str:
     flag = path_flag or "FLAG{placeholder}"
+    raw_names = flag_names or ["flag1.txt"]
+    cases = "\n".join(
+        f"""elseif (strpos($file, "{name}") !== false) {{
+    echo "{flag}";
+}}"""
+        for name in raw_names
+    )
     return f"""<?php
 $file = $_GET["file"] ?? "";
 if ($file === "report.pdf") {{
@@ -1337,9 +1371,7 @@ if ($file === "report.pdf") {{
     readfile("/var/www/config.php");
 }} elseif (strpos($file, "/etc/passwd") !== false) {{
     echo "root:x:0:0:root:/root:/bin/bash";
-}} elseif (strpos($file, "flag1.txt") !== false) {{
-    echo "{flag}";
-}} else {{
+}} {cases} else {{
     echo "missing";
 }}
 ?>"""
@@ -1360,7 +1392,6 @@ if (strpos($uri, "/api/users/1/profile") !== false) {{
     echo json_encode(["status" => "not_found"]);
 }}
 ?>"""
-
 
 # ---------------------------------------------------------------------------
 # File-based builder (demos)

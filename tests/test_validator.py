@@ -8,6 +8,7 @@ import pytest
 from open_range.protocols import (
     CheckResult,
     EvidenceItem,
+    ExploitStep,
     FlagSpec,
     GoldenPathStep,
     MutationOp,
@@ -47,6 +48,38 @@ async def test_manifest_compliance_rejects_illegal_mutation_plan(
     result = await ManifestComplianceCheck(tier1_manifest).check(spec, mock_containers)
     assert result.passed is False
     assert "illegal family" in result.error
+
+
+@pytest.mark.asyncio
+async def test_manifest_compliance_rejects_incompatible_seed_vuln_host(
+    tier1_manifest,
+    sample_snapshot_spec,
+    mock_containers,
+):
+    from open_range.validator.manifest_compliance import ManifestComplianceCheck
+
+    spec = sample_snapshot_spec.model_copy(deep=True)
+    spec.mutation_plan = MutationPlan(
+        parent_snapshot_id="root_snap",
+        ops=[
+            MutationOp(
+                mutation_id="illegal_host",
+                op_type="seed_vuln",
+                target_selector={"host": "firewall"},
+                params={
+                    "vuln_type": "path_traversal",
+                    "template_id": "vuln_path_traversal",
+                    "required_services": ["nginx", "php-fpm"],
+                },
+            )
+        ],
+    )
+    spec.lineage.parent_snapshot_id = "root_snap"
+    spec.lineage.generation_depth = 1
+
+    result = await ManifestComplianceCheck(tier1_manifest).check(spec, mock_containers)
+    assert result.passed is False
+    assert "incompatible with required services" in result.error
 
 
 @pytest.mark.asyncio
@@ -749,6 +782,71 @@ async def test_task_feasibility_fails_unknown_flag_host(mock_containers):
     )
     result = await TaskFeasibilityCheck().check(spec, mock_containers)
     assert result.passed is False
+
+
+@pytest.mark.asyncio
+async def test_task_feasibility_rejects_seed_vuln_without_task_path(mock_containers):
+    from open_range.validator.task_feasibility import TaskFeasibilityCheck
+
+    spec = SnapshotSpec(
+        topology={
+            "hosts": ["attacker", "web", "db"],
+            "zones": {"external": ["attacker"], "dmz": ["web"], "internal": ["db"]},
+            "dependency_edges": [{"source": "attacker", "target": "web"}],
+            "host_details": {
+                "attacker": {"services": ["nmap"]},
+                "web": {"services": ["nginx", "php-fpm"]},
+                "db": {"services": ["mysql"]},
+            },
+        },
+        truth_graph=TruthGraph(
+            vulns=[Vulnerability(id="path_traversal_1", type="path_traversal", host="web")],
+            exploit_chain=[
+                ExploitStep(
+                    vuln_id="path_traversal_1",
+                    command="curl 'http://web/download?file=../../../var/flags/path_traversal_mut1.txt'",
+                    description="download planted flag",
+                )
+            ],
+        ),
+        flags=[FlagSpec(id="flag1", value="FLAG{path_mut1}", path="/var/flags/path_traversal_mut1.txt", host="web")],
+        evidence_spec=[EvidenceItem(type="log_entry", location="web:/var/log/app/access.log")],
+        golden_path=[
+            GoldenPathStep(
+                step=1,
+                command="curl http://web/",
+                expect_in_stdout="Welcome",
+                host="attacker",
+            )
+        ],
+        task=TaskSpec(red_briefing="go", blue_briefing="watch"),
+        mutation_plan=MutationPlan(
+            parent_snapshot_id="root_snap",
+            ops=[
+                MutationOp(
+                    mutation_id="seed_path",
+                    op_type="seed_vuln",
+                    target_selector={"host": "web"},
+                    params={
+                        "vuln_type": "path_traversal",
+                        "instantiated_vuln_id": "path_traversal_1",
+                        "instantiated_flag_id": "flag1",
+                        "instantiated_flag_value": "FLAG{path_mut1}",
+                        "instantiated_flag_host": "web",
+                        "instantiated_exploit_command": "curl 'http://web/download?file=../../../var/flags/path_traversal_mut1.txt'",
+                    },
+                )
+            ],
+        ),
+    )
+    spec.lineage.parent_snapshot_id = "root_snap"
+    spec.lineage.generation_depth = 1
+
+    result = await TaskFeasibilityCheck().check(spec, mock_containers)
+    assert result.passed is False
+    assert any(
+        "missing submit_flag step" in issue for issue in result.details["issues"]
+    )
 
 
 # ---------------------------------------------------------------------------

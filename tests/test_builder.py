@@ -228,6 +228,58 @@ async def test_mutator_rebuilds_child_files_from_mutated_snapshot(tier1_manifest
     assert "siem:/var/log/siem/custom.log" in child.files
 
 
+@pytest.mark.asyncio
+async def test_mutator_seed_vuln_adds_flag_task_path_and_payloads(tier1_manifest):
+    from open_range.builder.builder import TemplateOnlyBuilder
+    from open_range.builder.mutator import Mutator
+    from open_range.protocols import MutationOp, MutationPlan, TruthGraph
+
+    mutator = Mutator(TemplateOnlyBuilder())
+    parent = await mutator.mutate(tier1_manifest, context=BuildContext(seed=1, tier=1))
+    parent.truth_graph = TruthGraph()
+    parent.flags = []
+    parent.golden_path = []
+    parent.evidence_spec = []
+    parent.task.success_conditions = []
+    parent.task.milestones = []
+
+    def forced_plan(**kwargs):
+        return MutationPlan(
+            parent_snapshot_id="root_snap",
+            ops=[
+                MutationOp(
+                    mutation_id="seed_path_traversal",
+                    op_type="seed_vuln",
+                    target_selector={"host": "web"},
+                    params={
+                        "vuln_type": "path_traversal",
+                        "template_id": "vuln_path_traversal",
+                        "required_services": ["nginx", "php-fpm"],
+                    },
+                )
+            ],
+        )
+
+    mutator._plan_mutations = forced_plan  # type: ignore[method-assign]
+    child = await mutator.mutate(
+        tier1_manifest,
+        context=BuildContext(seed=2, tier=1),
+        parent_snapshot=parent,
+        parent_snapshot_id="root_snap",
+    )
+
+    path_vulns = [v for v in child.truth_graph.vulns if v.type == "path_traversal"]
+    assert path_vulns
+    new_flag = child.flags[-1]
+    assert new_flag.value.endswith("_mut1}")
+    assert new_flag.path.endswith("_mut1.txt")
+    assert any(step.command.startswith("submit_flag ") and new_flag.value in step.command for step in child.golden_path)
+    assert {"type": "flag", "value": new_flag.value} in child.task.success_conditions
+    assert any(path_vulns[-1].injection_point in step.command for step in child.golden_path)
+    assert "web:/var/www/portal/download.php" in child.files
+    assert new_flag.value in child.files["web:/var/www/portal/download.php"]
+
+
 # ---------------------------------------------------------------------------
 # FileBuilder
 # ---------------------------------------------------------------------------
