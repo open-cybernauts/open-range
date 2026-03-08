@@ -80,6 +80,42 @@ class TestManagedSnapshotRuntime:
         finally:
             runtime.stop()
 
+    def test_start_records_root_and_child_lineage(self, tier1_manifest, tmp_path):
+        runtime = ManagedSnapshotRuntime(
+            manifest=tier1_manifest,
+            store_dir=tmp_path / "snapshots",
+            pool_size=2,
+            selection_strategy="latest",
+            refill_enabled=False,
+        )
+
+        runtime.start()
+        try:
+            listing = runtime.list_snapshots()
+            assert len(listing) == 2
+            depths = {item["generation_depth"] for item in listing}
+            assert 0 in depths
+            assert 1 in depths
+            assert any(item["parent_snapshot_id"] for item in listing)
+        finally:
+            runtime.stop()
+
+    def test_acquire_snapshot_exposes_lineage_metadata(self, tier1_manifest, tmp_path):
+        runtime = ManagedSnapshotRuntime(
+            manifest=tier1_manifest,
+            store_dir=tmp_path / "snapshots",
+            pool_size=2,
+            refill_enabled=False,
+        )
+
+        runtime.start()
+        try:
+            admitted = runtime.acquire_snapshot()
+            assert admitted.snapshot.lineage.snapshot_id == admitted.snapshot_id
+            assert admitted.snapshot.lineage.root_snapshot_id
+        finally:
+            runtime.stop()
+
 
 class TestEnvironmentRuntimeIntegration:
     def test_reset_uses_managed_runtime_snapshot(self, tier1_manifest, tmp_path):

@@ -103,6 +103,28 @@ async def test_template_builder_has_task_briefings(tier1_manifest):
     assert spec.task.blue_briefing != ""
 
 
+@pytest.mark.asyncio
+async def test_mutator_builds_child_snapshot_with_lineage(tier1_manifest):
+    from open_range.builder.builder import TemplateOnlyBuilder
+    from open_range.builder.mutator import Mutator
+
+    mutator = Mutator(TemplateOnlyBuilder())
+    root = await mutator.mutate(tier1_manifest, context=BuildContext(seed=1, tier=1))
+    child = await mutator.mutate(
+        tier1_manifest,
+        context=BuildContext(seed=2, tier=1),
+        parent_snapshot=root,
+        parent_snapshot_id="root_snap",
+    )
+
+    assert child.lineage.parent_snapshot_id == "root_snap"
+    assert child.lineage.generation_depth == 1
+    assert child.mutation_plan is not None
+    assert child.mutation_plan.parent_snapshot_id == "root_snap"
+    assert child.mutation_plan.ops
+    assert child.lineage.mutation_summary
+
+
 # ---------------------------------------------------------------------------
 # FileBuilder
 # ---------------------------------------------------------------------------
