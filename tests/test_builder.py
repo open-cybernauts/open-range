@@ -516,10 +516,14 @@ async def test_mutator_rebuilds_child_files_from_mutated_snapshot(tier1_manifest
             parent_snapshot_id="root_snap",
             ops=[
                 MutationOp(
-                    mutation_id="noise1",
-                    op_type="add_benign_noise",
-                    target_selector={"location": "siem:/var/log/siem/custom.log"},
-                    params={"location": "siem:/var/log/siem/custom.log"},
+                    mutation_id="seed_path_traversal",
+                    op_type="seed_vuln",
+                    target_selector={"host": "web"},
+                    params={
+                        "vuln_type": "path_traversal",
+                        "template_id": "vuln_path_traversal",
+                        "required_services": ["nginx", "php-fpm"],
+                    },
                 )
             ],
         )
@@ -532,7 +536,7 @@ async def test_mutator_rebuilds_child_files_from_mutated_snapshot(tier1_manifest
         parent_snapshot_id="root_snap",
     )
     assert "web:/tmp/stale.txt" not in child.files
-    assert "siem:/var/log/siem/custom.log" in child.files
+    assert "web:/var/www/portal/download.php" in child.files
 
 
 @pytest.mark.asyncio
@@ -629,6 +633,144 @@ async def test_mutator_does_not_collapse_child_reset_to_benign_noise_when_seed_v
     assert any(op.op_type == "seed_vuln" for op in child.mutation_plan.ops)
     assert child.lineage.mutation_summary
     assert any(summary.startswith("seed ") for summary in child.lineage.mutation_summary)
+
+
+@pytest.mark.asyncio
+async def test_mutator_child_replaces_parent_challenge_state(tier1_manifest):
+    from open_range.builder.builder import TemplateOnlyBuilder
+    from open_range.builder.mutator import Mutator
+    from open_range.protocols import (
+        ChallengeSpec,
+        EvidenceItem,
+        ExploitStep,
+        FlagSpec,
+        GoldenPathStep,
+        MutationOp,
+        MutationPlan,
+        TruthGraph,
+        Vulnerability,
+    )
+
+    mutator = Mutator(TemplateOnlyBuilder())
+    parent = await mutator.mutate(tier1_manifest, context=BuildContext(seed=1, tier=1))
+    parent.truth_graph = TruthGraph(
+        vulns=[
+            Vulnerability(
+                id="parent_vuln",
+                type="smb_misconfig",
+                host="files",
+                injection_point="smbclient -N //files/general",
+            )
+        ],
+        exploit_chain=[
+            ExploitStep(
+                vuln_id="parent_vuln",
+                command="smbclient -N //files/general",
+                description="Exploit parent challenge",
+            )
+        ],
+    )
+    parent.flags = [FlagSpec(id="parent_flag", value="FLAG{parent}", path="/tmp/parent.txt", host="files")]
+    parent.golden_path = [
+        GoldenPathStep(
+            step=1,
+            command="submit_flag FLAG{parent}",
+            expect_in_stdout="correct",
+            host="attacker",
+        )
+    ]
+    parent.evidence_spec = [
+        EvidenceItem(type="log_entry", location="files:/var/log/samba/log.smbd", pattern="parent")
+    ]
+    parent.task.red_briefing = "Investigate the current enterprise snapshot."
+    parent.task.blue_briefing = "Monitor the SIEM."
+    parent.task.milestones = ["Capture parent_flag"]
+    parent.task.success_conditions = [{"type": "flag", "value": "FLAG{parent}"}]
+    parent.challenges = [
+        ChallengeSpec(
+            id="parent_vuln",
+            name="parent_vuln",
+            challenge_type="exploit",
+            roles=["red", "blue"],
+            role_briefings={"red": parent.task.red_briefing, "blue": parent.task.blue_briefing},
+            success_conditions=[{"type": "flag", "value": "FLAG{parent}"}],
+            linked_vulns=["parent_vuln"],
+            linked_flags=["parent_flag"],
+            evidence_requirements=["files:/var/log/samba/log.smbd"],
+            prerequisites=["Capture parent_flag"],
+        )
+    ]
+
+    def forced_plan(**kwargs):
+        return MutationPlan(
+            parent_snapshot_id="root_snap",
+            ops=[
+                MutationOp(
+                    mutation_id="seed_path_traversal",
+                    op_type="seed_vuln",
+                    target_selector={"host": "web"},
+                    params={
+                        "vuln_type": "path_traversal",
+                        "template_id": "vuln_path_traversal",
+                        "required_services": ["nginx", "php-fpm"],
+                    },
+                )
+            ],
+        )
+
+    mutator._plan_mutations = forced_plan  # type: ignore[method-assign]
+    child = await mutator.mutate(
+        tier1_manifest,
+        context=BuildContext(seed=2, tier=1),
+        parent_snapshot=parent,
+        parent_snapshot_id="root_snap",
+    )
+
+    assert [v.type for v in child.truth_graph.vulns] == ["path_traversal"]
+    assert [v.id for v in child.truth_graph.vulns] == ["path_traversal_1"]
+    assert [flag.id for flag in child.flags] == ["flag1"]
+    assert [step.step for step in child.golden_path] == [1, 2, 3, 4, 5, 6]
+    assert child.task.red_briefing == "Investigate the current enterprise snapshot."
+    assert child.task.blue_briefing == "Monitor the SIEM."
+    assert child.task.success_conditions == [{"type": "flag", "value": child.flags[0].value}]
+    assert child.task.milestones == ["Capture flag1 by exploiting path_traversal on web"]
+    assert child.challenges
+    assert child.challenges[0].linked_vulns == ["path_traversal_1"]
+    assert child.challenges[0].linked_flags == ["flag1"]
+    assert child.challenges[0].success_conditions == child.task.success_conditions
+
+
+@pytest.mark.asyncio
+async def test_mutator_rejects_child_plan_without_seed_vuln(tier1_manifest):
+    from open_range.builder.builder import TemplateOnlyBuilder
+    from open_range.builder.mutator import Mutator
+    from open_range.protocols import MutationOp, MutationPlan
+
+    mutator = Mutator(TemplateOnlyBuilder())
+    parent = await mutator.mutate(tier1_manifest, context=BuildContext(seed=1, tier=1))
+
+    def forced_plan(**kwargs):
+        return MutationPlan(
+            parent_snapshot_id="root_snap",
+            ops=[
+                MutationOp(
+                    mutation_id="noise_only",
+                    op_type="add_benign_noise",
+                    target_selector={"location": "siem:/var/log/siem/custom.log"},
+                    params={"location": "siem:/var/log/siem/custom.log"},
+                )
+            ],
+        )
+
+    mutator._plan_mutations = forced_plan  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="replacement vulnerability"):
+        await mutator.mutate(
+            tier1_manifest,
+            context=BuildContext(seed=2, tier=1),
+            parent_snapshot=parent,
+            parent_snapshot_id="root_snap",
+        )
 
 
 @pytest.mark.asyncio

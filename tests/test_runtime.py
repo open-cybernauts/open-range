@@ -9,7 +9,15 @@ from pathlib import Path
 import pytest
 import yaml
 
-from open_range.protocols import CheckResult, ContainerSet, SnapshotSpec
+from open_range.protocols import (
+    CheckResult,
+    ContainerSet,
+    FlagSpec,
+    GoldenPathStep,
+    SnapshotSpec,
+    TruthGraph,
+    Vulnerability,
+)
 from open_range.server.compose_runner import BootedSnapshotProject
 from open_range.server.environment import RangeEnvironment
 from open_range.server.runtime import ManagedSnapshotRuntime
@@ -604,6 +612,53 @@ class TestManagedSnapshotRuntime:
             assert compose_runner.teardown_calls == [project.project_name]
         finally:
             runtime.stop()
+
+    def test_generate_and_store_snapshot_retries_mutator_failures_before_validation(
+        self,
+        tier1_manifest,
+        tmp_path,
+        monkeypatch,
+    ):
+        runtime = ManagedSnapshotRuntime(
+            manifest=tier1_manifest,
+            store_dir=tmp_path / "snapshots",
+            validator_profile="offline",
+            allow_insecure_offline_profile=True,
+            pool_size=0,
+            refill_enabled=False,
+            generation_retries=2,
+        )
+
+        successful_snapshot = SnapshotSpec(
+            topology={"hosts": ["web"], "zones": {"dmz": ["web"]}},
+            truth_graph=TruthGraph(vulns=[Vulnerability(id="v1", type="path_traversal", host="web")]),
+            flags=[FlagSpec(id="f1", value="FLAG{ok}", path="/var/flags/ok.txt", host="web")],
+            golden_path=[GoldenPathStep(step=1, command="submit_flag FLAG{ok}", expect_in_stdout="correct")],
+            task={"red_briefing": "Go.", "blue_briefing": "Watch."},
+        )
+        calls = {"mutate": 0}
+
+        async def fake_mutate(*args, **kwargs):
+            calls["mutate"] += 1
+            if calls["mutate"] == 1:
+                raise RuntimeError("child snapshot plan must materialize a replacement vulnerability")
+            return successful_snapshot
+
+        monkeypatch.setattr(runtime.mutator, "mutate", fake_mutate)
+
+        async def fake_validate(snapshot, containers):
+            return ValidationResult(
+                passed=True,
+                checks=[CheckResult(name="offline_checks", passed=True)],
+                total_time_s=0.0,
+            )
+
+        runtime.validator.validate = fake_validate  # type: ignore[method-assign]
+
+        snapshot_id = runtime._generate_and_store_snapshot()
+
+        assert calls["mutate"] == 2
+        assert snapshot_id
 
 
 class TestEnvironmentRuntimeIntegration:

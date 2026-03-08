@@ -29,7 +29,9 @@ from open_range.protocols import (
     MutationPlan,
     SnapshotBuilder,
     SnapshotSpec,
+    TruthGraph,
     Vulnerability,
+    build_default_challenge_catalog,
 )
 
 logger = logging.getLogger(__name__)
@@ -280,6 +282,7 @@ class Mutator:
         rng = random.Random(context.seed if context.seed is not None else self._episode_count + 1)
         child = parent_snapshot.model_copy(deep=True)
         child.topology = _ensure_mutable_topology(child.topology, manifest)
+        _reset_child_challenge_state(child)
 
         plan = self._plan_mutations(
             manifest=manifest,
@@ -288,9 +291,17 @@ class Mutator:
             context=context,
             rng=rng,
         )
+        if not any(op.op_type == "seed_vuln" for op in plan.ops):
+            raise RuntimeError("child snapshot plan must materialize a replacement vulnerability")
         self._validate_plan_legality(manifest, plan)
         self._apply_plan(child, plan, manifest, context)
         child.files = render_template_payloads(child, manifest=manifest)
+        child.challenges = build_default_challenge_catalog(
+            child.task,
+            child.truth_graph,
+            child.flags,
+            child.evidence_spec,
+        )
 
         lineage = parent_snapshot.lineage.model_copy(deep=True)
         child.lineage = LineageMetadata(
@@ -1154,6 +1165,24 @@ def _append_task_path(snapshot: SnapshotSpec, flag: FlagSpec, milestone: str) ->
     condition = {"type": "flag", "value": flag.value}
     if condition not in snapshot.task.success_conditions:
         snapshot.task.success_conditions.append(condition)
+
+
+def _reset_child_challenge_state(snapshot: SnapshotSpec) -> None:
+    """Drop parent challenge state so child mutations rebuild a fresh challenge."""
+    snapshot.truth_graph = TruthGraph()
+    snapshot.flags = []
+    snapshot.golden_path = []
+    snapshot.evidence_spec = []
+    snapshot.files = {}
+    snapshot.compose = {}
+    snapshot.services = []
+    snapshot.challenges = []
+    snapshot.task = snapshot.task.model_copy(
+        update={
+            "milestones": [],
+            "success_conditions": [],
+        }
+    )
 
 
 def _mutation_flag_value(template_value: str, vuln_type: str, index: int) -> str:

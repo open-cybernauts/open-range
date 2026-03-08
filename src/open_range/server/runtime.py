@@ -816,15 +816,24 @@ class ManagedSnapshotRuntime:
         for attempt in range(1, self.generation_retries + 1):
             context = self._build_context()
             parent_entry = self._select_parent_entry(context)
-            snapshot = _run_coro_sync(
-                self.mutator.mutate(
-                    self.manifest,
-                    context=context,
-                    error={"message": last_error} if last_error else None,
-                    parent_snapshot=parent_entry.snapshot if parent_entry else None,
-                    parent_snapshot_id=parent_entry.snapshot_id if parent_entry else None,
+            try:
+                snapshot = _run_coro_sync(
+                    self.mutator.mutate(
+                        self.manifest,
+                        context=context,
+                        error={"message": last_error} if last_error else None,
+                        parent_snapshot=parent_entry.snapshot if parent_entry else None,
+                        parent_snapshot_id=parent_entry.snapshot_id if parent_entry else None,
+                    )
                 )
-            )
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                logger.warning(
+                    "ManagedSnapshotRuntime mutation attempt %d failed before validation: %s",
+                    attempt,
+                    last_error,
+                )
+                continue
             validation = self._validate_snapshot(snapshot)
             if validation.passed:
                 snapshot_id = self._snapshot_id(snapshot)
