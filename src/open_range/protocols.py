@@ -283,6 +283,20 @@ class CheckResult(BaseModel):
     advisory: bool = False  # if True, failure triggers retry but never blocks
 
 
+class ExecResult(BaseModel):
+    """Structured command execution result."""
+
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int = 0
+    timed_out: bool = False
+
+    @property
+    def combined_output(self) -> str:
+        parts = [self.stdout, self.stderr]
+        return "\n".join(part for part in parts if part).strip()
+
+
 class ContainerSet(BaseModel):
     """Handle to live Docker containers for a snapshot."""
 
@@ -291,22 +305,35 @@ class ContainerSet(BaseModel):
     project_name: str = ""
     container_ids: dict[str, str] = Field(default_factory=dict)  # service -> id
 
-    async def exec(self, container: str, cmd: str, timeout: float = 30.0) -> str:
-        """Run *cmd* inside *container* and return combined stdout+stderr."""
+    async def exec_run(self, container: str, cmd: str, timeout: float = 30.0) -> ExecResult:
+        """Run *cmd* inside *container* and return structured output + status."""
         import asyncio
 
         cid = self.container_ids.get(container, container)
         proc = await asyncio.create_subprocess_exec(
             "docker", "exec", cid, "sh", "-c", cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
-            return "<timeout>"
-        return (stdout or b"").decode(errors="replace")
+            try:
+                await proc.communicate()
+            except Exception:  # noqa: BLE001
+                pass
+            return ExecResult(stderr="<timeout>", exit_code=124, timed_out=True)
+        return ExecResult(
+            stdout=(stdout or b"").decode(errors="replace"),
+            stderr=(stderr or b"").decode(errors="replace"),
+            exit_code=int(proc.returncode or 0),
+        )
+
+    async def exec(self, container: str, cmd: str, timeout: float = 30.0) -> str:
+        """Backward-compatible string output helper around ``exec_run``."""
+        result = await self.exec_run(container, cmd, timeout=timeout)
+        return result.combined_output
 
     async def is_healthy(self, container: str) -> bool:
         """Return True when *container* is running and its healthcheck passes."""

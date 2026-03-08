@@ -82,11 +82,20 @@ class RewardGroundingCheck:
                     f"-e {shlex.quote(query)}"
                 )
                 try:
-                    output = await containers.exec(host, mysql_cmd)
-                    output = output.strip()
+                    result = await containers.exec_run(host, mysql_cmd)
                 except Exception as exc:  # noqa: BLE001
                     bad.append({"flag": flag.id, "error": str(exc)})
                     continue
+                if result.exit_code != 0:
+                    bad.append({
+                        "flag": flag.id,
+                        "error": (
+                            result.combined_output
+                            or f"mysql command failed (exit_code={result.exit_code})"
+                        ),
+                    })
+                    continue
+                output = result.stdout.strip() or result.combined_output.strip()
 
                 if flag.value not in output:
                     bad.append({
@@ -106,11 +115,20 @@ class RewardGroundingCheck:
                 continue
 
             try:
-                output = await containers.exec(host, f"cat -- {shlex.quote(path)}")
-                output = output.strip()
+                result = await containers.exec_run(host, f"cat -- {shlex.quote(path)}")
             except Exception as exc:  # noqa: BLE001
                 bad.append({"flag": flag.id, "error": str(exc)})
                 continue
+            if result.exit_code != 0:
+                bad.append({
+                    "flag": flag.id,
+                    "error": (
+                        result.combined_output
+                        or f"cat command failed (exit_code={result.exit_code})"
+                    ),
+                })
+                continue
+            output = result.stdout.strip() or result.combined_output.strip()
 
             if flag.value not in output:
                 bad.append({
