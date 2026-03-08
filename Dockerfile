@@ -1,87 +1,80 @@
 # =============================================================================
 # OpenRange — Production All-in-One Dockerfile
 # =============================================================================
-# Multi-stage build:
-#   Stage 1 (builder): OpenEnv base image, install Python deps via uv sync
-#   Stage 2 (runtime): Ubuntu 22.04 with all range services + Python env
+# Single-stage build on Ubuntu 22.04 with Python 3.11 + all range services.
+# Installs uv for Python dependency management, then all system services.
 # =============================================================================
 
-# ---------------------------------------------------------------------------
-# Stage 1: Builder — install Python dependencies using the OpenEnv base image
-# ---------------------------------------------------------------------------
-ARG BASE_IMAGE=ghcr.io/meta-pytorch/openenv-base:latest
-FROM ${BASE_IMAGE} AS builder
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── 1. System packages: services + security tools ────────────────────────────
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Python 3.11 via deadsnakes PPA
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-venv python3.11-dev \
+    # Web
+    nginx \
+    php8.1-fpm php8.1-mysql php8.1-ldap php8.1-xml php8.1-mbstring \
+    # Database
+    mysql-server \
+    # LDAP
+    slapd ldap-utils \
+    # Logging
+    rsyslog \
+    # File sharing
+    samba \
+    # Mail
+    postfix \
+    # SSH
+    openssh-server \
+    # Security tools (agent toolkit — no artificial allowlists)
+    nmap sqlmap hydra nikto \
+    netcat-openbsd dnsutils tcpdump curl wget sshpass \
+    iputils-ping whois \
+    # Utilities
+    jq procps iproute2 git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 2. Install uv for Python dependency management ──────────────────────────
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && mv /root/.local/bin/uv /usr/local/bin/uv
+
+# ── 3. Create directories and fix permissions ────────────────────────────────
+
+RUN mkdir -p /var/log/siem/consolidated /run/sshd /run/php \
+    /var/run/mysqld /var/log/mysql /var/log/nginx \
+    && chown mysql:mysql /var/run/mysqld /var/log/mysql 2>/dev/null || true \
+    && chmod 755 /var/log/siem
+
+# ── 4. Copy application code and install Python deps ────────────────────────
 
 WORKDIR /app
-
 COPY . /app/env
 WORKDIR /app/env
 
-# Install git for git+ dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends git \
-    && rm -rf /var/lib/apt/lists/*
-
-# Two-pass install for better layer caching
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ -f uv.lock ]; then \
-        uv sync --frozen --no-install-project --no-editable; \
-    else \
-        uv sync --no-install-project --no-editable; \
-    fi
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ -f uv.lock ]; then \
+RUN uv venv --python python3.11 /app/.venv \
+    && if [ -f uv.lock ]; then \
         uv sync --frozen --no-editable; \
     else \
         uv sync --no-editable; \
     fi
 
-# ---------------------------------------------------------------------------
-# Stage 2: Runtime — same base image (Python 3.11) + range services
-# ---------------------------------------------------------------------------
-FROM ${BASE_IMAGE}
+RUN chmod +x /app/env/start.sh 2>/dev/null || true
 
-ENV DEBIAN_FRONTEND=noninteractive
+# ── 5. Environment ──────────────────────────────────────────────────────────
 
-# Install ALL service packages in one RUN layer
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    nginx \
-    php-fpm php-mysql php-ldap php-xml php-mbstring \
-    default-mysql-server \
-    slapd ldap-utils \
-    rsyslog \
-    samba \
-    postfix \
-    openssh-server \
-    nmap sqlmap hydra nikto \
-    netcat-openbsd dnsutils tcpdump curl wget sshpass \
-    iputils-ping whois \
-    jq procps iproute2 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create directories and fix permissions for services
-RUN mkdir -p /var/log/siem/consolidated /run/sshd /run/php /var/run/mysqld /var/log/mysql \
-    && (chown mysql:mysql /var/log/siem /var/run/mysqld /var/log/mysql 2>/dev/null || true) \
-    && chmod 755 /var/log/siem
-
-WORKDIR /app
-
-# Copy the Python virtual environment from builder
-COPY --from=builder /app/env/.venv /app/.venv
-
-# Copy the application code from builder
-COPY --from=builder /app/env /app/env
-
-# Copy start.sh
-COPY start.sh /app/env/start.sh
-RUN chmod +x /app/env/start.sh
-
-# Environment configuration
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app/env/src:/app/env:$PYTHONPATH"
 ENV OPENRANGE_EXECUTION_MODE=subprocess
 
-# Health check — services need time to boot
+# ── 6. Health check (60s start-period for service boot) ─────────────────────
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
