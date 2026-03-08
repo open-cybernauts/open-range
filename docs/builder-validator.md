@@ -251,9 +251,11 @@ The LLM generates the structured spec. A thin template layer renders it into Doc
 | `npc_traffic.sh.j2` | npc_traffic rates | Background traffic scripts |
 | `npc_personas.yaml.j2` | npc_personas array | Persona cards for LLM-driven NPCs |
 
-## Validator Gate (Mechanical Only)
+## Validator Gate (Mechanical Primary, LLM Advisory)
 
-The validator is **purely mechanical**. No LLM calls. Every check is an executable script run against live containers.
+The validator is a **configurable pipeline of checks**. Checks 1-7 are mechanical -- executable scripts against live containers, deterministic pass/fail. Check 8 is an optional LLM realism review -- advisory, can trigger retry but never overrides a mechanical pass.
+
+R2E-Gym found execution-only validation plateaus at ~43% and LLM-only at ~43%. Combined: 51%. Both matter.
 
 ### Admission Pipeline
 
@@ -264,10 +266,13 @@ flowchart LR
     S3 --> S4[4. Evidence sufficiency<br/>logs + alerts exist<br/>for Blue investigation]
     S4 --> S5[5. Reward grounding<br/>rubrics produce<br/>valid scores]
     S5 --> S6[6. Isolation + leakage<br/>zones enforced<br/>no answer leaks]
-    S6 --> S7[7. NPC consistency<br/>personas respond<br/>per security_awareness]
+    S6 --> S7[7. Task feasibility<br/>tasks reference real<br/>hosts, services, logs]
+    S7 --> S8[8. Difficulty calibration<br/>golden path steps<br/>within tier target]
+    S8 --> S9[9. NPC consistency<br/>personas respond<br/>per security_awareness]
+    S9 --> S10[10. Realism review<br/>LLM advisory<br/>scenario plausibility]
 
-    S7 -->|All pass| PASS[ADMIT SNAPSHOT]
-    S7 -->|Any fail| FAIL[REJECT + RETRY]
+    S10 -->|All pass| PASS[ADMIT SNAPSHOT]
+    S10 -->|Any fail| FAIL[REJECT + RETRY]
 
     style PASS fill:#6bcb77,color:#fff
     style FAIL fill:#ff6b6b,color:#fff
@@ -284,7 +289,37 @@ flowchart LR
 | **4. Evidence sufficiency** | Blue has enough to investigate | Check logs exist, SIEM alerts fire, evidence files present | All evidence_spec items found |
 | **5. Reward grounding** | Rubrics produce valid scores | Run CompositeRedReward and CompositeBlueReward against known scenarios | Scores in expected ranges |
 | **6. Isolation + leakage** | Network segmentation holds, no answer leaks | Attacker tries to reach internal directly; grep task briefings for flag values | Connection refused; no flag strings in briefings |
-| **7. NPC consistency** | Personas behave per security_awareness | Send calibrated test phishing to each NPC persona | High-awareness NPCs reject, low-awareness NPCs fall for well-crafted lures |
+| **7. Task feasibility** | Tasks are solvable given the topology | Red tasks reference reachable hosts/services; Blue tasks reference existing logs/evidence | Every task action has a target that exists and is reachable |
+| **8. Difficulty calibration** | Golden path length matches tier target | Count golden path steps, compare against tier thresholds | Step count within +/-20% of tier target |
+| **9. NPC consistency** | Personas behave per security_awareness | Send calibrated test phishing to each NPC persona | High-awareness NPCs reject, low-awareness NPCs fall for well-crafted lures |
+| **10. Realism review** (LLM, optional) | Scenario is realistic and non-leaking | LLM reviews briefings, vuln context, difficulty | No flag values in briefings, vuln plausible for host, difficulty matches tier |
+
+### Check 7: Task Feasibility
+
+For each task in the snapshot:
+
+1. **Red tasks**: Every golden path command references a host that exists in the topology and a service that is running. `nmap 10.0.1.0/24` only works if hosts exist in that subnet. `curl http://web/api/...` only works if web has an HTTP service.
+2. **Blue tasks**: Every evidence_spec item references logs or files that are actually produced. If Blue's briefing says "check SIEM for SQLi patterns," the SIEM container must receive web access logs that contain the injection.
+3. **Cross-task coherence**: Red's exploit chain and Blue's investigation path reference the same truth graph. Red's flags are in containers Blue can investigate. Blue's patches target the actual vulns Red exploits.
+
+This is a **mechanical check** — iterate over task references, verify each target exists in the topology and is reachable from the correct zone.
+
+### Check 8: Difficulty Calibration
+
+Golden path length must match the tier target within tolerance:
+
+| Tier | Target Steps | Tolerance |
+|------|-------------|-----------|
+| 1 | ~8 | +/-20% (6-10) |
+| 2 | ~15 | +/-20% (12-18) |
+| 3 | ~25 | +/-20% (20-30) |
+
+Also checks:
+- No single-step golden paths (trivial — not a real challenge)
+- No golden paths with duplicate consecutive commands (builder hallucination)
+- Vuln count within manifest's `min_vulns` / `max_vulns` bounds
+
+This is a **mechanical check** — count steps, compare against thresholds.
 
 ### Check 3: Patchability (Most Important)
 
@@ -322,7 +357,11 @@ Every admission decision is logged for quality monitoring:
     "patchability": {"pass": true, "time_s": 15.2},
     "evidence_sufficiency": {"pass": true, "time_s": 2.1},
     "reward_grounding": {"pass": true, "time_s": 3.4},
-    "isolation_leakage": {"pass": true, "time_s": 4.0}
+    "isolation_leakage": {"pass": true, "time_s": 4.0},
+    "task_feasibility": {"pass": true, "time_s": 1.2},
+    "difficulty_calibration": {"pass": true, "time_s": 0.3},
+    "npc_consistency": {"pass": true, "time_s": 6.1},
+    "realism_review": {"pass": true, "time_s": 3.8, "advisory": true}
   },
   "total_time_s": 45.1,
   "admitted": true,
@@ -419,7 +458,7 @@ Blue sees the **effects** in logs, never the NPC's internal reasoning:
 | 3 | Voice | TTS/STT (Whisper + voice synthesis) | Vishing + voice phishing detection |
 | 4 | Documents | Multimodal LLM (vision) | Malicious document analysis |
 
-### Validator Check 7: NPC Consistency
+### Validator Check 9: NPC Consistency
 
 For each NPC persona in the snapshot:
 1. Send a **calibrated test phishing email** matching the persona's role
@@ -427,3 +466,49 @@ For each NPC persona in the snapshot:
 3. NPC with `security_awareness <= 0.3` MUST fall for a well-crafted lure
 4. Verify communication style matches persona (formal CISO vs casual intern)
 5. Verify NPC never leaks flag values or truth graph details
+
+### Validator Check 10: Realism Review (LLM, Optional)
+
+This is the **only LLM call** in the validator pipeline. It is advisory -- can trigger a retry but never overrides a mechanical pass. Configurable via the `ValidatorCheck` protocol; remove it from the check list to run fully mechanical.
+
+The LLM reviews the snapshot for issues that mechanical checks can't catch:
+
+1. **Briefing leakage**: Do task briefings hint at the vuln class or leak exploitation details?
+2. **Scenario plausibility**: Does the vulnerability make sense for this host/service? (e.g., SQLi on a static file server is implausible)
+3. **Difficulty calibration**: Is the golden path step count appropriate for the tier?
+4. **Narrative coherence**: Do the company name, user roles, and service configurations form a believable enterprise?
+5. **Description alignment**: Does the challenge description match the planted vulns without leaking the answer?
+
+```python
+class RealismReviewCheck:
+    """LLM-based realism review. Advisory only."""
+
+    def __init__(self, model: str | None = None):
+        self.model = model or os.environ.get(
+            "OPENRANGE_VALIDATOR_MODEL", "anthropic/claude-haiku-4-5-20251001"
+        )
+
+    async def check(self, snapshot, containers) -> CheckResult:
+        response = await litellm.acompletion(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": REALISM_REVIEW_PROMPT},
+                {"role": "user", "content": json.dumps({
+                    "task_briefings": snapshot.task,
+                    "vuln_types": [v.type for v in snapshot.truth_graph.vulns],
+                    "topology_summary": snapshot.topology_summary(),
+                    "golden_path_length": len(snapshot.golden_path),
+                    "tier": snapshot.tier,
+                })},
+            ],
+            response_format={"type": "json_object"},
+        )
+        review = json.loads(response.choices[0].message.content)
+        return CheckResult(
+            passed=review["pass"],
+            details=review.get("issues", []),
+            advisory=True,  # Never overrides mechanical checks
+        )
+```
+
+**Important**: The LLM never sees flag values, vulnerable code, or golden path commands. It sees only summaries and briefings -- enough to judge realism, not enough to leak answers.

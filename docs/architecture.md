@@ -50,7 +50,7 @@ flowchart LR
 
 ## Key Principle
 
-**LLM generates, rules validate.** The builder/mutator uses LiteLLM (any model -- Claude, GPT-4o, open models) to generate snapshots creatively. The validator gate is purely mechanical: executable checks, no LLM judgment. Rewards are grounded in container state, never LLM-evaluated.
+**LLM generates, rules validate.** The builder/mutator uses LiteLLM (any model -- Claude, GPT-4o, open models) to generate snapshots creatively. The validator gate is primarily mechanical: 7 deterministic checks against live containers. An optional 8th check uses an LLM for realism review (advisory only -- can trigger retry but never overrides mechanical pass). Rewards are grounded in container state, never LLM-evaluated.
 
 ## Infrastructure
 
@@ -320,7 +320,7 @@ def resolve_component(class_path: str, kwargs: dict, protocol: type) -> Any:
 |----------|---------|-------------|
 | `SnapshotBuilder` | `LLMSnapshotBuilder` (LiteLLM) | `TemplateOnlyBuilder` (testing), `FileBuilder` (demo) |
 | `NPCBehavior` | `NullNPCBehavior` (Level 0) | `LLMNPCBehavior` (Level 1+), `RuleBasedNPCBehavior` (heuristic) |
-| `ValidatorCheck` | 7 built-in checks | Add custom checks via config |
+| `ValidatorCheck` | 7 mechanical + 1 LLM advisory | Add custom checks via config |
 
 ### Environment Variables
 
@@ -332,4 +332,4 @@ Env vars override YAML config at deploy time:
 | `OPENRANGE_NPC_MODEL` | NPC LLM model | `anthropic/claude-haiku-4-5-20251001` |
 | `LITELLM_API_KEY` | Global API key | (or model-specific keys) |
 
-Validator checks are **purely mechanical** by default -- no LLM calls. The only LLM-calling check is NPCConsistencyCheck (optional).
+Checks 1-7 are **purely mechanical** -- deterministic, no LLM. Check 7 (NPC consistency) uses an LLM for NPC persona testing. Check 8 (realism review) is an optional LLM advisory check. Both LLM checks are configurable -- remove them from the list to run fully mechanical.

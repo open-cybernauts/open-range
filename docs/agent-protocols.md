@@ -8,7 +8,7 @@ OpenRange has three kinds of "agents" that use LLMs as tools:
 |-----------|------|-----------|---------|
 | **Builder** | Generate snapshot specs from manifests | No (async between episodes) | LLM via LiteLLM |
 | **NPC Behavior** | Decide NPC response to stimuli | No (async on NPC schedule) | LLM via LiteLLM |
-| **Validator Checks** | Admission gate checks | No (async between episodes) | Mechanical (no LLM) |
+| **Validator Checks** | Admission gate checks | No (async between episodes) | 7 mechanical + 1 LLM advisory |
 
 These are NOT training agents (Red/Blue are external). They are **infrastructure components** that happen to use LLMs. Each follows the same pluggability pattern:
 
@@ -295,6 +295,16 @@ class NPCConsistencyCheck:
         )
 
     async def check(self, snapshot, containers) -> CheckResult: ...
+
+class RealismReviewCheck:
+    """LLM-based realism review. Advisory only — can trigger retry,
+    never overrides mechanical pass. Remove from check list to skip."""
+    def __init__(self, model: str | None = None):
+        self.model = model or os.environ.get(
+            "OPENRANGE_VALIDATOR_MODEL", "anthropic/claude-haiku-4-5-20251001"
+        )
+
+    async def check(self, snapshot, containers) -> CheckResult: ...
 ```
 
 ## Configuration
@@ -328,6 +338,9 @@ agents:
     - class: open_range.validator.NPCConsistencyCheck
       kwargs:
         npc_behavior_class: open_range.npc.LLMNPCBehavior
+        model: "anthropic/claude-haiku-4-5-20251001"
+    - class: open_range.validator.RealismReviewCheck  # LLM advisory, remove to skip
+      kwargs:
         model: "anthropic/claude-haiku-4-5-20251001"
 ```
 
