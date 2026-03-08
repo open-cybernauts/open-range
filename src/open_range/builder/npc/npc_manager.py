@@ -52,8 +52,59 @@ _ROLE_SERVICE_KEYWORDS: dict[str, list[str]] = {
 
 
 def _hosts_from_topology(topology: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract the list of host dicts from *topology*, tolerating missing keys."""
-    return topology.get("hosts") or []
+    """Return normalized host dicts for compiled or manifest-style topology.
+
+    ``compile_manifest_topology()`` canonicalizes ``topology["hosts"]`` to a
+    list of host names and keeps the richer metadata in ``host_catalog`` /
+    ``host_details``. NPC helpers need the richer dict shape, so normalize the
+    compiled form back into ``{"name": ..., "services": ...}`` records here.
+    """
+    raw_hosts = topology.get("hosts") or []
+    host_catalog = topology.get("host_catalog")
+    if not isinstance(host_catalog, dict):
+        host_catalog = {}
+    host_details = topology.get("host_details")
+    if not isinstance(host_details, dict):
+        host_details = {}
+
+    hosts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _append_host(raw_host: Any) -> None:
+        if isinstance(raw_host, dict):
+            name = str(raw_host.get("name", "")).strip()
+        else:
+            name = str(raw_host).strip()
+        if not name or name in seen:
+            return
+
+        merged: dict[str, Any] = {}
+        catalog_detail = host_catalog.get(name)
+        if isinstance(catalog_detail, dict):
+            merged.update(catalog_detail)
+        detailed_detail = host_details.get(name)
+        if isinstance(detailed_detail, dict):
+            merged.update(detailed_detail)
+        if isinstance(raw_host, dict):
+            merged.update(raw_host)
+
+        merged["name"] = name
+        services = merged.get("services")
+        merged["services"] = list(services) if isinstance(services, list) else []
+        seen.add(name)
+        hosts.append(merged)
+
+    if isinstance(raw_hosts, list):
+        for raw_host in raw_hosts:
+            _append_host(raw_host)
+
+    for name in host_catalog:
+        _append_host(name)
+
+    for name in host_details:
+        _append_host(name)
+
+    return hosts
 
 
 def _host_matches_keywords(host: dict[str, Any], keywords: list[str]) -> bool:
