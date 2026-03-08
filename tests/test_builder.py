@@ -83,6 +83,22 @@ async def test_template_builder_clamps_min_vulns_to_candidate_pool(tier1_manifes
 
 
 @pytest.mark.asyncio
+async def test_template_builder_handles_non_schema_difficulty_bounds(tier1_manifest):
+    from open_range.builder.builder import TemplateOnlyBuilder
+
+    builder = TemplateOnlyBuilder()
+    manifest = {
+        **tier1_manifest,
+        "bug_families": ["sqli"],
+        "difficulty": {**tier1_manifest.get("difficulty", {}), "min_vulns": -2, "max_vulns": 0},
+    }
+
+    spec = await builder.build(manifest, BuildContext(seed=9, tier=1))
+    assert len(spec.truth_graph.vulns) == 1
+    assert spec.truth_graph.vulns[0].type == "sqli"
+
+
+@pytest.mark.asyncio
 async def test_template_builder_avoids_previous_vulns(tier1_manifest):
     from open_range.builder.builder import TemplateOnlyBuilder
 
