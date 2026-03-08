@@ -92,6 +92,10 @@ RUN uv venv --python python3.11 /app/.venv \
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app/env/src:/app/env:$PYTHONPATH"
 ENV OPENRANGE_EXECUTION_MODE=subprocess
+# Enable the managed runtime so reset() boots real services from the manifest
+ENV OPENRANGE_RUNTIME_MANIFEST=manifests/tier1_basic.yaml
+ENV OPENRANGE_RUNTIME_VALIDATOR_PROFILE=offline
+ENV OPENRANGE_SNAPSHOT_POOL_SIZE=1
 
 # ── 6. Health check ──────────────────────────────────────────────────────────
 

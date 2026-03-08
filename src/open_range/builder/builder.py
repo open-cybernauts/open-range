@@ -163,7 +163,7 @@ class LLMSnapshotBuilder:
         temperature: float | None = 0.7,
         max_retries: int = 3,
         max_tokens: int = 32768,
-        timeout: float = 120.0,
+        timeout: float = 600.0,
     ) -> None:
         """Initialize the LLM-based snapshot builder.
 
