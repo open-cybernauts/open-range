@@ -17,6 +17,7 @@ spec:
     metadata:
       labels:
         app: {{ $name }}
+        {{- include "openrange.labels" $ | nindent 8 }}
         openrange/zone: {{ $svc.zone }}
     spec:
       hostname: {{ $name }}

@@ -46,9 +46,8 @@ class TestKubePodSet:
 
     def test_resolve_unknown_container(self):
         ps = KubePodSet(project_name="or-test", container_ids={})
-        ns, pod = ps._resolve("missing")
-        assert ns == "or-test"
-        assert pod == "missing"
+        with pytest.raises(KeyError):
+            ps._resolve("missing")
 
     @pytest.mark.asyncio
     async def test_exec_builds_kubectl_command(self):
@@ -220,6 +219,26 @@ class TestHelmRunner:
                 assert "helm" in call_args
                 assert "upgrade" in call_args
                 assert "--install" in call_args
+                assert "--set-string" in call_args
+                assert f"global.namePrefix={release.release_name}" in call_args
+
+    def test_boot_raises_when_no_pods_discovered(self):
+        runner = HelmRunner()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifacts = Path(tmpdir)
+            chart = artifacts / "openrange"
+            chart.mkdir()
+            (chart / "Chart.yaml").write_text("apiVersion: v2\nname: test\n")
+
+            with patch.object(runner, "_run") as mock_run, \
+                 patch.object(runner, "_discover_pods", return_value={}):
+                mock_run.return_value = MagicMock(stdout="", returncode=0)
+
+                with pytest.raises(RuntimeError, match="no pods were discovered"):
+                    runner.boot(
+                        snapshot_id="snap1",
+                        artifacts_dir=artifacts,
+                    )
 
     def test_teardown_calls_helm_uninstall(self):
         runner = HelmRunner()
@@ -247,13 +266,15 @@ class TestHelmRunner:
             "openrange-internal/db-def456 db\n"
             "openrange-external/attacker-ghi789 attacker\n"
         )
-        with patch.object(runner, "_run", return_value=mock_result):
+        with patch.object(runner, "_run", return_value=mock_result) as mock_run:
             pods = runner._discover_pods("or-test")
             assert pods == {
                 "web": "openrange-dmz/web-abc123",
                 "db": "openrange-internal/db-def456",
                 "attacker": "openrange-external/attacker-ghi789",
             }
+            call_args = mock_run.call_args[0][0]
+            assert any("app.kubernetes.io/instance=or-test" in arg for arg in call_args)
 
     def test_discover_pods_empty_returns_empty(self):
         runner = HelmRunner()

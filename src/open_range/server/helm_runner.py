@@ -109,7 +109,9 @@ class KubePodSet(ContainerSet):
         ``namespace/pod``.  Otherwise *container* is looked up by label in
         the release namespace.
         """
-        entry = self.container_ids.get(container, container)
+        if container not in self.container_ids:
+            raise KeyError(f"No live pod mapping found for service {container!r}")
+        entry = self.container_ids[container]
         if "/" in entry:
             parts = entry.split("/", 1)
             return parts[0], parts[1]
@@ -130,6 +132,11 @@ class BootedRelease:
     chart_dir: Path
     artifacts_dir: Path
     containers: KubePodSet
+
+    @property
+    def project_name(self) -> str:
+        """Backward-compat alias for older runtime call sites."""
+        return self.release_name
 
 
 # Keep the old name importable for callers that haven't migrated yet.
@@ -182,6 +189,10 @@ class HelmRunner:
 
         # Discover pods across namespaces
         pod_map = self._discover_pods(release_name)
+        if not pod_map:
+            raise RuntimeError(
+                f"Helm release {release_name} installed but no pods were discovered"
+            )
         pod_set = KubePodSet(
             project_name=release_name,
             container_ids=pod_map,
@@ -237,6 +248,7 @@ class HelmRunner:
                 "helm", "upgrade", "--install",
                 release_name,
                 str(chart_dir),
+                "--set-string", f"global.namePrefix={release_name}",
                 "--wait",
                 "--timeout", f"{int(self.install_timeout_s)}s",
             ],
@@ -253,7 +265,10 @@ class HelmRunner:
             [
                 "kubectl", "get", "pods",
                 "--all-namespaces",
-                "-l", "app.kubernetes.io/part-of=openrange",
+                "-l", (
+                    "app.kubernetes.io/part-of=openrange,"
+                    f"app.kubernetes.io/instance={release_name}"
+                ),
                 "-o", "jsonpath="
                 "{range .items[*]}"
                 "{.metadata.namespace}/{.metadata.name} "

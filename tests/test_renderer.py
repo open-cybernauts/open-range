@@ -219,13 +219,14 @@ def test_values_has_services(renderer, sqli_spec):
         assert services["db"]["zone"] == "internal"
 
 
-def test_values_firewall_skipped(renderer, sqli_spec):
-    """Firewall host has no image and should not appear in services."""
+def test_values_firewall_rendered_as_generic_host(renderer, sqli_spec):
+    """Firewall host should not be silently dropped from the rendered topology."""
     with tempfile.TemporaryDirectory() as tmpdir:
         out = Path(tmpdir) / "out"
         renderer.render(sqli_spec, out)
         values = yaml.safe_load((out / "openrange" / "values.yaml").read_text())
-        assert "firewall" not in values["services"]
+        assert "firewall" in values["services"]
+        assert values["services"]["firewall"]["image"]
 
 
 def test_values_has_firewall_rules(renderer, sqli_spec):
@@ -268,8 +269,8 @@ def test_values_attacker_has_sleep_command(renderer, sqli_spec):
         renderer.render(sqli_spec, out)
         values = yaml.safe_load((out / "openrange" / "values.yaml").read_text())
         cmd = values["services"]["attacker"]["command"]
-        assert "sleep" in cmd
-        assert "infinity" in cmd
+        assert any("sleep" in part for part in cmd)
+        assert any("infinity" in part for part in cmd)
 
 
 def test_values_has_users(renderer, sqli_spec):
@@ -365,6 +366,42 @@ def test_kind_config_has_port_mappings(renderer, sqli_spec):
         assert len(nodes) == 1
         mappings = nodes[0]["extraPortMappings"]
         assert len(mappings) >= 1
+
+
+def test_dmz_services_use_nodeport_exposure(renderer, sqli_spec):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "out"
+        renderer.render(sqli_spec, out)
+        values = yaml.safe_load((out / "openrange" / "values.yaml").read_text())
+        web = values["services"]["web"]
+        assert web["serviceType"] == "NodePort"
+        assert any("nodePort" in port for port in web["ports"])
+
+
+def test_renderer_supports_non_tier1_host_names(renderer):
+    spec = SnapshotSpec(
+        topology={
+            "hosts": [
+                {"name": "vpn_gw", "zone": "external", "os": "ubuntu:22.04", "services": ["openvpn", "sshd"]},
+                {"name": "jumpbox", "zone": "dmz", "os": "ubuntu:22.04", "services": ["sshd"]},
+                {"name": "monitoring", "zone": "management", "os": "ubuntu:22.04", "services": ["prometheus", "grafana", "alertmanager", "sshd"]},
+            ],
+            "zones": {
+                "external": ["vpn_gw"],
+                "dmz": ["jumpbox"],
+                "management": ["monitoring"],
+            },
+            "users": [],
+            "firewall_rules": [],
+        },
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "out"
+        renderer.render(spec, out)
+        values = yaml.safe_load((out / "openrange" / "values.yaml").read_text())
+        assert "vpn_gw" in values["services"]
+        assert "jumpbox" in values["services"]
+        assert "monitoring" in values["services"]
 
 
 def test_kind_config_disables_default_cni(renderer, sqli_spec):

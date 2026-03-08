@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import shlex
 import time
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from open_range.protocols import ContainerSet
+
+PAYLOAD_MANIFEST_NAME = "file-payloads.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +190,71 @@ class ComposeProjectRunner:
                 f"{' '.join(args)} failed with exit code {result.returncode}: {detail}"
             )
         return result
+
+
+def apply_rendered_payloads(
+    *,
+    containers: ContainerSet,
+    artifacts_dir: Path,
+    compose: dict[str, Any],
+) -> None:
+    """Copy rendered payload artifacts into a booted compose project."""
+    manifest_path = artifacts_dir / PAYLOAD_MANIFEST_NAME
+    if not manifest_path.exists():
+        return
+
+    payloads = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payloads, dict):
+        raise ValueError(f"{manifest_path} must contain a JSON object")
+
+    for file_key, rel_path in payloads.items():
+        src = artifacts_dir / str(rel_path)
+        if not src.exists():
+            raise FileNotFoundError(f"Rendered payload missing for {file_key}: {src}")
+
+        if file_key == "db:sql":
+            _apply_sql_payload(containers, src, compose)
+            continue
+
+        if ":" not in file_key:
+            continue
+
+        container, target_path = file_key.split(":", 1)
+        parent_dir = PurePosixPath(target_path).parent.as_posix() or "/"
+        _run_async(containers.exec(container, f"mkdir -p {shlex.quote(parent_dir)}"))
+        _run_async(containers.cp(container, str(src), target_path))
+
+
+def _apply_sql_payload(
+    containers: ContainerSet,
+    sql_path: Path,
+    compose: dict[str, Any],
+) -> None:
+    root_password = _mysql_root_password(compose)
+    _run_async(containers.cp("db", str(sql_path), "/tmp/openrange-generated.sql"))
+    _run_async(
+        containers.exec(
+            "db",
+            f"mysql -u root -p{shlex.quote(root_password)} < /tmp/openrange-generated.sql",
+        )
+    )
+    _run_async(containers.exec("db", "rm -f /tmp/openrange-generated.sql"))
+
+
+def _mysql_root_password(compose: dict[str, Any]) -> str:
+    db_service = compose.get("services", {}).get("db", {})
+    if not isinstance(db_service, dict):
+        return "r00tP@ss!"
+
+    environment = db_service.get("environment", {})
+    if isinstance(environment, dict):
+        return str(environment.get("MYSQL_ROOT_PASSWORD", "r00tP@ss!"))
+    if isinstance(environment, list):
+        for item in environment:
+            text = str(item)
+            if text.startswith("MYSQL_ROOT_PASSWORD="):
+                return text.split("=", 1)[1]
+    return "r00tP@ss!"
 
 
 def _run_async(coro):

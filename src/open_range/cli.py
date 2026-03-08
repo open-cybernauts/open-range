@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -433,11 +434,50 @@ def validate(snapshot: str, checks: str | None, docker: bool) -> None:
 
     # Containers stub for offline mode, real discovery for docker mode
     containers = ContainerSet()
-
     gate = ValidatorGate(check_instances)
     click.echo(f"Running {len(check_instances)} checks ...")
 
-    result = _run_async(gate.validate(spec, containers))
+    if docker:
+        from open_range.builder.renderer import KindRenderer
+        from open_range.server.helm_runner import HelmRunner
+
+        with tempfile.TemporaryDirectory(prefix="openrange-validate-") as tmpdir:
+            artifacts_dir = Path(tmpdir)
+            renderer = KindRenderer()
+            click.echo(f"Rendering Helm chart to {artifacts_dir} ...")
+            try:
+                renderer.render(spec, artifacts_dir)
+            except Exception as exc:
+                click.echo(f"Error: render failed: {exc}", err=True)
+                sys.exit(1)
+
+            chart_path = artifacts_dir / "openrange"
+            values_path = chart_path / "values.yaml"
+            if not chart_path.exists():
+                click.echo(f"Error: no openrange/ chart found in {artifacts_dir}", err=True)
+                sys.exit(1)
+
+            rendered_spec = spec.model_copy(deep=True)
+            if values_path.exists():
+                rendered_spec.compose = yaml.safe_load(values_path.read_text(encoding="utf-8")) or {}
+
+            snapshot_id = rendered_spec.lineage.snapshot_id or Path(snapshot).stem or "validation"
+            click.echo("Booting temporary Helm release for validation ...")
+            runner = HelmRunner()
+            project = None
+            try:
+                project = runner.boot(
+                    snapshot_id=snapshot_id,
+                    artifacts_dir=artifacts_dir,
+                    compose=rendered_spec.compose,
+                )
+                containers = project.containers
+                result = _run_async(gate.validate(rendered_spec, containers))
+            finally:
+                if project is not None:
+                    runner.teardown(project)
+    else:
+        result = _run_async(gate.validate(spec, containers))
 
     # Print results
     for cr in result.checks:

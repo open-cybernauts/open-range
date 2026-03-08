@@ -86,7 +86,54 @@ def test_policy_best_effort_when_only_security_available(sample_snapshot_spec):
     )
 
     assert len(ops) == 1
-    assert ops[0].op_type in {"seed_vuln", "add_benign_noise"}
+    assert ops[0].op_type == "seed_vuln"
+
+
+def test_policy_prefers_seed_vuln_over_benign_noise_when_available(sample_snapshot_spec):
+    settings = MutationPolicySettings(
+        profile_name="noise_biased",
+        mutation={
+            "curriculum_weight": 0.0,
+            "novelty_weight": 0.0,
+            "structural_gain_weight": 1.0,
+            "lineage_weight": 0.0,
+        },
+        structural_gains={
+            "add_service": 0.2,
+            "add_dependency_edge": 0.2,
+            "add_trust_edge": 0.2,
+            "add_user": 0.2,
+            "seed_vuln": 0.1,
+            "add_benign_noise": 2.5,
+            "default_gain": 0.0,
+        },
+    )
+    policy = PopulationMutationPolicy(settings=settings)
+    security = [
+        MutationOp(
+            mutation_id="seed_sqli",
+            op_type="seed_vuln",
+            target_selector={"host": "web"},
+            params={"vuln_type": "sqli"},
+        ),
+        MutationOp(
+            mutation_id="noise1",
+            op_type="add_benign_noise",
+            target_selector={"location": "siem:noise.log"},
+            params={"location": "siem:noise.log"},
+        ),
+    ]
+
+    ops, _score, _breakdown = policy.choose_mutations(
+        structural_candidates=[],
+        security_candidates=security,
+        snapshot=sample_snapshot_spec,
+        context=BuildContext(seed=1, tier=1),
+        rng=random.Random(11),
+    )
+
+    assert len(ops) == 1
+    assert ops[0].op_type == "seed_vuln"
 
 
 def test_policy_best_effort_when_only_structural_available(sample_snapshot_spec):

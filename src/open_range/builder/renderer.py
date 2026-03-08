@@ -34,33 +34,93 @@ _ZONE_CIDRS: dict[str, str] = {
     "management": "10.0.3.0/24",
 }
 
-# Default container images per service role
-_SERVICE_IMAGES: dict[str, str | None] = {
-    "web": "php:8.1-apache",
-    "db": "mysql:8.0",
-    "files": "dperson/samba:latest",
-    "mail": "mailhog/mailhog:latest",
-    "ldap": "osixia/openldap:1.5.0",
-    "siem": "balabit/syslog-ng:latest",
-    "attacker": "ubuntu:22.04",
-    "firewall": None,  # handled by NetworkPolicies
-}
+_GENERIC_LINUX_IMAGE = "ubuntu:22.04"
+_KALI_IMAGE = "kalilinux/kali-rolling"
+_WEB_IMAGE = "php:8.1-apache"
+_MYSQL_IMAGE = "mysql:8.0"
+_POSTGRES_IMAGE = "postgres:15"
+_SAMBA_IMAGE = "dperson/samba:latest"
+_MAIL_IMAGE = "mailhog/mailhog:latest"
+_LDAP_IMAGE = "osixia/openldap:1.5.0"
+_SYSLOG_IMAGE = "balabit/syslog-ng:latest"
+_REDIS_IMAGE = "redis:7-alpine"
+_JENKINS_IMAGE = "jenkins/jenkins:lts"
+_GITEA_IMAGE = "gitea/gitea:1.22.0"
+_PROMETHEUS_IMAGE = "prom/prometheus:latest"
+_GRAFANA_IMAGE = "grafana/grafana:latest"
+_DMZ_NODEPORT_BASE = 30080
 
-# Default ports per service role
-_SERVICE_PORTS: dict[str, list[dict[str, Any]]] = {
-    "web": [{"name": "http", "port": 80}, {"name": "https", "port": 443}],
-    "db": [{"name": "mysql", "port": 3306}],
-    "files": [{"name": "smb", "port": 445}],
-    "mail": [{"name": "smtp", "port": 25}, {"name": "imap", "port": 143}],
-    "ldap": [{"name": "ldap", "port": 389}, {"name": "ldaps", "port": 636}],
-    "siem": [{"name": "syslog", "port": 514}],
-    "attacker": [],
+_SERVICE_PORT_HINTS: dict[str, list[dict[str, Any]]] = {
+    "nginx": [{"name": "http", "port": 80}, {"name": "https", "port": 443}],
+    "apache": [{"name": "http", "port": 80}, {"name": "https", "port": 443}],
+    "http": [{"name": "http", "port": 80}],
+    "php-fpm": [{"name": "php-fpm", "port": 9000}],
+    "nodejs": [{"name": "nodejs", "port": 3000}],
+    "python3": [{"name": "python", "port": 8000}],
+    "django": [{"name": "django", "port": 8000}],
+    "mysql": [{"name": "mysql", "port": 3306}],
+    "mariadb": [{"name": "mysql", "port": 3306}],
+    "postgresql": [{"name": "postgres", "port": 5432}],
+    "redis": [{"name": "redis", "port": 6379}],
+    "memcached": [{"name": "memcached", "port": 11211}],
+    "samba": [{"name": "smb", "port": 445}],
+    "nfs": [{"name": "nfs", "port": 2049}],
+    "postfix": [{"name": "smtp", "port": 25}],
+    "dovecot": [{"name": "imap", "port": 143}],
+    "openldap": [{"name": "ldap", "port": 389}, {"name": "ldaps", "port": 636}],
+    "kerberos": [{"name": "kerberos", "port": 88}],
+    "rsyslog": [{"name": "syslog", "port": 514}],
+    "elasticsearch": [{"name": "elasticsearch", "port": 9200}],
+    "kibana": [{"name": "kibana", "port": 5601}],
+    "prometheus": [{"name": "prometheus", "port": 9090}],
+    "grafana": [{"name": "grafana", "port": 3000}],
+    "alertmanager": [{"name": "alertmanager", "port": 9093}],
+    "jenkins": [{"name": "jenkins", "port": 8080}],
+    "gitea": [{"name": "gitea", "port": 3000}, {"name": "gitea-ssh", "port": 22}],
+    "sonarqube": [{"name": "sonarqube", "port": 9000}],
+    "openvpn": [{"name": "openvpn", "port": 1194}],
+    "sshd": [{"name": "ssh", "port": 22}],
+    "ssh-client": [{"name": "ssh", "port": 22}],
+    "snort": [{"name": "snort", "port": 514}],
 }
 
 
 def _sanitize_key(path: str) -> str:
     """Convert a file path to a ConfigMap-safe key (RFC 1123 subdomain)."""
     return re.sub(r"[^a-zA-Z0-9._-]", "-", path.strip("/"))
+
+
+def _host_name(raw_host: dict[str, Any] | str) -> str:
+    if isinstance(raw_host, dict):
+        return str(raw_host.get("name", "")).strip()
+    return str(raw_host).strip()
+
+
+def _host_services(raw_host: dict[str, Any] | str | None) -> list[str]:
+    if not isinstance(raw_host, dict):
+        return []
+    raw_services = raw_host.get("services", [])
+    if not isinstance(raw_services, list):
+        return []
+    services: list[str] = []
+    seen: set[str] = set()
+    for raw_service in raw_services:
+        service_name = str(raw_service).strip().lower()
+        if not service_name or service_name in seen:
+            continue
+        seen.add(service_name)
+        services.append(service_name)
+    return services
+
+
+def _find_host_record(
+    host_entries: list[dict[str, Any] | str],
+    host_name: str,
+) -> dict[str, Any] | str:
+    for raw_host in host_entries:
+        if _host_name(raw_host) == host_name:
+            return raw_host
+    return host_name
 
 
 class KindRenderer:
@@ -119,6 +179,10 @@ class KindRenderer:
         zones = topology.get("zones", {})
         users = topology.get("users", [])
         hosts_raw = topology.get("hosts", [])
+        host_entries = [
+            raw for raw in hosts_raw
+            if isinstance(raw, (dict, str))
+        ]
 
         # Zone config
         zone_config: dict[str, dict[str, Any]] = {}
@@ -135,24 +199,35 @@ class KindRenderer:
                 for h in zone_hosts:
                     host_to_zone[h] = zone_name
 
+        public_node_ports = self._public_node_ports(host_entries, host_to_zone)
+
         # Service configs
         services: dict[str, dict[str, Any]] = {}
-        for h in hosts_raw:
-            name = h["name"] if isinstance(h, dict) else str(h)
-            image = _SERVICE_IMAGES.get(name)
-            if image is None:
+        for h in host_entries:
+            name = _host_name(h)
+            if not name:
                 continue
             zone = host_to_zone.get(name, "default")
+            host_services = _host_services(h)
+            image = self._service_image(name=name, host_services=host_services, raw_host=h)
+            ports = self._service_ports(name=name, host_services=host_services)
+            if zone == "dmz":
+                for port_info in ports:
+                    node_port = public_node_ports.get((name, int(port_info["port"])))
+                    if node_port is not None:
+                        port_info["nodePort"] = node_port
 
             svc: dict[str, Any] = {
                 "enabled": True,
                 "image": image,
                 "zone": zone,
-                "ports": deepcopy(_SERVICE_PORTS.get(name, [])),
-                "env": self._service_env(name, topology),
+                "ports": ports,
+                "env": self._service_env(name, topology, host_services),
             }
+            if zone == "dmz" and ports:
+                svc["serviceType"] = "NodePort"
 
-            cmd = self._service_command(name)
+            cmd = self._service_command(name, image=image, host_services=host_services)
             if cmd:
                 svc["command"] = cmd
 
@@ -191,16 +266,21 @@ class KindRenderer:
     # Per-service helpers
     # ------------------------------------------------------------------
 
-    def _service_env(self, name: str, topology: dict[str, Any]) -> dict[str, str]:
+    def _service_env(
+        self,
+        name: str,
+        topology: dict[str, Any],
+        host_services: list[str],
+    ) -> dict[str, str]:
         """Build environment variables for a service."""
         domain = topology.get("domain", "acmecorp.local")
         org_name = topology.get("org_name", "AcmeCorp")
-        prefix = "openrange"
         users = topology.get("users", [])
         users = users if isinstance(users, list) else []
+        service_set = set(host_services)
 
         env: dict[str, str] = {}
-        if name == "web":
+        if name in {"web", "partner_portal"} or "nginx" in service_set:
             env.update({
                 "DB_HOST": "db",
                 "DB_USER": _find_db_user(users),
@@ -209,7 +289,7 @@ class KindRenderer:
                 "LDAP_HOST": "ldap",
                 "LDAP_BASE_DN": ",".join(f"dc={p}" for p in domain.split(".")),
             })
-        elif name == "db":
+        elif name == "db" or "mysql" in service_set:
             env.update({
                 "MYSQL_ROOT_PASSWORD": str(
                     topology.get("mysql_root_password", "r00tP@ss!")
@@ -218,7 +298,7 @@ class KindRenderer:
                 "MYSQL_USER": _find_db_user(users),
                 "MYSQL_PASSWORD": _find_db_pass(users),
             })
-        elif name == "ldap":
+        elif name == "ldap" or "openldap" in service_set:
             env.update({
                 "LDAP_ORGANISATION": org_name,
                 "LDAP_DOMAIN": domain,
@@ -234,9 +314,14 @@ class KindRenderer:
         return env
 
     @staticmethod
-    def _service_command(name: str) -> list[str] | None:
+    def _service_command(
+        name: str,
+        *,
+        image: str,
+        host_services: list[str],
+    ) -> list[str] | None:
         """Return a startup command override, or ``None``."""
-        if name == "web":
+        if image == _WEB_IMAGE:
             return [
                 "bash", "-c",
                 (
@@ -244,7 +329,7 @@ class KindRenderer:
                     "apache2-foreground"
                 ),
             ]
-        if name == "attacker":
+        if image == _KALI_IMAGE or name == "attacker":
             return [
                 "bash", "-c",
                 (
@@ -256,6 +341,8 @@ class KindRenderer:
                     "sleep infinity"
                 ),
             ]
+        if image == _GENERIC_LINUX_IMAGE:
+            return ["bash", "-c", "sleep infinity"]
         return None
 
     @staticmethod
@@ -320,25 +407,38 @@ class KindRenderer:
     # Kind cluster config
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _build_kind_config(spec: SnapshotSpec) -> dict[str, Any]:
+    def _build_kind_config(self, spec: SnapshotSpec) -> dict[str, Any]:
         """Generate a Kind cluster config with port mappings for DMZ access."""
         zones = spec.topology.get("zones", {})
         dmz_hosts = zones.get("dmz", [])
         if not isinstance(dmz_hosts, list):
             dmz_hosts = []
 
-        # Map DMZ service ports to host ports starting at 30080
+        host_entries = [
+            raw for raw in spec.topology.get("hosts", [])
+            if isinstance(raw, (dict, str))
+        ]
+        host_to_zone: dict[str, str] = {}
+        for zone_name, zone_hosts in zones.items():
+            if isinstance(zone_hosts, list):
+                for host in zone_hosts:
+                    host_to_zone[str(host)] = str(zone_name)
+        public_node_ports = self._public_node_ports(host_entries, host_to_zone)
+
         port_mappings: list[dict[str, Any]] = []
-        host_port = 30080
         for host_name in dmz_hosts:
-            for port_info in _SERVICE_PORTS.get(host_name, []):
+            for port_info in self._service_ports(
+                name=str(host_name),
+                host_services=_host_services(_find_host_record(host_entries, str(host_name))),
+            ):
+                node_port = public_node_ports.get((str(host_name), int(port_info["port"])))
+                if node_port is None:
+                    continue
                 port_mappings.append({
-                    "containerPort": host_port,
-                    "hostPort": host_port,
+                    "containerPort": node_port,
+                    "hostPort": node_port,
                     "protocol": "TCP",
                 })
-                host_port += 1
 
         if not port_mappings:
             port_mappings = [
@@ -360,6 +460,111 @@ class KindRenderer:
                 },
             ],
         }
+
+    @staticmethod
+    def _service_image(
+        *,
+        name: str,
+        host_services: list[str],
+        raw_host: dict[str, Any] | str,
+    ) -> str:
+        service_set = set(host_services)
+        host_os = ""
+        if isinstance(raw_host, dict):
+            host_os = str(raw_host.get("os", "")).strip().lower()
+
+        if name == "attacker" or "kali" in host_os:
+            return _KALI_IMAGE
+        if "mysql" in service_set or name == "db":
+            return _MYSQL_IMAGE
+        if "postgresql" in service_set:
+            return _POSTGRES_IMAGE
+        if "openldap" in service_set or name == "ldap":
+            return _LDAP_IMAGE
+        if "jenkins" in service_set:
+            return _JENKINS_IMAGE
+        if "gitea" in service_set:
+            return _GITEA_IMAGE
+        if "prometheus" in service_set:
+            return _PROMETHEUS_IMAGE
+        if "grafana" in service_set:
+            return _GRAFANA_IMAGE
+        if "redis" in service_set or "memcached" in service_set or name == "cache":
+            return _REDIS_IMAGE
+        if "samba" in service_set or "nfs" in service_set or name == "files":
+            return _SAMBA_IMAGE
+        if "postfix" in service_set or "dovecot" in service_set or name == "mail":
+            return _MAIL_IMAGE
+        if (
+            {"nginx", "php-fpm", "nodejs", "python3", "django", "react"}.intersection(service_set)
+            or name in {"web", "partner_portal"}
+        ):
+            return _WEB_IMAGE
+        if (
+            {"rsyslog", "elasticsearch", "kibana", "snort"}.intersection(service_set)
+            or name == "siem"
+        ):
+            return _SYSLOG_IMAGE
+        return _GENERIC_LINUX_IMAGE
+
+    @staticmethod
+    def _service_ports(
+        *,
+        name: str,
+        host_services: list[str],
+    ) -> list[dict[str, Any]]:
+        ports: list[dict[str, Any]] = []
+        seen: set[tuple[str, int]] = set()
+        for service_name in host_services:
+            for port_info in _SERVICE_PORT_HINTS.get(service_name, []):
+                key = (str(port_info["name"]), int(port_info["port"]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                ports.append(deepcopy(port_info))
+
+        if ports:
+            return ports
+
+        if name == "web":
+            return deepcopy(_SERVICE_PORT_HINTS["nginx"])
+        if name == "db":
+            return deepcopy(_SERVICE_PORT_HINTS["mysql"])
+        if name == "mail":
+            return (
+                deepcopy(_SERVICE_PORT_HINTS["postfix"])
+                + deepcopy(_SERVICE_PORT_HINTS["dovecot"])
+            )
+        if name == "ldap":
+            return deepcopy(_SERVICE_PORT_HINTS["openldap"])
+        if name == "siem":
+            return deepcopy(_SERVICE_PORT_HINTS["rsyslog"])
+        if name == "files":
+            return deepcopy(_SERVICE_PORT_HINTS["samba"])
+        return []
+
+    @staticmethod
+    def _public_node_ports(
+        host_entries: list[dict[str, Any] | str],
+        host_to_zone: dict[str, str],
+    ) -> dict[tuple[str, int], int]:
+        assignments: dict[tuple[str, int], int] = {}
+        next_port = _DMZ_NODEPORT_BASE
+        for raw_host in host_entries:
+            name = _host_name(raw_host)
+            if not name or host_to_zone.get(name) != "dmz":
+                continue
+            for port_info in KindRenderer._service_ports(
+                name=name,
+                host_services=_host_services(raw_host),
+            ):
+                port = int(port_info["port"])
+                key = (name, port)
+                if key in assignments:
+                    continue
+                assignments[key] = next_port
+                next_port += 1
+        return assignments
 
 
 # ---------------------------------------------------------------------------

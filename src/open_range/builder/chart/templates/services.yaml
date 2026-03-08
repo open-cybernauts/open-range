@@ -9,7 +9,7 @@ metadata:
     app: {{ $name }}
     {{- include "openrange.labels" $ | nindent 4 }}
 spec:
-  type: ClusterIP
+  type: {{ $svc.serviceType | default "ClusterIP" }}
   selector:
     app: {{ $name }}
   ports:
@@ -18,6 +18,9 @@ spec:
       port: {{ .port }}
       targetPort: {{ .port }}
       protocol: {{ .protocol | default "TCP" }}
+      {{- if .nodePort }}
+      nodePort: {{ .nodePort }}
+      {{- end }}
     {{- end }}
 ---
 {{- end }}
