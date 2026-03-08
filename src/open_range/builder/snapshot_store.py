@@ -70,6 +70,10 @@ class SnapshotStore:
             "flag_count": len(snapshot.flags),
             "npc_count": len(snapshot.npc_personas),
             "has_compose": bool(snapshot.compose),
+            "parent_snapshot_id": snapshot.lineage.parent_snapshot_id,
+            "root_snapshot_id": snapshot.lineage.root_snapshot_id,
+            "generation_depth": snapshot.lineage.generation_depth,
+            "mutation_summary": list(snapshot.lineage.mutation_summary),
             "stored_at": time.time(),
         }
         meta_path = snap_dir / "metadata.json"

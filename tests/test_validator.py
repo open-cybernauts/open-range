@@ -10,6 +10,8 @@ from open_range.protocols import (
     EvidenceItem,
     FlagSpec,
     GoldenPathStep,
+    MutationOp,
+    MutationPlan,
     NPCPersona,
     SnapshotSpec,
     TaskSpec,
@@ -17,6 +19,58 @@ from open_range.protocols import (
     Vulnerability,
 )
 from open_range.validator.validator import ValidatorGate, ValidationResult
+
+
+@pytest.mark.asyncio
+async def test_manifest_compliance_rejects_illegal_mutation_plan(
+    tier1_manifest,
+    sample_snapshot_spec,
+    mock_containers,
+):
+    from open_range.validator.manifest_compliance import ManifestComplianceCheck
+
+    spec = sample_snapshot_spec.model_copy(deep=True)
+    spec.mutation_plan = MutationPlan(
+        parent_snapshot_id="root_snap",
+        ops=[
+            MutationOp(
+                mutation_id="illegal1",
+                op_type="seed_vuln",
+                target_selector={"host": "web"},
+                params={"vuln_type": "totally_fake_bug"},
+            )
+        ],
+    )
+    spec.lineage.parent_snapshot_id = "root_snap"
+    spec.lineage.generation_depth = 1
+
+    result = await ManifestComplianceCheck(tier1_manifest).check(spec, mock_containers)
+    assert result.passed is False
+    assert "illegal family" in result.error
+
+
+@pytest.mark.asyncio
+async def test_graph_consistency_rejects_missing_parent_lineage(sample_snapshot_spec, mock_containers):
+    from open_range.validator.graph_consistency import GraphConsistencyCheck
+
+    spec = sample_snapshot_spec.model_copy(deep=True)
+    spec.mutation_plan = MutationPlan(
+        parent_snapshot_id="root_snap",
+        ops=[
+            MutationOp(
+                mutation_id="mut1",
+                op_type="add_benign_noise",
+                target_selector={"location": "siem:noise.log"},
+                params={"location": "siem:noise.log"},
+            )
+        ],
+    )
+    spec.lineage.generation_depth = 1
+    spec.lineage.parent_snapshot_id = None
+
+    result = await GraphConsistencyCheck().check(spec, mock_containers)
+    assert result.passed is False
+    assert "missing parent_snapshot_id" in result.error
 
 
 # ---------------------------------------------------------------------------

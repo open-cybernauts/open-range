@@ -46,6 +46,40 @@ class BuildContext(BaseModel):
     )
 
 
+class MutationOp(BaseModel):
+    """Single typed edit applied to derive a child snapshot from a parent."""
+
+    mutation_id: str
+    op_type: str
+    target_selector: dict[str, str] = Field(default_factory=dict)
+    magnitude: int = 1
+    params: dict[str, Any] = Field(default_factory=dict)
+    expected_effects: list[str] = Field(default_factory=list)
+    risk_tags: list[str] = Field(default_factory=list)
+
+
+class MutationPlan(BaseModel):
+    """Ordered list of mutations used to produce a child snapshot."""
+
+    parent_snapshot_id: str | None = None
+    ops: list[MutationOp] = Field(default_factory=list)
+    predicted_complexity_delta: int = 0
+    predicted_chain_delta: int = 0
+    predicted_novelty: float = 0.0
+
+
+class LineageMetadata(BaseModel):
+    """Lineage and mutation provenance for a stored snapshot."""
+
+    snapshot_id: str = ""
+    parent_snapshot_id: str | None = None
+    root_snapshot_id: str = ""
+    manifest_id: str = ""
+    generation_depth: int = 0
+    mutation_ids: list[str] = Field(default_factory=list)
+    mutation_summary: list[str] = Field(default_factory=list)
+
+
 class Vulnerability(BaseModel):
     """Single planted vulnerability in the truth graph."""
 
@@ -160,6 +194,8 @@ class SnapshotSpec(BaseModel):
     task: TaskSpec = Field(default_factory=TaskSpec)
     compose: dict[str, Any] = Field(default_factory=dict)  # rendered docker-compose
     files: dict[str, str] = Field(default_factory=dict)  # path -> content
+    lineage: LineageMetadata = Field(default_factory=LineageMetadata)
+    mutation_plan: MutationPlan | None = None
 
 
 class Stimulus(BaseModel):

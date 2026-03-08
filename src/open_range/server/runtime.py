@@ -32,6 +32,8 @@ from open_range.protocols import (
     SnapshotSpec,
 )
 from open_range.server.models import RangeState
+from open_range.validator.graph_consistency import GraphConsistencyCheck
+from open_range.validator.manifest_compliance import ManifestComplianceCheck
 from open_range.validator.task_feasibility import TaskFeasibilityCheck
 from open_range.validator.validator import ValidationResult, ValidatorGate
 
@@ -242,11 +244,13 @@ def _default_builder() -> SnapshotBuilder:
     )
 
 
-def _default_validator() -> ValidatorGate:
+def _default_validator(manifest: dict[str, Any]) -> ValidatorGate:
     # These checks work directly against the compiled snapshot spec and do not
     # require booted containers. They are the safe default for shipped mode.
     return ValidatorGate(
         [
+            ManifestComplianceCheck(manifest),
+            GraphConsistencyCheck(),
             StructuralSnapshotCheck(),
             TaskFeasibilityCheck(),
         ]
@@ -280,7 +284,7 @@ class ManagedSnapshotRuntime:
         self.store = SnapshotStore(str(self.store_dir))
         self.builder = builder or _default_builder()
         self.mutator = Mutator(self.builder)
-        self.validator = validator or _default_validator()
+        self.validator = validator or _default_validator(self.manifest)
         self.renderer = SnapshotRenderer()
         self.curriculum = CurriculumTracker()
         self.pool_size = max(1, pool_size)
@@ -452,11 +456,14 @@ class ManagedSnapshotRuntime:
         last_error: str | None = None
         for attempt in range(1, self.generation_retries + 1):
             context = self._build_context()
+            parent_entry = self._select_parent_entry()
             snapshot = _run_coro_sync(
                 self.mutator.mutate(
                     self.manifest,
                     context=context,
                     error={"message": last_error} if last_error else None,
+                    parent_snapshot=parent_entry.snapshot if parent_entry else None,
+                    parent_snapshot_id=parent_entry.snapshot_id if parent_entry else None,
                 )
             )
             validation = self._validate_snapshot(snapshot)
@@ -516,6 +523,11 @@ class ManagedSnapshotRuntime:
         prefix = "snap_" + "_".join(vuln_types[:3]) if vuln_types else "snap_generated"
         return f"{prefix}_{int(time.time() * 1000)}"
 
+    def _select_parent_entry(self):
+        if self.snapshot_count() == 0:
+            return None
+        return _run_coro_sync(self.store.select_entry(strategy=self.selection_strategy))
+
     def _snapshot_dir(self, snapshot_id: str) -> Path:
         return self.store_dir / snapshot_id
 
@@ -532,6 +544,9 @@ class ManagedSnapshotRuntime:
         topology = dict(rendered.topology)
         topology["snapshot_id"] = snapshot_id
         rendered.topology = topology
+        rendered.lineage.snapshot_id = snapshot_id
+        if not rendered.lineage.root_snapshot_id:
+            rendered.lineage.root_snapshot_id = snapshot_id
 
         snapshot_dir = self._snapshot_dir(snapshot_id)
         artifacts_dir = self._artifacts_dir(snapshot_id)

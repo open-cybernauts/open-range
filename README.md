@@ -12,15 +12,17 @@ A multi-agent cybersecurity gymnasium on [OpenEnv](https://github.com/meta-pytor
 
 ## How It Works
 
-A **manifest** declares a family of legal enterprise worlds — topology, services, identities, vulnerability classes, difficulty. A shared **ManagedSnapshotRuntime** inside the shipped OpenEnv server process owns the snapshot pool. It loads admitted snapshots from disk or preloads a deterministic pool from the manifest, renders each admitted snapshot into concrete Docker artifacts under `snapshots/<id>/artifacts`, then optionally refills that pool in the background. `reset()` selects one frozen admitted snapshot. `step()` runs commands inside it.
+A **manifest** declares a family of legal enterprise worlds — topology, services, identities, trust relationships, vulnerability classes, and mutation bounds. A shared **ManagedSnapshotRuntime** inside the shipped OpenEnv server process owns the admitted snapshot population. It compiles a root snapshot from the manifest, then derives child snapshots by applying explicit typed mutations to admitted parents. Each candidate child is validated before render/materialization and then stored under `snapshots/<id>/`. `reset()` selects one frozen admitted snapshot. `step()` runs commands inside it.
 
 ```mermaid
 flowchart LR
-    M[Manifest<br/>topology, services,<br/>bug families, difficulty] --> R[ManagedSnapshotRuntime<br/>shared inside server process]
-    R --> B[Builder / mutator<br/>deterministic by default,<br/>LiteLLM optional]
-    B --> V{Validator}
-    V -->|fail| B
-    V -->|pass| S[Frozen admitted snapshots]
+    M[Manifest<br/>legal family +<br/>mutation envelope] --> B[Base snapshot compiler]
+    B --> P[Admitted root snapshot]
+    P --> R[ManagedSnapshotRuntime<br/>shared inside server process]
+    R --> U[Parent selector +<br/>typed mutator]
+    U --> V{Validator<br/>manifest + graph +<br/>runtime checks}
+    V -->|fail| U
+    V -->|pass| S[Admitted snapshot population]
     S --> E["reset() → step() → obs + reward"]
 
     style V fill:#ffd93d,color:#333
@@ -64,15 +66,15 @@ uv run pytest tests/ -v --tb=short
 
 ## Core Components
 
-**Manifest** — YAML defining the legal world: hosts, zones, services, users, NPCs, data assets, credential policies, monitoring coverage, trust relationships, and which vulnerability classes the Builder may plant. Three example manifests ship (healthcare, fintech, SaaS) at tiers 1-3.
+**Manifest** — YAML defining the legal world family and mutation envelope: hosts, zones, services, users, NPCs, data assets, credential policies, monitoring coverage, trust relationships, and which vulnerability classes the runtime may plant or extend. Three example manifests ship (healthcare, fintech, SaaS) at tiers 1-3.
 
-**ManagedSnapshotRuntime** — Shared singleton created at server startup. Owns the `SnapshotStore`, builder/mutator, validator gate, `SnapshotRenderer`, snapshot preload, optional background refill, and episode-result feedback. This is the hidden orchestrator behind the env; callers still only see `reset()`, `step()`, and `state()`.
+**ManagedSnapshotRuntime** — Shared singleton created at server startup. Owns the `SnapshotStore`, base builder, parent-snapshot mutator, validator gate, `SnapshotRenderer`, snapshot preload, optional background refill, and episode-result feedback. This is the hidden orchestrator behind the env; callers still only see `reset()`, `step()`, and `state()`.
 
-**Builder** — Takes a manifest + curriculum context, outputs a `SnapshotSpec`: topology graph, truth graph (planted vulns + exploit chain), evidence graph (what Blue can find), flags, golden path, NPC traffic, and task briefings. Three implementations: `LLMSnapshotBuilder` (production, via litellm), `TemplateOnlyBuilder` (deterministic shipped default), `FileBuilder` (load from disk).
+**Builder / Mutator** — The base builder compiles an initial `SnapshotSpec` from a manifest. The mutator then derives child `SnapshotSpec`s from admitted parents using typed mutation plans plus curriculum context. Each snapshot carries lineage metadata (`snapshot_id`, `parent_snapshot_id`, `root_snapshot_id`, generation depth, mutation summary). Three base builders ship: `LLMSnapshotBuilder` (production, via litellm), `TemplateOnlyBuilder` (deterministic shipped default), `FileBuilder` (load from disk).
 
 The deployed package exposes the standard OpenEnv `reset()`, `step()`, and `state()` contract through `server.app:app`, which is the entrypoint referenced by `openenv.yaml`.
 
-**Validator** — Admission gate for candidate snapshots. The shipped runtime uses structural checks that operate on the compiled `SnapshotSpec` without requiring live model calls; richer container-backed checks remain available for private/local generation workflows.
+**Validator** — Admission gate for candidate snapshots. The shipped runtime now enforces manifest compliance and graph consistency before structural/task checks. These mechanical checks operate on the compiled `SnapshotSpec` without requiring live model calls; richer container-backed checks remain available for private/local generation workflows.
 
 **Environment** — `RangeEnvironment(Environment)` following the OpenEnv contract. `reset()` asks the shared runtime for a frozen admitted snapshot. `step(action)` routes commands to the appropriate container — Red runs on the attacker box, Blue runs on the SIEM. No artificial command allowlists; the container's installed tools are the constraint.
 
