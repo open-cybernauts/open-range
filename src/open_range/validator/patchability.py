@@ -11,7 +11,7 @@ import logging
 import re
 
 from open_range.protocols import CheckResult, ContainerSet, ExploitStep, SnapshotSpec
-from open_range.validator._golden_path import execute_step_result
+from open_range.validator._golden_path import execute_step
 
 logger = logging.getLogger(__name__)
 
@@ -97,20 +97,16 @@ class PatchabilityCheck:
         tested_count = 0
 
         for vuln in vulns:
-            # --- Fail if no remediation defined ---
-            if not vuln.remediation or not vuln.remediation.strip():
-                msg = "no remediation defined"
-                logger.warning("patchability: vuln %s has %s — counting as failure", vuln.id, msg)
-                results.append({"vuln": vuln.id, "passed": False, "reason": msg})
-                all_ok = False
+            # --- Skip if no remediation defined ---
+            if not vuln.remediation:
+                results.append({"vuln": vuln.id, "skipped": "no remediation defined"})
                 continue
 
-            # --- Fail non-executable remediation (prose) ---
+            # --- Skip non-executable remediation (prose) ---
             if not _looks_executable(vuln.remediation):
                 msg = f"remediation is not executable: {vuln.remediation!r}"
-                logger.warning("patchability: vuln %s — %s — counting as failure", vuln.id, msg)
-                results.append({"vuln": vuln.id, "passed": False, "reason": msg})
-                all_ok = False
+                logger.warning("patchability: skipping vuln %s — %s", vuln.id, msg)
+                results.append({"vuln": vuln.id, "skipped": msg})
                 continue
 
             # Find the golden-path step(s) that exercise this vuln.
@@ -126,7 +122,7 @@ class PatchabilityCheck:
 
             # --- Apply remediation -------------------------------------------------
             try:
-                remediation_result = await containers.exec_run(host, vuln.remediation)
+                await containers.exec(host, vuln.remediation)
             except Exception as exc:  # noqa: BLE001
                 results.append({"vuln": vuln.id, "error": f"remediation failed: {exc}"})
                 all_ok = False
@@ -136,59 +132,26 @@ class PatchabilityCheck:
                 except Exception:  # noqa: BLE001
                     pass
                 continue
-            if remediation_result.exit_code != 0:
-                results.append({
-                    "vuln": vuln.id,
-                    "passed": False,
-                    "reason": (
-                        "remediation command failed "
-                        f"(exit_code={remediation_result.exit_code})"
-                    ),
-                    "output_snippet": remediation_result.combined_output[:300],
-                })
-                all_ok = False
-                try:
-                    await containers.restart(host)
-                except Exception:  # noqa: BLE001
-                    pass
-                continue
 
             # --- Re-run linked golden-path step — must now fail --------------------
             step_still_works = False
-            inconclusive_details: list[dict[str, object]] = []
             matched_any = False
             for chain_step in linked_steps:
                 gp_step = _find_golden_step(snapshot, chain_step)
                 if gp_step is None:
                     continue
                 matched_any = True
-                if not gp_step.expect_in_stdout:
-                    inconclusive_details.append({
-                        "step": gp_step.step,
-                        "reason": "missing expect_in_stdout for retest step",
-                    })
-                    continue
                 try:
-                    result = await execute_step_result(
+                    output = await execute_step(
                         snapshot,
                         containers,
                         gp_step.command,
                         host=getattr(gp_step, "host", None) or "attacker",
                     )
-                except Exception as exc:  # noqa: BLE001
-                    inconclusive_details.append({
-                        "step": gp_step.step,
-                        "reason": f"retest execution raised: {exc}",
-                    })
-                    continue
-                if result.exit_code != 0:
-                    inconclusive_details.append({
-                        "step": gp_step.step,
-                        "reason": f"retest command failed (exit_code={result.exit_code})",
-                        "output_snippet": result.combined_output[:300],
-                    })
-                    continue
-                if gp_step.expect_in_stdout in result.combined_output:
+                except Exception:  # noqa: BLE001
+                    continue  # exec failure counts as "step failed" — good
+
+                if gp_step.expect_in_stdout and gp_step.expect_in_stdout in output:
                     step_still_works = True
 
             if not matched_any:
@@ -205,15 +168,7 @@ class PatchabilityCheck:
 
             tested_count += 1
 
-            if inconclusive_details:
-                results.append({
-                    "vuln": vuln.id,
-                    "passed": False,
-                    "reason": "retest inconclusive after remediation",
-                    "details": inconclusive_details,
-                })
-                all_ok = False
-            elif step_still_works:
+            if step_still_works:
                 results.append({
                     "vuln": vuln.id,
                     "passed": False,

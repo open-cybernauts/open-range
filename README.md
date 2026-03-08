@@ -14,8 +14,6 @@ tags:
 
 # OpenRange
 
-![OpenRange: Multi-Agent Cybersecurity Training Gymnasium](assets/evolving_gym_hero.png)
-
 A multi-agent cybersecurity gymnasium on [OpenEnv](https://github.com/meta-pytorch/OpenEnv). Red and Blue agents train on validated enterprise networks that mutate between episodes.
 
 ---
@@ -68,52 +66,20 @@ uv run openrange synthetic-data \
   --output data/sft_red.jsonl \
   --roles red
 
-# Merge local bootstrap traces and tool context into generated output
-uv run openrange synthetic-data \
-  --manifest manifests/tier1_basic.yaml \
-  --output data/synthetic_sft_5.jsonl \
-  --num-traces 5 \
-  --roles red \
-  --bootstrap-traces data/sft.jsonl \
-  --tool-info data/tool_info.md
-
 # Run the OpenEnv client against a running server
 uv run python examples/remote_client_demo.py --base-url http://localhost:8000
 
-# Build, validate, and boot a fresh range locally (Tier 2 example)
-export OPENRANGE_BUILDER_MODEL="${OPENRANGE_BUILDER_MODEL:-azure/gpt-5.2-codex}"
-uv run python -m open_range.lint manifests/tier2_corporate.yaml
-uv run openrange build \
-  -m manifests/tier2_corporate.yaml \
-  -o /tmp/openrange-tier2/snapshot \
-  --tier 2 \
-  --model "$OPENRANGE_BUILDER_MODEL" \
-  --max-tokens 4096 \
-  --timeout 180
-uv run openrange validate -s /tmp/openrange-tier2/snapshot/spec.json
-uv run openrange validate -s /tmp/openrange-tier2/snapshot/spec.json --docker
-uv run openrange validate -s /tmp/openrange-tier2/snapshot/spec.json --docker \
-  --deploy-hf --hf-space <user>/<space>
-uv run openrange render -s /tmp/openrange-tier2/snapshot/spec.json -o /tmp/openrange-tier2/artifacts
-uv run openrange deploy -s /tmp/openrange-tier2/snapshot/spec.json --compose-dir /tmp/openrange-tier2/artifacts
-uv run openrange episode -s /tmp/openrange-tier2/snapshot/spec.json --docker --golden-path
-
 # Run the FastAPI server
-uv run openrange server                         # default: 0.0.0.0:8000
-uv run openrange server --port 9000             # custom port
+uv run server                                   # default: 127.0.0.1:8000
+uv run server --port 9000                       # custom port
+uv run server --host 0.0.0.0                    # bind all interfaces
 
 # Or via uvicorn directly
-uv run uvicorn open_range.server.app:app --host 0.0.0.0 --port 8000 --reload
+uv run uvicorn server.app:app --host 0.0.0.0 --port 8000 --reload
 
 # Tests
 uv run pytest tests/ -v --tb=short
 ```
-
-Notes:
-- `openrange validate --docker` now boots a temporary compose project, runs the live Docker-backed checks, and tears the project down automatically.
-- `openrange validate --deploy-hf` uploads the current app plus the validated snapshot to a Hugging Face Space and configures the Space to boot that exact snapshot.
-- The same workflow works for any manifest; swap the manifest path, output directory, and `--tier` value to match the range you want to build.
-- For large builder responses, cap `--max-tokens` and set an explicit `--timeout` so the CLI fails fast instead of waiting indefinitely on oversized generations.
 
 ## Core Components
 
@@ -125,19 +91,7 @@ Notes:
 
 The deployed package exposes the standard OpenEnv `reset()`, `step()`, and `state()` contract through `server.app:app`, which is the entrypoint referenced by `openenv.yaml`.
 
-**Validator** — Admission gate for candidate snapshots. The shipped runtime enforces manifest compliance plus graph-native checks such as graph consistency, path solvability, evidence sufficiency, and reward grounding before structural/task checks. With the `training` profile, the runtime boots rendered bundles, applies payload files, constructs a real `ContainerSet`, and runs live build/exploit/patch/evidence/reward/isolation/difficulty/NPC/realism checks before admission.
-
-Validator profile matrix:
-
-| Profile | Checks | Guarantees |
-|---------|--------|------------|
-| `offline` | Graph + structural/task checks only (no live containers) | Fast static admission only; no live exploitability/patchability guarantee |
-| `training` | `offline` checks + live/container-backed checks | Full admission guarantees for managed training/runtime use |
-
-Managed runtime defaults and safety behavior:
-- `OPENRANGE_RUNTIME_VALIDATOR_PROFILE` defaults to `training`.
-- `OPENRANGE_ENABLE_LIVE_ADMISSION` defaults to `1`.
-- If managed runtime is configured non-live (`offline` profile and/or live admission disabled), startup raises an error unless you explicitly opt out with `OPENRANGE_ALLOW_NON_LIVE_ADMISSION=1` (legacy alias: `OPENRANGE_ALLOW_OFFLINE_ADMISSION=1`), in which case a warning is emitted.
+**Validator** — Admission gate for candidate snapshots. The shipped runtime first enforces manifest compliance plus graph-native checks such as graph consistency, path solvability, evidence sufficiency, and reward grounding before structural/task checks. When `OPENRANGE_ENABLE_LIVE_ADMISSION=1`, the runtime also boots the rendered child bundle, applies rendered payload files, constructs a real `ContainerSet`, and runs live build/exploit/evidence/reward checks before admission. Public/HF mode can still rely on a prebuilt admitted pool with live admission disabled.
 
 **Environment** — `RangeEnvironment(Environment)` following the OpenEnv contract. `reset()` asks the shared runtime for a frozen admitted snapshot. `step(action)` routes commands to the appropriate container — Red runs on the attacker box, Blue runs on the SIEM. No artificial command allowlists; the container's installed tools are the constraint.
 
@@ -149,18 +103,6 @@ Managed runtime defaults and safety behavior:
 | Efficiency (`gamma^steps`) | Patch validity (re-run exploit, must fail) |
 | Stealth (inversely coupled to Blue detection) | Availability (healthcheck fraction) |
 | Anti-hallucination (-0.3 per fake flag) | False positive penalty (-0.2 per NPC flagged) |
-
-**NPC Traffic** — Background noise and social engineering surface. Two levels:
-
-- **Level 0** (shell scripts): `http_traffic.sh`, `db_traffic.sh`, `ssh_traffic.sh` generate benign traffic that Blue must filter from real attacks. Scripts discover targets dynamically (available pages, databases, tables) — no hardcoded endpoints.
-- **Level 1** (LLM agents): Each NPC persona runs an autonomous workday via LiteLLM — browsing pages, sending emails, querying databases, accessing file shares. NPCs also react to incoming stimuli (phishing emails) based on their `security_awareness` profile.
-
-All NPC actions are derived from the `SnapshotSpec` at runtime (pages, shares, tables, credentials, domain), so they generalize to any Builder-generated environment. NPC logs carry structured fields (`type`, `label`, `source`, `result`) that couple directly to Red/Blue reward signals.
-
-Configure the NPC model via environment variable:
-```bash
-export OPENRANGE_NPC_MODEL="azure/gpt-5.2-codex"  # or openai/gpt-4o, anthropic/claude-haiku-4-5-20251001, ollama/llama3
-```
 
 **Agents** — Structural protocol: any object with `reset(briefing, role)` and `act(observation) -> command` works. Ships with `LLMRangeAgent` (litellm, any provider), `ScriptedAgent`, and `HumanAgent`.
 
@@ -198,31 +140,15 @@ Difficulty grows horizontally — more hosts, zones, and chained attack surface.
 | GET | `/state` | Current episode state |
 | WS | `/ws` | WebSocket session |
 
-Built directly on the OpenEnv HTTP/WebSocket contract.
-
-## CLI
-
-The `openrange` CLI covers the full lifecycle:
-
-| Command | What it does |
-|---------|-------------|
-| `openrange build` | Generate a snapshot from a manifest (LLM or template) |
-| `openrange validate` | Run admission checks against a snapshot |
-| `openrange render` | Render a snapshot into Docker artifacts |
-| `openrange deploy` | Boot a rendered snapshot via Docker Compose |
-| `openrange episode` | Run a scripted or interactive episode |
-| `openrange synthetic-data` | Generate SFT training traces |
-| `openrange server` | Start the OpenEnv FastAPI server |
-
-Run `uv run openrange --help` for full option details.
+Compatible with `openenv` when installed; standalone FastAPI fallback otherwise.
 
 ## Docs
 
-- [Architecture](docs/architecture.md) — pipeline, network topology, episode lifecycle, rewards
-- [Builder & Validator](docs/builder-validator.md) — snapshot generation, rendering, and admission
-- [Agents](docs/red-blue-agents.md) — BYO agent protocol, tandem training, reward coupling
-- [Synthetic Data](docs/synthetic-data.md) — snapshot-backed SFT trace generation
-- [Mutation Policy](docs/mutation_policy.md) — parent selection and mutation weight tuning
+- [Architecture](docs/architecture.md) — full pipeline, network topology, episode lifecycle
+- [Builder & Validator](docs/builder-validator.md) — snapshot generation and admission
+- [Red & Blue Agents](docs/red-blue-agents.md) — tandem training, reward coupling, curriculum
+- [Synthetic Data](docs/synthetic-data.md) — snapshot-backed SFT trace generation with LiteLLM teachers
+- [Agent Protocols](docs/agent-protocols.md) — agent interface, episode runner, evaluation
 - [OpenEnv Compliance](docs/openenv-compliance.md) — API contract, models, deployment
 
 ## Built On

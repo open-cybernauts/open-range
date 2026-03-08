@@ -15,12 +15,11 @@ Tier multipliers: {1: 1.0, 2: 1.5, 3: 2.0, 4: 2.5, 5: 3.0}
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
 from open_range.protocols import SnapshotSpec
 
-from open_range.models import RangeAction, RangeObservation, RangeState
+from open_range.server.models import RangeAction, RangeObservation, RangeState
 
 logger = logging.getLogger(__name__)
 
@@ -40,70 +39,6 @@ TIER_MULTIPLIERS: dict[int, float] = {
 def _tier_multiplier(tier: int) -> float:
     """Return the complexity multiplier for the given tier."""
     return TIER_MULTIPLIERS.get(tier, 1.0)
-
-
-_MATCH_TOKEN_RE = re.compile(r"[a-z0-9_./:-]{3,}")
-_MATCH_STOPWORDS = {
-    "the", "and", "for", "with", "from", "that", "this", "then", "host",
-    "user", "users", "detected", "detection", "attempt", "activity", "attack",
-    "alert", "alerts", "found", "event", "events", "possible", "likely",
-    "against", "into", "onto", "over", "under", "was", "were", "has", "have",
-}
-_ATTACK_SIGNAL_KEYWORDS = (
-    "sqli", "sql injection", "xss", "path traversal", "command injection",
-    "ssrf", "bruteforce", "brute force", "scan", "nmap", "nikto", "sqlmap",
-    "hydra", "ldap injection", "smb enumeration", "phish", "phishing",
-)
-
-
-def _tokenize_for_matching(text: str) -> set[str]:
-    tokens = {m.group(0).lower() for m in _MATCH_TOKEN_RE.finditer(text.lower())}
-    return {token for token in tokens if token not in _MATCH_STOPWORDS}
-
-
-def _is_grounded_finding(finding: dict[str, Any], red_actions: list[dict[str, Any]]) -> bool:
-    """Best-effort grounding check for Blue findings.
-
-    Explicit grounding metadata wins. For legacy records without grounding,
-    infer by overlap with recent Red command evidence.
-    """
-    grounded = finding.get("grounded")
-    if isinstance(grounded, bool):
-        return grounded
-
-    if not red_actions:
-        return False
-
-    content = str(finding.get("content", "") or "").lower()
-    if not content:
-        return False
-
-    cmd_names = {
-        str(record.get("cmd_name", "")).lower()
-        for record in red_actions
-        if record.get("cmd_name")
-    }
-    if any(cmd and cmd in content for cmd in cmd_names):
-        return True
-
-    finding_tokens = _tokenize_for_matching(content)
-    if not finding_tokens:
-        return False
-
-    red_tokens: set[str] = set()
-    for record in red_actions:
-        red_tokens.update(_tokenize_for_matching(str(record.get("command", ""))))
-        red_tokens.update(_tokenize_for_matching(str(record.get("target", ""))))
-        cmd_name = str(record.get("cmd_name", "")).lower()
-        if cmd_name:
-            red_tokens.add(cmd_name)
-
-    overlap = finding_tokens & red_tokens
-    if len(overlap) >= 2:
-        return True
-
-    has_attack_signal = any(keyword in content for keyword in _ATTACK_SIGNAL_KEYWORDS)
-    return has_attack_signal and len(overlap) >= 1
 
 
 # ===================================================================
@@ -251,13 +186,8 @@ class CompositeRedReward:
         npc_compromised: bool = False,
         hallucinated_count: int = 0,
         tier: int = 1,
-        valid_flags: set[str] | None = None,
-        snapshot: SnapshotSpec | None = None,
     ) -> float:
-        if valid_flags is None and snapshot is not None:
-            valid_flags = {f.value for f in snapshot.flags}
-        if valid_flags is None:
-            valid_flags = set()
+        valid_flags: set[str] = set()  # caller should supply if known
         total = 0.0
         if submitted_flag is not None:
             total += self.weights["flag"] * self.flag.score(submitted_flag, valid_flags)
@@ -307,29 +237,21 @@ class CompositeRedReward:
         # Evidence
         evidence_entries = [r for r in red_history if r.get("type") == "evidence"]
         evidence_content = evidence_entries[-1].get("content", "") if evidence_entries else ""
-        topo_hosts: set[str] = set()
-        if isinstance(snapshot.topology, dict):
-            topo_hosts = {
-                h.get("name", "") if isinstance(h, dict) else ""
-                for h in snapshot.topology.get("hosts", [])
-            }
+        topo_hosts = {
+            h.get("name", "") if isinstance(h, dict) else ""
+            for h in snapshot.topology.get("hosts", [])
+        }
         evidence_score = self.evidence.score(evidence_content, topo_hosts)
 
-        # Social engineering -- reactive NPC actions from send_phish or
-        # agent loop stimulus reactions (type=social_engineering, result=success/blocked)
+        # Social engineering
         social_successes = [
             e for e in npc_log
             if e.get("type") == "social_engineering" and e.get("result") == "success"
         ]
         social_score = self.social.score(bool(social_successes))
 
-        # Hallucination penalty applies only when an event is logged this step.
-        hallucinated = [
-            r
-            for r in red_history
-            if r.get("type") == "hallucinated_flag"
-            and r.get("step") == state.step_count
-        ]
+        # Hallucination count
+        hallucinated = [r for r in red_history if r.get("type") == "hallucinated_flag"]
 
         # Aggregate
         components = {
@@ -487,21 +409,12 @@ class CompositeBlueReward:
             if r.get("type") not in ("hallucinated_flag", "evidence")
         ]
         blue_findings = [b for b in blue_history if b.get("type") == "finding"]
-        grounded_findings = [b for b in blue_findings if _is_grounded_finding(b, red_actions)]
-        tp = min(len(grounded_findings), len(red_actions))
+        tp = min(len(blue_findings), len(red_actions))
         detect_score = self.detection.score(tp, len(red_actions))
 
-        # Patch -- require grounded validation signal, not command name heuristics.
-        patch_validated = bool(ctx.get("patch_validated", False))
-        if not patch_validated:
-            patch_events = [
-                b
-                for b in blue_history
-                if b.get("type") == "patch_validation"
-                and b.get("result") in (True, "success", "blocked")
-            ]
-            patch_validated = bool(patch_events)
-        patch_score = self.patch.score(patch_validated)
+        # Patch -- did Blue issue any patch commands?
+        patches = [b for b in blue_history if b.get("cmd_name") == "patch"]
+        patch_score = self.patch.score(bool(patches))
 
         # Availability
         svc = state.services_status or {}

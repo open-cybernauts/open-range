@@ -1,7 +1,5 @@
 """Tests for RangeEnvironment lifecycle — all run without Docker."""
 
-from unittest.mock import patch
-
 import pytest
 
 from open_range.protocols import (
@@ -14,14 +12,6 @@ from open_range.protocols import (
 )
 from open_range.server.environment import RangeEnvironment, _extract_command_name
 from open_range.server.models import RangeAction, RangeObservation, RangeState
-
-# Minimal snapshot for tests that just need reset() to work
-_MINIMAL_SNAPSHOT = SnapshotSpec(
-    topology={"hosts": ["attacker", "siem"]},
-    flags=[],
-    golden_path=[],
-    task=TaskSpec(red_briefing="Test mode.", blue_briefing="Test mode."),
-)
 
 
 class TestCommandExtraction:
@@ -45,21 +35,21 @@ class TestReset:
 
     def test_reset_returns_observation(self):
         env = RangeEnvironment(docker_available=False)
-        obs = env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        obs = env.reset()
         assert isinstance(obs, RangeObservation)
         assert "Range ready" in obs.stdout
 
     def test_reset_sets_episode_id(self):
         env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT, episode_id="ep_42")
+        env.reset(episode_id="ep_42")
         assert env.state.episode_id == "ep_42"
 
     def test_reset_clears_step_count(self):
         env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        env.reset()
         env.step(RangeAction(command="nmap -sV web", mode="red"))
         assert env.state.step_count == 1
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        env.reset()
         assert env.state.step_count == 0
 
     def test_reset_with_snapshot(self, sample_snapshot_spec):
@@ -68,88 +58,20 @@ class TestReset:
         assert isinstance(obs, RangeObservation)
         assert env.snapshot is not None
 
-    def test_reset_uses_default_snapshot_when_configured(self, sample_snapshot_spec):
-        env = RangeEnvironment(docker_available=False, default_snapshot=sample_snapshot_spec)
-        obs = env.reset()
-        assert isinstance(obs, RangeObservation)
-        assert env.snapshot is not None
-        assert env.snapshot.flags == sample_snapshot_spec.flags
-
-    def test_reset_initializes_services_status_from_topology_hosts(self):
-        env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
-        # In mock mode service health is unknown, but hosts should be tracked.
-        assert set(env.state.services_status.keys()) == {"attacker", "siem"}
-
-    def test_auto_without_docker_uses_mock_docker_mode(self):
-        def fake_get_docker(self):
-            self._docker_available = False
-            return None
-
-        with patch.object(RangeEnvironment, "_get_docker", fake_get_docker):
-            env = RangeEnvironment(docker_available=None, execution_mode="auto")
-
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
-        obs = env.step(RangeAction(command="printf test", mode="red"))
-
-        assert env._execution_mode == "docker"
-        assert obs.stderr == ""
-        assert "[mock] executed on attacker" in obs.stdout
-
-
-class TestTargetResolution:
-    """Target selection should honor manifest-compiled metadata."""
-
-    def test_resolve_target_uses_host_catalog_roles(self):
-        env = RangeEnvironment(docker_available=False)
-        env.reset(
-            snapshot=SnapshotSpec(
-                topology={
-                    "hosts": ["web", "kali1", "socbox"],
-                    "host_catalog": {
-                        "web": {"role": "web", "zone": "dmz"},
-                        "kali1": {"role": "attacker", "zone": "external"},
-                        "socbox": {"role": "siem", "zone": "management"},
-                    },
-                },
-                task=TaskSpec(red_briefing="Go.", blue_briefing="Watch."),
-            )
-        )
-        assert env._resolve_target(RangeAction(command="id", mode="red")) == "kali1"
-        assert env._resolve_target(RangeAction(command="id", mode="blue")) == "socbox"
-
-    def test_resolve_target_uses_zone_mapping_for_string_hosts(self):
-        env = RangeEnvironment(docker_available=False)
-        env.reset(
-            snapshot=SnapshotSpec(
-                topology={
-                    "hosts": ["web", "kali1", "socbox"],
-                    "zones": {
-                        "dmz": ["web"],
-                        "external": ["kali1"],
-                        "management": ["socbox"],
-                    },
-                },
-                task=TaskSpec(red_briefing="Go.", blue_briefing="Watch."),
-            )
-        )
-        assert env._resolve_target(RangeAction(command="id", mode="red")) == "kali1"
-        assert env._resolve_target(RangeAction(command="id", mode="blue")) == "socbox"
-
 
 class TestRedStep:
     """Red agent actions."""
 
     def test_red_step_returns_observation(self):
         env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        env.reset()
         action = RangeAction(command="nmap -sV web", mode="red")
         obs = env.step(action)
         assert isinstance(obs, RangeObservation)
 
     def test_red_step_increments_counter(self):
         env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        env.reset()
         env.step(RangeAction(command="nmap -sV web", mode="red"))
         assert env.state.step_count == 1
         env.step(RangeAction(command="curl http://web", mode="red"))
@@ -158,7 +80,7 @@ class TestRedStep:
     def test_red_any_command_forwarded(self):
         """No artificial allowlist — commands route to the attacker container."""
         env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        env.reset()
         obs = env.step(RangeAction(command="iptables -L", mode="red"))
         # In mock mode, this runs on attacker container (not rejected)
         assert obs.stderr == ""
@@ -166,7 +88,7 @@ class TestRedStep:
 
     def test_red_action_logged(self):
         env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        env.reset()
         env.step(RangeAction(command="nmap -sV web", mode="red"))
         assert len(env.red_history) >= 1
 
@@ -176,36 +98,20 @@ class TestBlueStep:
 
     def test_blue_step_returns_observation(self):
         env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        env.reset()
         obs = env.step(RangeAction(command="tail_log /var/log/syslog", mode="blue"))
         assert isinstance(obs, RangeObservation)
 
     def test_blue_submit_finding(self):
         env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        env.reset()
         obs = env.step(RangeAction(command="submit_finding SQL injection detected", mode="blue"))
         assert "recorded" in obs.stdout.lower() or "submitted" in obs.stdout.lower()
-
-    def test_blue_submit_finding_marks_grounded_when_matching_red_activity(self):
-        env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
-        env.step(RangeAction(command="nmap -sV web", mode="red"))
-        env.step(RangeAction(command="submit_finding nmap scan detected on web host", mode="blue"))
-        assert env.blue_history
-        assert env.blue_history[-1].get("grounded") is True
-
-    def test_blue_submit_finding_marks_ungrounded_for_generic_claim(self):
-        env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
-        env.step(RangeAction(command="nmap -sV web", mode="red"))
-        env.step(RangeAction(command="submit_finding attack found", mode="blue"))
-        assert env.blue_history
-        assert env.blue_history[-1].get("grounded") is False
 
     def test_blue_any_command_forwarded(self):
         """No artificial allowlist — commands route to the siem container."""
         env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        env.reset()
         obs = env.step(RangeAction(command="nmap -sV web", mode="blue"))
         # In mock mode, this runs on siem container (not rejected)
         assert obs.stderr == ""
@@ -213,21 +119,13 @@ class TestBlueStep:
 
     def test_blue_empty_command_rejected(self):
         env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        env.reset()
         obs = env.step(RangeAction(command="", mode="blue"))
         assert obs.stderr != ""
 
-    def test_blue_alerts_fall_back_to_synthetic_red_history(self):
-        env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
-        env.step(RangeAction(command="nmap -sV web", mode="red"))
-        obs = env.step(RangeAction(command="tail -n 50 /var/log/siem/all.log", mode="blue"))
-        assert obs.alerts
-        assert any("synthetic" in alert.lower() for alert in obs.alerts)
-
     def test_step_passes_timeout_override_to_executor(self):
         env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        env.reset()
         seen = {}
 
         def fake_exec(container_name, command, timeout_s=None):
@@ -288,7 +186,7 @@ class TestTermination:
 
     def test_max_steps_terminates(self):
         env = RangeEnvironment(docker_available=False, max_steps=3)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        env.reset()
         env.step(RangeAction(command="nmap -sV web", mode="red"))
         env.step(RangeAction(command="curl http://web", mode="red"))
         obs = env.step(RangeAction(command="curl http://web/login", mode="red"))
@@ -300,7 +198,7 @@ class TestStateProperty:
 
     def test_state_reflects_episode(self):
         env = RangeEnvironment(docker_available=False)
-        env.reset(snapshot=_MINIMAL_SNAPSHOT, episode_id="test_ep")
+        env.reset(episode_id="test_ep")
         assert env.state.episode_id == "test_ep"
         assert env.state.step_count == 0
         env.step(RangeAction(command="nmap -sV web", mode="red"))

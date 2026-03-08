@@ -2,7 +2,7 @@
 
 ## Overview
 
-**LLM generates, renderer materializes, rules validate.** The builder uses LiteLLM to generate candidate snapshot specs as structured JSON. The renderer turns specs into Docker artifacts via Jinja2 templates. The validator runs a layered admission pipeline — graph checks, structural/task checks, and optionally live container-backed checks — before admitting a snapshot.
+**LLM generates, renderer materializes, rules validate.** The builder uses LiteLLM to generate candidate snapshot specs as structured JSON. The renderer turns specs into Docker artifacts via Jinja2 templates. The validator runs a 10-check admission pipeline (8 mechanical + 2 LLM advisory) before admitting a snapshot.
 
 Snapshot creation happens **inside a shared `ManagedSnapshotRuntime` in the server process**. That runtime preloads admitted snapshots at startup, renders each admitted `SnapshotSpec` into Docker artifacts under `snapshots/<id>/artifacts`, and can optionally refill the pool between episodes. `reset()` picks a pre-validated frozen snapshot from the `SnapshotStore`. No LLM calls in the hot path.
 
@@ -13,7 +13,7 @@ flowchart LR
     BLD --> SPEC[Candidate SnapshotSpec<br/>topology, truth graph,<br/>evidence, tasks]
     SPEC --> RND[SnapshotRenderer<br/>Jinja2 templates]
     RND --> ART[Docker artifacts<br/>compose, Dockerfiles,<br/>nginx, init.sql, iptables]
-    ART --> VAL{Validator gate<br/>graph + structural +<br/>live + LLM advisory}
+    ART --> VAL{Validator gate<br/>8 mechanical +<br/>2 LLM advisory}
     VAL -->|pass| STORE[SnapshotStore<br/>frozen, ready for reset]
     VAL -->|fail| BLD
 
@@ -229,7 +229,7 @@ The Builder outputs a structured JSON snapshot spec. The LLM does the creative w
 ```python
 # Simplified -- see builder.py for full retry + error-feedback logic
 response = await litellm.acompletion(
-    model=self.model,   # default: "azure/gpt-5.2-codex"
+    model=self.model,   # default: "anthropic/claude-sonnet-4-20250514"
     messages=[
         {"role": "system", "content": self.prompt_template},
         {"role": "user", "content": json.dumps({
@@ -315,16 +315,11 @@ System prompts live in `src/open_range/builder/prompts.py`:
 | `BUILDER_SYSTEM_PROMPT` | `LLMSnapshotBuilder` | Instructs the LLM to generate structured JSON snapshot specs from manifests. Includes output schema, 10 rules (topology fidelity, vuln diversity, auth realism, golden path calibration, no flag leaks, etc.), and a worked example. |
 | `REALISM_REVIEW_PROMPT` | `RealismReviewCheck` | Instructs the validator LLM to check for briefing leakage, scenario plausibility, difficulty match, and narrative coherence. Returns `{pass, issues}`. |
 
-## Validator Gate
+## Validator Gate (8 Mechanical + 2 LLM Advisory)
 
-The `ValidatorGate` (`src/open_range/validator/validator.py`) is a **configurable pipeline of `ValidatorCheck` instances** run in sequence. Checks are organized in layers:
+The `ValidatorGate` (`src/open_range/validator/validator.py`) is a **configurable pipeline of `ValidatorCheck` instances** run in sequence. Checks 1-8 are mechanical -- executable scripts against live containers, deterministic pass/fail. Checks 9-10 are LLM-based advisory checks -- they can trigger retry but never block admission on their own.
 
-1. **Graph checks** (no containers): ManifestComplianceCheck, GraphConsistencyCheck, PathSolvabilityCheck, GraphEvidenceSufficiencyCheck, GraphRewardGroundingCheck
-2. **Structural/task checks**: TaskFeasibilityCheck, DifficultyCheck
-3. **Live container checks** (training profile only): BuildBootCheck, ExploitabilityCheck, PatchabilityCheck, EvidenceCheck, RewardGroundingCheck, IsolationCheck
-4. **LLM advisory** (never block alone): NPCConsistencyCheck, RealismReviewCheck
-
-The gate uses **fail-fast** semantics: the first mechanical (non-advisory) failure stops the pipeline. Advisory checks are always recorded but never prevent an overall pass.
+The gate uses **fail-fast** semantics: the first mechanical (non-advisory) failure stops the pipeline. Advisory checks (determined by membership in `_ADVISORY_CHECK_CLASSES = {"NPCConsistencyCheck", "RealismReviewCheck"}`) are always recorded but never prevent an overall pass.
 
 R2E-Gym found execution-only validation plateaus at ~43% and LLM-only at ~43%. Combined: 51%. Both matter.
 
@@ -332,71 +327,38 @@ R2E-Gym found execution-only validation plateaus at ~43% and LLM-only at ~43%. C
 
 ```mermaid
 flowchart LR
-    subgraph graph [Graph checks]
-        G1[Manifest<br/>compliance] --> G2[Graph<br/>consistency]
-        G2 --> G3[Path<br/>solvability]
-        G3 --> G4[Graph evidence<br/>+ reward grounding]
-    end
+    S1[1. Build + boot<br/>docker compose up<br/>all healthchecks pass] --> S2[2. Exploitability<br/>run golden path<br/>all steps succeed]
+    S2 --> S3[3. Patchability<br/>revert each vuln<br/>golden path breaks]
+    S3 --> S4[4. Evidence sufficiency<br/>logs + alerts exist<br/>for Blue investigation]
+    S4 --> S5[5. Reward grounding<br/>rubrics produce<br/>valid scores]
+    S5 --> S6[6. Isolation + leakage<br/>zones enforced<br/>no answer leaks]
+    S6 --> S7[7. Task feasibility<br/>tasks reference real<br/>hosts, services, logs]
+    S7 --> S8[8. Difficulty calibration<br/>golden path steps<br/>within tier target]
+    S8 --> S9[9. NPC consistency<br/>personas respond<br/>per security_awareness]
+    S9 --> S10[10. Realism review<br/>LLM advisory<br/>scenario plausibility]
 
-    subgraph struct [Structural]
-        S1[Task<br/>feasibility] --> S2[Difficulty<br/>calibration]
-    end
-
-    subgraph live [Live checks - training profile]
-        L1[Build + boot] --> L2[Exploitability]
-        L2 --> L3[Patchability]
-        L3 --> L4[Evidence +<br/>reward + isolation]
-    end
-
-    subgraph advisory [LLM advisory]
-        A1[NPC consistency] --> A2[Realism review]
-    end
-
-    graph --> struct --> live --> advisory
-    advisory -->|All pass| PASS[ADMIT]
-    advisory -->|Any fail| FAIL[REJECT + RETRY]
+    S10 -->|All pass| PASS[ADMIT SNAPSHOT]
+    S10 -->|Any fail| FAIL[REJECT + RETRY]
 
     style PASS fill:#6bcb77,color:#fff
     style FAIL fill:#ff6b6b,color:#fff
-    style L3 fill:#ffd93d,color:#333
+    style S3 fill:#ffd93d,color:#333
 ```
 
 ### Check Details
 
-**Graph checks** (offline, no containers):
-
-| Check | What it does | Pass condition |
-|-------|-------------|----------------|
-| **ManifestComplianceCheck** | Snapshot conforms to manifest constraints | Hosts, zones, bug families within manifest bounds |
-| **GraphConsistencyCheck** | Truth graph is structurally valid | No dangling references, exploit chain covers all vulns |
-| **PathSolvabilityCheck** | Attack path is reachable from attacker | Golden path steps route through valid zone transitions |
-| **GraphEvidenceSufficiencyCheck** | Evidence spec covers the truth graph | Every vuln has at least one evidence item |
-| **GraphRewardGroundingCheck** | Reward signals computable from graph | Flag paths, detection sources, and patch targets all defined |
-
-**Structural/task checks** (offline, no containers):
-
-| Check | What it does | Pass condition |
-|-------|-------------|----------------|
-| **TaskFeasibilityCheck** | Tasks reference real hosts, services, logs | Every task target exists and is reachable |
-| **DifficultyCheck** | Golden path length matches tier | Step count within +/-20% of tier target; vuln count within bounds |
-
-**Live container checks** (training profile only):
-
-| Check | What it does | Pass condition |
-|-------|-------------|----------------|
-| **BuildBootCheck** | Start all containers, verify services | All containers healthy, all ports respond |
-| **ExploitabilityCheck** | Execute golden path end-to-end | `expect_stdout` found in each step's output |
-| **PatchabilityCheck** | Inverse mutation test — apply remediation, re-run golden path step | Step MUST fail after patch |
-| **EvidenceCheck** | Blue has enough to investigate | All evidence_spec items found in logs/files |
-| **RewardGroundingCheck** | Rubrics produce valid scores against known scenarios | Scores in expected ranges |
-| **IsolationCheck** | Network segmentation holds, no answer leaks | No flag strings in briefings; zone rules enforced |
-
-**LLM advisory** (never block alone):
-
-| Check | What it does | Pass condition |
-|-------|-------------|----------------|
-| **NPCConsistencyCheck** | Phase 1: mechanical persona card validation. Phase 2: LLM sends calibrated test phishing | High-awareness NPCs reject; low-awareness NPCs fall for lures |
-| **RealismReviewCheck** | LLM reviews redacted summary for plausibility and leakage | No flag values in briefings, vuln plausible for host, narrative coherent |
+| Check | What it does | How | Pass condition |
+|-------|-------------|-----|----------------|
+| **1. Build + boot** | Start all containers, verify services | `docker compose up -d` + healthchecks | All 8 containers healthy, all ports respond |
+| **2. Exploitability** | Execute golden path end-to-end | Run each step from attacker container | `expect_stdout` found in each step's output |
+| **3. Patchability** | Inverse mutation test | For each vuln: apply remediation, re-run its golden path step | Step MUST fail after patch |
+| **4. Evidence sufficiency** | Blue has enough to investigate | Check logs exist, SIEM alerts fire, evidence files present | All evidence_spec items found |
+| **5. Reward grounding** | Rubrics produce valid scores | Run CompositeRedReward and CompositeBlueReward against known scenarios | Scores in expected ranges |
+| **6. Isolation + leakage** | Network segmentation holds, no answer leaks | Attacker tries to reach internal directly; grep task briefings for flag values | Connection refused; no flag strings in briefings |
+| **7. Task feasibility** | Tasks are solvable given the topology | Red tasks reference reachable hosts/services; Blue tasks reference existing logs/evidence | Every task action has a target that exists and is reachable |
+| **8. Difficulty calibration** | Golden path length matches tier target | Count golden path steps, compare against tier thresholds | Step count within +/-20% of tier target |
+| **9. NPC consistency** (LLM, advisory) | Personas behave per security_awareness | Phase 1: mechanical persona card validation (awareness/susceptibility ranges). Phase 2: LLM sends calibrated test phishing to each NPC via `litellm.acompletion` | High-awareness (>=0.8) NPCs reject; low-awareness (<=0.3) NPCs fall for lures; susceptibility scores consistent with awareness |
+| **10. Realism review** (LLM, advisory) | Scenario is realistic and non-leaking | LLM reviews redacted summary (briefings, vuln types, vuln hosts, topology hosts, golden path length, tier) via `litellm.acompletion` | No flag values in briefings, vuln plausible for host, difficulty matches tier, narrative coherent |
 
 ### Check 7: Task Feasibility
 
@@ -442,7 +404,7 @@ If patching a vuln doesn't break the golden path, the vuln is decorative -- the 
 Builder generates candidate SnapshotSpec
   -> SnapshotRenderer renders templates to Docker artifacts
   -> Validator builds + boots containers
-  -> Runs layered admission checks (mechanical fail-fast, LLM advisory)
+  -> Runs 10 admission checks (8 mechanical fail-fast, 2 LLM advisory)
   -> Any mechanical fail -> Builder receives failure context, generates new snapshot
   -> Advisory fails -> logged, may trigger retry, never blocks on their own
   -> 3 consecutive failures -> Flag for human review, use last known-good snapshot
@@ -455,7 +417,7 @@ Every admission decision is logged for quality monitoring:
 ```json
 {
   "snapshot_id": "acme_v14",
-  "builder_model": "azure/gpt-5.2-codex",
+  "builder_model": "anthropic/claude-sonnet-4-20250514",
   "attempt": 1,
   "checks": {
     "build_boot": {"pass": true, "time_s": 12.3},
@@ -583,7 +545,7 @@ Fully implemented in `src/open_range/validator/npc_consistency.py` with two phas
 
 If no NPC personas are configured, the check passes vacuously.
 
-Configure model via `OPENRANGE_NPC_MODEL` env var (default: `azure/gpt-5.2-codex`).
+Configure model via `OPENRANGE_NPC_MODEL` env var (default: `anthropic/claude-haiku-4-5-20251001`).
 
 ### Validator Check 10: Realism Review (`RealismReviewCheck`)
 
@@ -604,7 +566,7 @@ class RealismReviewCheck:
 
     def __init__(self, model: str | None = None):
         self.model = model or os.environ.get(
-            "OPENRANGE_VALIDATOR_MODEL", "azure/gpt-5.2-codex"
+            "OPENRANGE_VALIDATOR_MODEL", "anthropic/claude-haiku-4-5-20251001"
         )
 
     async def check(self, snapshot, containers) -> CheckResult:
@@ -641,14 +603,3 @@ class RealismReviewCheck:
 LLM failures degrade gracefully -- if `litellm.acompletion` raises, the check returns `passed=True` with a note, so it never blocks validation.
 
 **Important**: The LLM never sees flag values, vulnerable code, or golden path commands. It sees only vuln types, vuln hosts, topology hosts, briefings, golden path length, and tier -- enough to judge realism, not enough to leak answers.
-
-### Validator Profiles
-
-The `ManagedSnapshotRuntime` registers different check sets based on the configured profile:
-
-| Profile | Checks registered |
-|---------|-------------------|
-| `offline` | Graph checks + structural/task checks only |
-| `training` (default) | All checks including live container-backed checks |
-
-Set via `OPENRANGE_RUNTIME_VALIDATOR_PROFILE`. The `offline` profile is used on HF Spaces where Docker is unavailable.

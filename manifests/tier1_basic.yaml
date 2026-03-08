@@ -424,7 +424,7 @@ credential_policy:
   shared_accounts:
     - account: admin
       host: web
-      description: "Shared by IT team (dthompson, rchen) for emergency access to the web server"
+      description: "Shared by IT team (dthompson, rkim) for emergency access to the web server"
   service_accounts:
     - account: svc_backup
       host: db
@@ -480,27 +480,27 @@ trust_relationships:
       Derek set up Karen's workstation and knows her login credentials.
       He occasionally logs in as Karen to troubleshoot billing portal issues.
 
-  - from: apatel
-    to: bmorris
+  - from: schen
+    to: lpark
     type: reports_to
     description: >-
-      Anita (office manager) handles Brian's (CEO) calendar and
-      email when Brian is traveling.  Anita has delegated access to Brian's
+      Lisa (office manager) handles Sarah's (medical director) calendar and
+      email when Sarah is in clinic.  Lisa has delegated access to Sarah's
       mailbox.
 
-  - from: ldunn
+  - from: jrodriguez
     to: dthompson
     type: trusts_email
     description: >-
-      Linda (compliance officer) always asks Derek for access changes via email
-      and never verifies requests by phone.  A spoofed email from Linda would
+      Julia (compliance) always asks Derek for access changes via email and
+      never verifies requests by phone.  A spoofed email from Julia would
       likely be actioned without question.
 
-  - from: rchen
+  - from: rkim
     to: dthompson
     type: shares_credentials
     description: >-
-      Rachel (security contractor) and Derek share the 'admin' account on the
+      Ryan (security contractor) and Derek share the 'admin' account on the
       web server.  Neither can distinguish the other's sessions in logs.
 
 # ---------------------------------------------------------------------------
@@ -741,3 +741,40 @@ difficulty:
   max_steps: 12
   min_vulns: 1
   max_vulns: 3
+
+# ---------------------------------------------------------------------------
+# Pre-provisioned infrastructure (DO NOT regenerate — schema already exists)
+# ---------------------------------------------------------------------------
+
+infrastructure:
+  platform: kind
+  description: >-
+    Range runs on a Kind (Kubernetes-in-Docker) cluster with namespace-per-zone
+    isolation.  The database schema below is pre-created by the base init
+    script.  The LLM builder must ONLY generate INSERT/GRANT/USE statements
+    in db:sql — NO CREATE TABLE or CREATE DATABASE.
+
+  db_schema:
+    referral_db:
+      users:
+        columns: [id, username, password, email, full_name, role, department, created_at]
+        notes: "Column is 'username' NOT 'name'. Password is plaintext or MD5."
+      patients:
+        columns: [id, first_name, last_name, dob, phone, email, insurance_id, created_at]
+      patient_referrals:
+        columns: [id, patient_id, referring_physician, specialist, reason, status, created_at]
+      billing:
+        columns: [id, patient_id, amount, insurance_claim, status, created_at]
+      sessions:
+        columns: [id, user_id, session_token, created_at, expires_at]
+      access_log:
+        columns: [id, user_id, action, resource, ip_address, created_at]
+    flags:
+      secrets:
+        columns: [id, flag_name, flag, created_at]
+        notes: "Column is 'flag' NOT 'flag_value'."
+
+  web_docroot: /var/www/html
+  db_connection: "new mysqli('db', 'app_user', 'AppUs3r!2024', 'referral_db')"
+  samba_shares: [/srv/shares/contracts, /srv/shares/hr, /srv/shares/compliance, /srv/shares/general]
+

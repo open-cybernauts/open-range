@@ -14,8 +14,6 @@ import json
 import logging
 import os
 import random
-import re
-import shlex
 import time
 from typing import Any
 
@@ -206,9 +204,6 @@ class LLMNPCAgent:
             if "@" in email_acct
             else persona.name.lower().split()[0]
         )
-        # Sanitize mail_user to prevent path traversal / injection
-        if not re.match(r"^[a-zA-Z0-9._-]+$", mail_user):
-            mail_user = re.sub(r"[^a-zA-Z0-9._-]", "_", mail_user)
 
         base_interval = persona.routine.get("action_interval_min", 2)
         interval_s = base_interval * 60
@@ -233,45 +228,26 @@ class LLMNPCAgent:
                 self._actions.append(log_entry)
                 logger.debug("NPC %s: %s", persona.name, log_entry.get("detail", ""))
 
-                # --- Phase 2: Check mailbox for incoming stimuli ---
-                # Red may send real phishing emails via SMTP. Check multiple
-                # mail spool locations for new messages.
+                # --- Phase 2: Check mailbox ---
                 try:
-                    safe_mail_user = shlex.quote(mail_user)
-                    mail_host = executor._host_mail
                     mail_output = await containers.exec(
-                        mail_host,
-                        f"{{ find /var/spool/mail/ /var/mail/ "
-                        f"/home/{safe_mail_user}/Maildir/new/ "
-                        f"-newer /tmp/.npc_check_{safe_mail_user} "
-                        f"-type f 2>/dev/null || true; }} | head -3",
+                        "mail",
+                        f"find /var/mail/{mail_user} "
+                        f"-newer /tmp/.npc_check_{mail_user} "
+                        f"-type f 2>/dev/null | head -1",
                     )
-                    await containers.exec(mail_host, f"touch /tmp/.npc_check_{safe_mail_user}")
+                    await containers.exec("mail", f"touch /tmp/.npc_check_{mail_user}")
 
                     if mail_output and mail_output.strip():
-                        for email_file in mail_output.strip().split("\n")[:3]:
-                            email_file = email_file.strip()
-                            if not email_file:
-                                continue
-                            content = await containers.exec(
-                                mail_host, f"head -50 {shlex.quote(email_file)} 2>/dev/null || true",
-                            )
-                            if not content or not content.strip():
-                                continue
-                            # Extract sender from email headers
-                            sender = "unknown"
-                            subject = "Incoming message"
-                            for line in content.split("\n")[:20]:
-                                if line.lower().startswith("from:"):
-                                    sender = line.split(":", 1)[1].strip()
-                                elif line.lower().startswith("subject:"):
-                                    subject = line.split(":", 1)[1].strip()
+                        email_file = mail_output.strip().split("\n")[0]
+                        content = await containers.exec(
+                            "mail", f"head -50 '{email_file}' 2>/dev/null || true",
+                        )
+                        if content and content.strip():
                             stimulus = Stimulus(
-                                type="email",
-                                sender=sender,
-                                subject=subject,
+                                type="email", sender="unknown",
+                                subject="Incoming message",
                                 content=content[:500],
-                                plausibility=0.7,
                             )
                             react = await self.decide(persona, stimulus)
                             react_log = await executor.execute(persona, react)

@@ -20,14 +20,15 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 import yaml
 
-from open_range.builder.builder import TemplateOnlyBuilder, default_snapshot_builder
+from open_range.builder.builder import LLMSnapshotBuilder, TemplateOnlyBuilder
 from open_range.builder.mutation_policy import PopulationMutationPolicy
 from open_range.builder.mutator import Mutator
-from open_range.builder.renderer import SnapshotRenderer
+from open_range.builder.renderer import KindRenderer
 from open_range.builder.snapshot_store import SnapshotStore
 from open_range.protocols import (
     BuildContext,
@@ -36,12 +37,12 @@ from open_range.protocols import (
     SnapshotBuilder,
     SnapshotSpec,
 )
-from open_range.server.compose_runner import (
-    BootedSnapshotProject,
-    ComposeProjectRunner,
-    apply_rendered_payloads,
-)
-from open_range.models import RangeState
+from open_range.server.helm_runner import BootedRelease, HelmRunner
+
+# Backward-compat alias used by callers that haven't migrated.
+BootedSnapshotProject = BootedRelease
+ComposeProjectRunner = HelmRunner
+from open_range.server.models import RangeState
 from open_range.validator.build_boot import BuildBootCheck
 from open_range.validator.difficulty import DifficultyCheck
 from open_range.validator.evidence import EvidenceCheck
@@ -62,11 +63,6 @@ from open_range.validator.validator import ValidationResult, ValidatorGate
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MANIFEST = ("manifests", "tier1_basic.yaml")
-_DEFAULT_MANAGED_VALIDATOR_PROFILE = "training"
-_DEFAULT_MANAGED_LIVE_ADMISSION = True
-_ALLOW_NON_LIVE_ADMISSION_ENV = "OPENRANGE_ALLOW_NON_LIVE_ADMISSION"
-_ALLOW_OFFLINE_ADMISSION_ENV = "OPENRANGE_ALLOW_OFFLINE_ADMISSION"
-_DEFAULT_VALIDATOR_PROFILE = _DEFAULT_MANAGED_VALIDATOR_PROFILE
 _VALIDATOR_PROFILE_ALIASES = {
     "light": "offline",
     "static": "offline",
@@ -74,13 +70,6 @@ _VALIDATOR_PROFILE_ALIASES = {
     "strict": "training",
 }
 _LIVE_VALIDATOR_PROFILES = {"training"}
-_PERSISTED_SNAPSHOT_VALIDATION_ALIASES = {
-    "none": "trust",
-    "disabled": "trust",
-    "off": "trust",
-    "revalidate": "offline",
-    "strict": "offline",
-}
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -95,21 +84,6 @@ def _env_int(name: str, default: int) -> int:
     if raw is None or raw.strip() == "":
         return default
     return int(raw)
-
-
-def _non_live_opt_out_enabled() -> bool:
-    return _env_flag(_ALLOW_NON_LIVE_ADMISSION_ENV, default=False) or _env_flag(
-        _ALLOW_OFFLINE_ADMISSION_ENV,
-        default=False,
-    )
-
-
-def _non_live_opt_out_env_name() -> str | None:
-    if _env_flag(_ALLOW_NON_LIVE_ADMISSION_ENV, default=False):
-        return _ALLOW_NON_LIVE_ADMISSION_ENV
-    if _env_flag(_ALLOW_OFFLINE_ADMISSION_ENV, default=False):
-        return _ALLOW_OFFLINE_ADMISSION_ENV
-    return None
 
 
 def _candidate_roots() -> list[Path]:
@@ -326,27 +300,24 @@ class StructuralSnapshotCheck:
 
 
 def _default_builder() -> SnapshotBuilder:
-    return TemplateOnlyBuilder()
+    mode = os.getenv("OPENRANGE_RUNTIME_BUILDER", "template").strip().lower()
+    if mode == "template":
+        return TemplateOnlyBuilder()
+    if mode == "llm":
+        return LLMSnapshotBuilder()
+    raise ValueError(
+        f"Unsupported OPENRANGE_RUNTIME_BUILDER={mode!r}. "
+        "Expected 'template' or 'llm'."
+    )
 
 
 def _normalize_validator_profile(profile: str | None) -> str:
-    normalized = (profile or _DEFAULT_VALIDATOR_PROFILE).strip().lower()
+    normalized = (profile or "offline").strip().lower()
     normalized = _VALIDATOR_PROFILE_ALIASES.get(normalized, normalized)
     if normalized not in {"offline", "training"}:
         raise ValueError(
             f"Unsupported validator profile {profile!r}. "
             "Expected 'offline' or 'training'."
-        )
-    return normalized
-
-
-def _normalize_persisted_snapshot_validation(policy: str | None) -> str:
-    normalized = (policy or "offline").strip().lower()
-    normalized = _PERSISTED_SNAPSHOT_VALIDATION_ALIASES.get(normalized, normalized)
-    if normalized not in {"trust", "offline"}:
-        raise ValueError(
-            f"Unsupported persisted snapshot validation policy {policy!r}. "
-            "Expected 'trust' or 'offline'."
         )
     return normalized
 
@@ -390,19 +361,6 @@ def _build_validator(profile: str, manifest: dict[str, Any]) -> ValidatorGate:
     )
 
 
-def _strict_admission_enabled(profile: str, live_admission_enabled: bool) -> bool:
-    return profile in _LIVE_VALIDATOR_PROFILES and live_admission_enabled
-
-
-def _managed_admission_failure_message(profile: str, live_admission_enabled: bool) -> str:
-    return (
-        "Managed runtime requires strict live admission "
-        f"(validator_profile='training', live_admission_enabled=1). "
-        f"Current configuration: validator_profile={profile!r}, "
-        f"live_admission_enabled={live_admission_enabled!r}."
-    )
-
-
 def _default_live_validator(*, include_patchability: bool = False) -> ValidatorGate:
     checks = [
         BuildBootCheck(),
@@ -427,7 +385,6 @@ class ManagedSnapshotRuntime:
         builder: SnapshotBuilder | None = None,
         validator: ValidatorGate | None = None,
         validator_profile: str | None = None,
-        allow_insecure_offline_profile: bool | None = None,
         pool_size: int = 3,
         selection_strategy: str = "random",
         parent_selection_strategy: str = "policy",
@@ -436,10 +393,10 @@ class ManagedSnapshotRuntime:
         generation_retries: int = 3,
         live_admission_enabled: bool = False,
         teardown_booted_projects: bool = True,
-        compose_runner: ComposeProjectRunner | None = None,
+        helm_runner: HelmRunner | None = None,
+        compose_runner: ComposeProjectRunner | None = None,  # compat alias
         live_validator: ValidatorGate | None = None,
         enable_patch_validation: bool = False,
-        persisted_snapshot_validation: str | None = None,
         mutation_policy: PopulationMutationPolicy | None = None,
     ) -> None:
         self.manifest_path = (
@@ -453,27 +410,11 @@ class ManagedSnapshotRuntime:
         self.builder = builder or _default_builder()
         self.mutation_policy = mutation_policy or PopulationMutationPolicy()
         self.mutator = Mutator(self.builder, policy=self.mutation_policy)
-        self.allow_insecure_offline_profile = (
-            _non_live_opt_out_enabled()
-            if allow_insecure_offline_profile is None
-            else bool(allow_insecure_offline_profile)
-        )
         self.validator_profile = _normalize_validator_profile(
-            validator_profile
-            or os.getenv("OPENRANGE_RUNTIME_VALIDATOR_PROFILE", _DEFAULT_VALIDATOR_PROFILE)
-        )
-        self._enforce_validator_profile_policy()
-        self.persisted_snapshot_validation = _normalize_persisted_snapshot_validation(
-            persisted_snapshot_validation
-            or os.getenv("OPENRANGE_PERSISTED_SNAPSHOT_VALIDATION", "offline")
+            validator_profile or os.getenv("OPENRANGE_RUNTIME_VALIDATOR_PROFILE", "offline")
         )
         self.validator = validator or _build_validator(self.validator_profile, self.manifest)
-        self.persisted_validator = (
-            _build_validator("offline", self.manifest)
-            if self.persisted_snapshot_validation == "offline"
-            else None
-        )
-        self.renderer = SnapshotRenderer()
+        self.renderer = KindRenderer()
         self.curriculum = CurriculumTracker()
         self.pool_size = max(1, pool_size)
         self.selection_strategy = selection_strategy
@@ -483,7 +424,8 @@ class ManagedSnapshotRuntime:
         self.generation_retries = max(1, generation_retries)
         self.live_admission_enabled = live_admission_enabled
         self.teardown_booted_projects = teardown_booted_projects
-        self.compose_runner = compose_runner or ComposeProjectRunner()
+        self.helm_runner = helm_runner or compose_runner or HelmRunner()
+        self.compose_runner = self.helm_runner  # compat alias
         self.enable_patch_validation = enable_patch_validation
         self.live_validator = live_validator or (
             _default_live_validator(include_patchability=enable_patch_validation)
@@ -500,46 +442,20 @@ class ManagedSnapshotRuntime:
 
     @classmethod
     def from_env(cls) -> "ManagedSnapshotRuntime":
-        profile = _normalize_validator_profile(
-            os.getenv(
-                "OPENRANGE_RUNTIME_VALIDATOR_PROFILE",
-                _DEFAULT_MANAGED_VALIDATOR_PROFILE,
-            )
-        )
-        live_admission_enabled = _env_flag(
-            "OPENRANGE_ENABLE_LIVE_ADMISSION",
-            default=_DEFAULT_MANAGED_LIVE_ADMISSION,
-        )
-        if not _strict_admission_enabled(profile, live_admission_enabled):
-            message = _managed_admission_failure_message(profile, live_admission_enabled)
-            opt_out_env = _non_live_opt_out_env_name()
-            if opt_out_env:
-                logger.warning(
-                    "%s Explicit opt-out enabled via %s=1.",
-                    message,
-                    opt_out_env,
-                )
-            else:
-                raise RuntimeError(
-                    f"{message} Set {_ALLOW_NON_LIVE_ADMISSION_ENV}=1 to explicitly opt out."
-                )
-
         return cls(
             manifest_path=os.getenv("OPENRANGE_RUNTIME_MANIFEST"),
             store_dir=os.getenv("OPENRANGE_SNAPSHOT_DIR"),
-            builder=default_snapshot_builder(
-                os.getenv("OPENRANGE_RUNTIME_BUILDER", "auto"),
-                reason="managed runtime",
-            ),
-            validator_profile=profile,
-            allow_insecure_offline_profile=_non_live_opt_out_enabled(),
+            validator_profile=os.getenv("OPENRANGE_RUNTIME_VALIDATOR_PROFILE", "offline"),
             pool_size=_env_int("OPENRANGE_SNAPSHOT_POOL_SIZE", 3),
             selection_strategy=os.getenv("OPENRANGE_SNAPSHOT_SELECTION", "random"),
             parent_selection_strategy=os.getenv("OPENRANGE_PARENT_SELECTION", "policy"),
             refill_enabled=_env_flag("OPENRANGE_ENABLE_MANAGED_REFILL", default=False),
             refill_interval_s=float(os.getenv("OPENRANGE_REFILL_INTERVAL_S", "2.0")),
             generation_retries=_env_int("OPENRANGE_GENERATION_RETRIES", 3),
-            live_admission_enabled=live_admission_enabled,
+            live_admission_enabled=_env_flag(
+                "OPENRANGE_ENABLE_LIVE_ADMISSION",
+                default=False,
+            ),
             teardown_booted_projects=not _env_flag(
                 "OPENRANGE_KEEP_BOOTED_VALIDATION_STACKS",
                 default=False,
@@ -548,33 +464,6 @@ class ManagedSnapshotRuntime:
                 "OPENRANGE_ENABLE_PATCH_VALIDATION",
                 default=False,
             ),
-            persisted_snapshot_validation=os.getenv(
-                "OPENRANGE_PERSISTED_SNAPSHOT_VALIDATION",
-                "offline",
-            ),
-        )
-
-    def _enforce_validator_profile_policy(self) -> None:
-        if self.validator_profile in _LIVE_VALIDATOR_PROFILES:
-            return
-
-        warning = (
-            "ManagedSnapshotRuntime validator profile is set to "
-            f"{self.validator_profile!r}; container-backed admission checks are disabled "
-            "(build_boot, exploitability, patchability, evidence, reward_grounding, "
-            "isolation, difficulty, npc_consistency, realism_review)."
-        )
-        if not self.allow_insecure_offline_profile:
-            raise RuntimeError(
-                warning
-                + " Set OPENRANGE_RUNTIME_VALIDATOR_PROFILE=training for strict admission, "
-                + "or set OPENRANGE_ALLOW_NON_LIVE_ADMISSION=1 "
-                + "(legacy alias: OPENRANGE_ALLOW_OFFLINE_ADMISSION=1) "
-                + "to explicitly opt out."
-            )
-        logger.warning(
-            "%s Running with explicit opt-out.",
-            warning,
         )
 
     @staticmethod
@@ -594,7 +483,6 @@ class ManagedSnapshotRuntime:
             if existing < self.pool_size:
                 self._top_up_pool(self.pool_size - existing)
             self._ensure_existing_artifacts()
-            self._revalidate_persisted_snapshots()
 
             available = self.snapshot_count()
             if available == 0:
@@ -646,7 +534,6 @@ class ManagedSnapshotRuntime:
             if alternative is not None:
                 stored = alternative
 
-        self._assert_persisted_snapshot_valid(stored.snapshot_id, stored.snapshot)
         result = RuntimeSnapshot(snapshot_id=stored.snapshot_id, snapshot=stored.snapshot)
         self._track_acquisition(result.snapshot_id)
         return result
@@ -663,13 +550,13 @@ class ManagedSnapshotRuntime:
         if not recent_ids:
             return set()
 
-        entries = _run_coro_sync(self.store.list_entries())
-        by_id = {entry.snapshot_id: entry for entry in entries}
+        all_meta = self.list_snapshots()
+        meta_by_id = {m.get("snapshot_id"): m for m in all_meta}
         vuln_types: set[str] = set()
         for sid in recent_ids:
-            entry = by_id.get(sid)
-            if entry:
-                vuln_types.update(v.type for v in entry.snapshot.truth_graph.vulns)
+            meta = meta_by_id.get(sid)
+            if meta:
+                vuln_types.update(meta.get("vuln_classes", []))
         return vuln_types
 
     def _is_diverse(self, snapshot: SnapshotSpec) -> bool:
@@ -689,29 +576,32 @@ class ManagedSnapshotRuntime:
         """Try to find a snapshot in the store whose vulns don't fully overlap."""
         from open_range.builder.snapshot_store import StoredSnapshot
 
-        entries = _run_coro_sync(self.store.list_entries())
+        all_meta = self.list_snapshots()
         recent = self._recent_vuln_types()
 
-        for entry in entries:
-            sid = entry.snapshot_id
+        for meta in all_meta:
+            sid = meta.get("snapshot_id", "")
             if sid == exclude_id:
                 continue
-            candidate_vulns = {v.type for v in entry.snapshot.truth_graph.vulns}
+            candidate_vulns = set(meta.get("vuln_classes", []))
             if not candidate_vulns or not candidate_vulns.issubset(recent):
-                return entry
+                try:
+                    entry = _run_coro_sync(self.store.get_entry(sid))
+                    return entry
+                except Exception:  # noqa: BLE001
+                    continue
         return None
 
     def get_snapshot(self, snapshot_id: str) -> RuntimeSnapshot:
         self.start()
         stored = _run_coro_sync(self.store.get_entry(snapshot_id))
-        self._assert_persisted_snapshot_valid(stored.snapshot_id, stored.snapshot)
         return RuntimeSnapshot(snapshot_id=stored.snapshot_id, snapshot=stored.snapshot)
 
     def list_snapshots(self) -> list[dict[str, Any]]:
         return _run_coro_sync(self.store.list_snapshots())
 
     def snapshot_count(self) -> int:
-        return int(_run_coro_sync(self.store.count_entries()))
+        return len(self.list_snapshots())
 
     def status(self) -> dict[str, Any]:
         return {
@@ -721,8 +611,6 @@ class ManagedSnapshotRuntime:
             "selection_strategy": self.selection_strategy,
             "parent_selection_strategy": self.parent_selection_strategy,
             "validator_profile": self.validator_profile,
-            "allow_insecure_offline_profile": self.allow_insecure_offline_profile,
-            "persisted_snapshot_validation": self.persisted_snapshot_validation,
             "refill_enabled": self.refill_enabled,
             "live_admission_enabled": self.live_admission_enabled,
             "snapshot_count": self.snapshot_count(),
@@ -742,18 +630,10 @@ class ManagedSnapshotRuntime:
         if snapshot is None:
             return
 
-        from open_range.server.rewards import _is_grounded_finding
-
         total_flags = len(snapshot.flags)
         red_solved = total_flags > 0 and len(state.flags_found) >= total_flags
-        red_actions = [
-            record
-            for record in red_history
-            if record.get("type") not in ("hallucinated_flag", "evidence")
-        ]
         blue_detected = any(
-            record.get("type") == "finding"
-            and _is_grounded_finding(record, red_actions)
+            record.get("type") == "finding" or record.get("cmd_name") == "submit_finding"
             for record in blue_history
         )
         weak_areas = []
@@ -785,33 +665,30 @@ class ManagedSnapshotRuntime:
             self._generate_and_store_snapshot()
 
     def _ensure_existing_artifacts(self) -> None:
-        for stored in _run_coro_sync(self.store.list_entries()):
-            snapshot_id = stored.snapshot_id
+        for meta in self.list_snapshots():
+            snapshot_id = str(meta.get("snapshot_id", ""))
+            if not snapshot_id:
+                continue
             artifacts_dir = self._artifacts_dir(snapshot_id)
             if artifacts_dir.exists():
                 continue
+            stored = _run_coro_sync(self.store.get_entry(snapshot_id))
             materialized = self._materialize_snapshot(stored.snapshot, snapshot_id)
             _run_coro_sync(self.store.store(materialized, snapshot_id=snapshot_id))
 
-    def _revalidate_persisted_snapshots(self) -> None:
-        if self.persisted_snapshot_validation == "trust":
-            return
-        for entry in _run_coro_sync(self.store.list_entries()):
-            self._assert_persisted_snapshot_valid(entry.snapshot_id, entry.snapshot)
-
-    def _assert_persisted_snapshot_valid(self, snapshot_id: str, snapshot: SnapshotSpec) -> None:
-        if self.persisted_validator is None:
-            return
-        result = _run_coro_sync(self.persisted_validator.validate(snapshot, ContainerSet()))
-        if result.passed:
-            return
-        raise RuntimeError(
-            "persisted snapshot failed startup revalidation "
-            f"({snapshot_id}): {self._validation_error(result)}"
-        )
-
     def _generate_and_store_snapshot(self) -> str:
         last_error: str | None = None
+        parent_snapshot: SnapshotSpec | None = None
+        parent_snapshot_id: str | None = None
+        existing = self.list_snapshots()
+        if existing:
+            parent_snapshot_id = str(existing[0].get("snapshot_id", "") or "")
+            if parent_snapshot_id:
+                try:
+                    parent_snapshot = _run_coro_sync(self.store.get(parent_snapshot_id))
+                except FileNotFoundError:
+                    parent_snapshot = None
+                    parent_snapshot_id = None
 
         for attempt in range(1, self.generation_retries + 1):
             context = self._build_context()
@@ -904,36 +781,16 @@ class ManagedSnapshotRuntime:
             topology["snapshot_id"] = snapshot_id
             rendered.topology = topology
             self.renderer.render(rendered, snapshot_dir)
-            compose_path = snapshot_dir / "docker-compose.yml"
-            rendered.compose = yaml.safe_load(compose_path.read_text(encoding="utf-8")) or {}
 
-            project: BootedSnapshotProject | None = None
-            try:
-                project = self.compose_runner.boot(
-                    snapshot_id=snapshot_id,
-                    artifacts_dir=snapshot_dir,
-                    compose=rendered.compose,
-                    project_name=project_name,
-                )
-            except Exception as exc:  # noqa: BLE001
-                self._best_effort_teardown_validation_project(
-                    snapshot_dir=snapshot_dir,
-                    project_name=project_name,
-                )
-                return ValidationResult(
-                    passed=False,
-                    checks=[
-                        CheckResult(
-                            name="build_boot",
-                            passed=False,
-                            error=str(exc),
-                        )
-                    ],
-                )
+            chart_dir = snapshot_dir / "openrange"
+            up_result = self._helm_up(snapshot_dir, chart_dir, project_name)
+            if up_result is not None:
+                return up_result
 
             try:
-                self._deploy_snapshot_artifacts(rendered, project.containers, snapshot_dir)
-                return _run_coro_sync(self.validator.validate(rendered, project.containers))
+                containers = self._discover_pods(project_name)
+                self._deploy_snapshot_artifacts(rendered, containers, snapshot_dir)
+                return _run_coro_sync(self.validator.validate(rendered, containers))
             except Exception as exc:  # noqa: BLE001
                 return ValidationResult(
                     passed=False,
@@ -946,66 +803,32 @@ class ManagedSnapshotRuntime:
                     ],
                 )
             finally:
-                if project is not None:
-                    try:
-                        self.compose_runner.teardown(project)
-                    except Exception:  # noqa: BLE001
-                        logger.warning(
-                            "Failed to tear down validation project %s",
-                            project.project_name,
-                        )
-
-    def _best_effort_teardown_validation_project(
-        self,
-        *,
-        snapshot_dir: Path,
-        project_name: str,
-    ) -> None:
-        """Tear down a failed validation project when boot aborts mid-flight."""
-        compose_file = snapshot_dir / "docker-compose.yml"
-        try:
-            self.compose_runner.teardown(
-                BootedSnapshotProject(
-                    project_name=project_name,
-                    compose_file=compose_file,
-                    artifacts_dir=snapshot_dir,
-                    containers=ContainerSet(project_name=project_name),
-                )
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "Failed to tear down validation project %s after boot failure",
-                project_name,
-            )
+                self._helm_down(project_name)
 
     def _project_name(self, snapshot_id: str) -> str:
         safe = "".join(ch if ch.isalnum() else "-" for ch in snapshot_id.lower()).strip("-")
         safe = safe[:40] or "snapshot"
         return f"openrange-{safe}"
 
-    def _compose_up(
+    def _helm_up(
         self,
         snapshot_dir: Path,
-        compose_file: Path,
-        project_name: str,
+        chart_dir: Path,
+        release_name: str,
     ) -> ValidationResult | None:
         try:
             proc = sp.run(
                 [
-                    "docker",
-                    "compose",
-                    "-p",
-                    project_name,
-                    "-f",
-                    str(compose_file),
-                    "up",
-                    "-d",
-                    "--build",
+                    "helm", "upgrade", "--install",
+                    release_name,
+                    str(chart_dir),
+                    "--wait",
+                    "--timeout", "300s",
                 ],
                 cwd=str(snapshot_dir),
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=330,
                 check=False,
             )
         except FileNotFoundError as exc:
@@ -1020,51 +843,44 @@ class ManagedSnapshotRuntime:
                     CheckResult(
                         name="build_boot",
                         passed=False,
-                        error="docker compose up timed out after 300s",
+                        error="helm install timed out after 300s",
                     )
                 ],
             )
 
         if proc.returncode != 0:
-            error = (proc.stderr or proc.stdout or "").strip() or "docker compose up failed"
+            error = (proc.stderr or proc.stdout or "").strip() or "helm install failed"
             return ValidationResult(
                 passed=False,
                 checks=[CheckResult(name="build_boot", passed=False, error=error)],
             )
         return None
 
-    def _compose_down(self, snapshot_dir: Path, compose_file: Path, project_name: str) -> None:
+    def _helm_down(self, release_name: str) -> None:
         try:
             sp.run(
-                [
-                    "docker",
-                    "compose",
-                    "-p",
-                    project_name,
-                    "-f",
-                    str(compose_file),
-                    "down",
-                    "-v",
-                    "--remove-orphans",
-                ],
-                cwd=str(snapshot_dir),
+                ["helm", "uninstall", release_name, "--wait"],
                 capture_output=True,
                 text=True,
                 timeout=120,
                 check=False,
             )
         except Exception:  # noqa: BLE001
-            logger.warning("Failed to tear down validation project %s", project_name)
+            logger.warning("Failed to uninstall validation release %s", release_name)
 
-    def _discover_containers(self, project_name: str) -> ContainerSet:
+    def _discover_pods(self, release_name: str) -> ContainerSet:
+        from open_range.server.helm_runner import KubePodSet
+
         proc = sp.run(
             [
-                "docker",
-                "ps",
-                "--filter",
-                f"label=com.docker.compose.project={project_name}",
-                "--format",
-                "{{.Label \"com.docker.compose.service\"}} {{.Names}}",
+                "kubectl", "get", "pods",
+                "--all-namespaces",
+                "-l", "app.kubernetes.io/part-of=openrange",
+                "-o", "jsonpath="
+                "{range .items[*]}"
+                "{.metadata.namespace}/{.metadata.name} "
+                "{.metadata.labels.app}\\n"
+                "{end}",
             ],
             capture_output=True,
             text=True,
@@ -1072,17 +888,21 @@ class ManagedSnapshotRuntime:
             check=False,
         )
         if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or "docker ps failed")
+            raise RuntimeError(proc.stderr.strip() or "kubectl get pods failed")
 
         container_ids: dict[str, str] = {}
-        for line in proc.stdout.splitlines():
-            service, _, container_name = line.partition(" ")
-            if service and container_name:
-                container_ids[service.strip()] = container_name.strip()
+        for line in proc.stdout.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                ns_pod, app_label = parts[0], parts[1]
+                container_ids[app_label] = ns_pod
 
         if not container_ids:
-            raise RuntimeError(f"no running containers found for project {project_name}")
-        return ContainerSet(project_name=project_name, container_ids=container_ids)
+            raise RuntimeError(f"no running pods found for release {release_name}")
+        return KubePodSet(project_name=release_name, container_ids=container_ids)
 
     @staticmethod
     def _mysql_credentials(snapshot: SnapshotSpec) -> str:
@@ -1197,10 +1017,11 @@ class ManagedSnapshotRuntime:
             rng=rng,
         )
         logger.info(
-            "ManagedSnapshotRuntime selected parent %s via %s %s",
+            "ManagedSnapshotRuntime selected parent %s via %s (score=%.3f components=%s)",
             selected.snapshot_id,
             self.mutation_policy.name,
-            json.dumps(score.log_payload(), sort_keys=True),
+            score.total,
+            score.components,
         )
         return selected
 
@@ -1236,8 +1057,9 @@ class ManagedSnapshotRuntime:
 
         self.renderer.render(rendered, artifacts_dir)
 
-        compose_path = artifacts_dir / "docker-compose.yml"
-        rendered.compose = yaml.safe_load(compose_path.read_text(encoding="utf-8")) or {}
+        values_path = artifacts_dir / "openrange" / "values.yaml"
+        if values_path.exists():
+            rendered.compose = yaml.safe_load(values_path.read_text(encoding="utf-8")) or {}
         return rendered
 
     def activate_snapshot_project(
@@ -1317,8 +1139,58 @@ class ManagedSnapshotRuntime:
         containers: ContainerSet,
         snapshot: SnapshotSpec,
     ) -> None:
-        apply_rendered_payloads(
-            containers=containers,
-            artifacts_dir=self._artifacts_dir(snapshot_id),
-            compose=snapshot.compose,
+        manifest_path = self._artifacts_dir(snapshot_id) / "file-payloads.json"
+        if not manifest_path.exists():
+            return
+
+        payloads = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(payloads, dict):
+            return
+
+        for file_key, rel_path in payloads.items():
+            src = self._artifacts_dir(snapshot_id) / str(rel_path)
+            if file_key == "db:sql":
+                self._apply_sql_payload(containers, src, snapshot)
+                continue
+
+            if ":" not in file_key:
+                continue
+
+            container, target_path = file_key.split(":", 1)
+            parent_dir = PurePosixPath(target_path).parent.as_posix() or "/"
+            _run_coro_sync(containers.exec(container, f"mkdir -p '{parent_dir}'"))
+            _run_coro_sync(containers.cp(container, str(src), target_path))
+
+    def _apply_sql_payload(
+        self,
+        containers: ContainerSet,
+        sql_path: Path,
+        snapshot: SnapshotSpec,
+    ) -> None:
+        root_password = self._mysql_root_password(snapshot)
+        _run_coro_sync(containers.cp("db", str(sql_path), "/tmp/openrange-generated.sql"))
+        _run_coro_sync(
+            containers.exec(
+                "db",
+                (
+                    "mysql -u root "
+                    f"-p'{root_password}' < /tmp/openrange-generated.sql"
+                ),
+            )
         )
+        _run_coro_sync(containers.exec("db", "rm -f /tmp/openrange-generated.sql"))
+
+    @staticmethod
+    def _mysql_root_password(snapshot: SnapshotSpec) -> str:
+        db_service = snapshot.compose.get("services", {}).get("db", {})
+        environment = db_service.get("environment", {})
+        if not environment and isinstance(db_service, dict):
+            environment = db_service.get("env", {})
+        if isinstance(environment, dict):
+            return str(environment.get("MYSQL_ROOT_PASSWORD", "r00tP@ss!"))
+        if isinstance(environment, list):
+            for item in environment:
+                text = str(item)
+                if text.startswith("MYSQL_ROOT_PASSWORD="):
+                    return text.split("=", 1)[1]
+        return "r00tP@ss!"

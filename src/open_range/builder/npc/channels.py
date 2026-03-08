@@ -76,13 +76,11 @@ class ChatChannel:
         return [
             {
                 "type": "chat",
-                "label": "benign",
                 "sender": m.sender,
                 "recipient": m.recipient,
                 "content": m.content,
                 "timestamp": m.timestamp,
                 "channel": m.channel,
-                "source": f"chat:{m.channel}",
             }
             for m in self._messages
         ]
@@ -185,7 +183,6 @@ class VoiceChannel:
         return [
             {
                 "type": "voice",
-                "label": "benign",
                 "caller": c.caller,
                 "callee": c.callee,
                 "pretext": c.pretext,
@@ -193,7 +190,6 @@ class VoiceChannel:
                 "transcript": c.transcript,
                 "timestamp": c.timestamp,
                 "duration_s": c.duration_s,
-                "source": "voice:phone",
             }
             for c in self._calls
         ]
@@ -275,7 +271,6 @@ class DocumentChannel:
         return [
             {
                 "type": "document",
-                "label": "benign",
                 "sender": d.sender,
                 "recipient": d.recipient,
                 "filename": d.filename,
@@ -283,7 +278,6 @@ class DocumentChannel:
                 "timestamp": d.timestamp,
                 "accessed": d.accessed,
                 "access_decision": d.access_decision,
-                "source": f"document:{d.filename}",
             }
             for d in self._documents
         ]

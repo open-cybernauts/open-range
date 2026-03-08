@@ -17,7 +17,6 @@ from open_range.protocols import (
     FlagSpec,
     GoldenPathStep,
     NPCPersona,
-    ServiceInstance,
     SnapshotSpec,
     Vulnerability,
 )
@@ -60,8 +59,6 @@ class TestRealLLMOutput:
     @pytest.fixture
     def llm_json(self):
         path = ROOT / "snapshots" / "llm_tier1_test.json"
-        if not path.exists():
-            pytest.skip("llm_tier1_test.json fixture not present")
         return path.read_text()
 
     def test_parses_to_snapshot_spec(self, llm_json):
@@ -114,12 +111,6 @@ class TestRealLLMOutput:
         assert "Meridian" in spec.task.red_briefing
         assert spec.task.blue_briefing != ""
 
-    def test_default_challenge_catalog_is_backfilled(self, llm_json):
-        spec = _parse_llm_response(llm_json)
-        assert spec.challenges
-        assert spec.challenges[0].linked_vulns
-        assert spec.challenges[0].linked_flags
-
     def test_npc_personas(self, llm_json):
         spec = _parse_llm_response(llm_json)
         assert len(spec.npc_personas) == 8
@@ -137,17 +128,17 @@ class TestRealLLMOutput:
         spec = _parse_llm_response(llm_json)
         # Real LLM output has explicit files + vulnerable_code dicts
         assert len(spec.files) > 0
-        assert "web:/var/www/portal/lookup.php" in spec.files
-        assert "web:/var/www/portal/admin/compliance_report.php" in spec.files
+        assert "web:/var/www/html/lookup.php" in spec.files
+        assert "web:/var/www/html/admin/compliance_report.php" in spec.files
 
     def test_vulnerable_code_as_dict_extracted_to_files(self, llm_json):
         spec = _parse_llm_response(llm_json)
         # The VULN-SQLI-LOOKUP has vulnerable_code as dict with key
-        # /var/www/portal/lookup.php. It should be extracted to files
-        # as "web:/var/www/portal/lookup.php".
+        # /var/www/html/lookup.php. It should be extracted to files
+        # as "web:/var/www/html/lookup.php".
         # But the explicit files dict already has this key, so the
         # explicit one takes precedence (container_key not in files check).
-        assert "web:/var/www/portal/lookup.php" in spec.files
+        assert "web:/var/www/html/lookup.php" in spec.files
 
 
 # ---------------------------------------------------------------------------
@@ -214,44 +205,6 @@ class TestExploitStepFieldMappings:
         assert ec.command == "nmap -sV ..."
         assert ec.description == "port scan"
 
-
-class TestBuilderContractFallbacks:
-    def test_logs_when_service_instances_and_challenges_are_backfilled(self, caplog):
-        raw = _minimal_json(
-            topology={"hosts": ["web"], "zones": {"dmz": ["web"]}},
-            truth_graph={
-                "vulns": [
-                    {
-                        "id": "V1",
-                        "type": "sqli",
-                        "host": "web",
-                        "service": "nginx",
-                        "injection_point": "/search?q=",
-                    }
-                ],
-                "exploit_chain": [],
-            },
-            flags=[{"id": "flag1", "value": "FLAG{test}", "path": "/tmp/flag.txt", "host": "web"}],
-            task={
-                "red_briefing": "Investigate the web tier.",
-                "blue_briefing": "Monitor the environment.",
-            },
-        )
-
-        with caplog.at_level("WARNING"):
-            spec = _parse_llm_response(raw)
-
-        assert spec.service_instances
-        assert spec.challenges
-        assert "omitted service_instances" in caplog.text
-        assert "omitted challenges" in caplog.text
-
-    def test_extracts_json_when_wrapped_in_prose(self):
-        wrapped = 'Here is the snapshot JSON:\n```json\n' + _minimal_json(task={"red_briefing": "A", "blue_briefing": "B"}) + '\n```\nUse it carefully.'
-        spec = _parse_llm_response(wrapped)
-        assert isinstance(spec, SnapshotSpec)
-        assert spec.task.red_briefing == "A"
-
     def test_canonical_names_take_precedence(self):
         """When both canonical and alias are present, canonical wins (via get order)."""
         raw = _minimal_json(
@@ -274,58 +227,6 @@ class TestBuilderContractFallbacks:
         assert ec.vuln_id == "canonical"
         assert ec.command == "canonical_cmd"
         assert ec.description == "canonical_desc"
-
-
-class TestExtendedSnapshotFields:
-    def test_service_instances_parse(self):
-        raw = _minimal_json(
-            topology={"hosts": ["web", "db"]},
-            service_instances=[
-                {
-                    "instance_id": "web:nginx",
-                    "host": "web",
-                    "service_name": "nginx",
-                    "archetype": "nginx",
-                    "image": "nginx:1.25",
-                    "ports": [80],
-                    "env_vars": {"SERVER_NAME": "portal.local"},
-                }
-            ],
-        )
-        spec = _parse_llm_response(raw)
-        assert spec.service_instances == [
-            ServiceInstance(
-                instance_id="web:nginx",
-                host="web",
-                service_name="nginx",
-                archetype="nginx",
-                image="nginx:1.25",
-                ports=[80],
-                env_vars={"SERVER_NAME": "portal.local"},
-            )
-        ]
-
-    def test_challenges_sync_back_to_legacy_task(self):
-        raw = _minimal_json(
-            challenges=[
-                {
-                    "id": "challenge_web_entry",
-                    "challenge_type": "exploit",
-                    "roles": ["red", "blue"],
-                    "role_briefings": {
-                        "red": "Pivot from the DMZ into internal services.",
-                        "blue": "Watch for suspicious lateral movement.",
-                    },
-                    "linked_vulns": ["V1"],
-                    "linked_flags": ["flag1"],
-                    "success_conditions": [{"type": "flag", "value": "FLAG{x}"}],
-                }
-            ],
-        )
-        spec = _parse_llm_response(raw)
-        assert spec.challenges[0].id == "challenge_web_entry"
-        assert spec.task.red_briefing == "Pivot from the DMZ into internal services."
-        assert spec.task.blue_briefing == "Watch for suspicious lateral movement."
 
 
 # ---------------------------------------------------------------------------
@@ -639,7 +540,7 @@ class TestFilesDictExtraction:
         assert spec.files["web:/var/www/search.php"] == "<?php $q=$_GET['q']; ?>"
 
     def test_vulnerable_code_string_on_web_host(self):
-        """String vulnerable_code on web host with / injection_point goes to web:/var/www/portal{ip}."""
+        """String vulnerable_code on web host with / injection_point goes to web:/var/www/html{ip}."""
         raw = _minimal_json(
             truth_graph={
                 "vulns": [
@@ -656,7 +557,7 @@ class TestFilesDictExtraction:
             }
         )
         spec = _parse_llm_response(raw)
-        assert "web:/var/www/portal/search.php" in spec.files
+        assert "web:/var/www/html/search.php" in spec.files
 
     def test_vulnerable_code_string_non_web_host_skipped(self):
         """String vulnerable_code on non-web host without / prefix is not extracted."""

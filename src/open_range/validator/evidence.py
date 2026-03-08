@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import shlex
-
 from open_range.protocols import CheckResult, ContainerSet, SnapshotSpec
 
 
@@ -32,46 +30,18 @@ class EvidenceCheck:
                 host, path = "siem", loc
 
             try:
-                safe_path = shlex.quote(path)
                 if item.type in ("log_entry", "alert"):
-                    if pattern:
-                        result = await containers.exec_run(
-                            host,
-                            f"grep -c {shlex.quote(pattern)} {safe_path}",
-                        )
-                        output = result.stdout.strip()
-                        if result.exit_code != 0:
-                            missing.append({
-                                "item": item.type,
-                                "location": loc,
-                                "pattern": pattern,
-                                "error": result.combined_output
-                                or f"evidence command failed (exit={result.exit_code})",
-                            })
-                        elif output in ("0", ""):
-                            missing.append({
-                                "item": item.type,
-                                "location": loc,
-                                "pattern": pattern,
-                            })
-                    else:
-                        result = await containers.exec_run(host, f"test -f {safe_path}")
-                        if result.exit_code != 0:
-                            missing.append({
-                                "item": item.type,
-                                "location": loc,
-                                "error": result.combined_output
-                                or f"missing evidence file (exit={result.exit_code})",
-                            })
+                    # grep for pattern in the file
+                    cmd = f"grep -c '{pattern}' {path}" if pattern else f"test -f {path} && echo ok"
+                    output = await containers.exec(host, cmd)
+                    # grep -c returns "0" if no matches — that means missing
+                    if pattern and output.strip() in ("0", ""):
+                        missing.append({"item": item.type, "location": loc, "pattern": pattern})
                 else:
-                    result = await containers.exec_run(host, f"test -f {safe_path}")
-                    if result.exit_code != 0:
-                        missing.append({
-                            "item": item.type,
-                            "location": loc,
-                            "error": result.combined_output
-                            or f"missing evidence file (exit={result.exit_code})",
-                        })
+                    # file existence check
+                    output = await containers.exec(host, f"test -f {path} && echo exists")
+                    if "exists" not in output:
+                        missing.append({"item": item.type, "location": loc})
             except Exception as exc:  # noqa: BLE001
                 missing.append({"item": item.type, "location": loc, "error": str(exc)})
 

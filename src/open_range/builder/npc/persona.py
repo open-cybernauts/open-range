@@ -12,15 +12,11 @@ from open_range.protocols import NPCPersona
 __all__ = ["NPCPersona", "default_personas"]
 
 
-def default_personas(domain: str = "corp.local") -> list[NPCPersona]:
+def default_personas() -> list[NPCPersona]:
     """Return a default set of NPC personas for testing.
 
     Two personas with contrasting security awareness levels:
     a low-awareness marketing employee and a high-awareness CISO.
-
-    Args:
-        domain: Email domain to use. Derived from snapshot topology at
-                runtime so personas match the generated environment.
     """
     return [
         NPCPersona(
@@ -45,7 +41,7 @@ def default_personas(domain: str = "corp.local") -> list[NPCPersona]:
                 ],
             },
             accounts={
-                "email": f"jsmith@{domain}",
+                "email": "jsmith@acmecorp.local",
                 "ldap": "jsmith",
                 "smb_shares": "marketing,shared",
             },
@@ -74,7 +70,7 @@ def default_personas(domain: str = "corp.local") -> list[NPCPersona]:
                 ],
             },
             accounts={
-                "email": f"dchen@{domain}",
+                "email": "dchen@acmecorp.local",
                 "ldap": "dchen",
                 "smb_shares": "security,executive",
             },

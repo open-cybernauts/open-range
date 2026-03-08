@@ -106,15 +106,6 @@ def _write_snapshot(spec: "SnapshotSpec", output_dir: Path) -> Path:
     return dest
 
 
-def _load_compose_file(path: Path) -> dict[str, Any]:
-    """Load a rendered docker-compose file."""
-    with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"compose file must be a YAML mapping, got {type(data).__name__}")
-    return data
-
-
 def _parse_roles(raw: str) -> tuple[str, ...]:
     """Parse a comma-separated role list."""
     roles = tuple(dict.fromkeys(part.strip().lower() for part in raw.split(",") if part.strip()))
@@ -230,13 +221,9 @@ def build(
 @click.option("--teacher-model", default=None, help="LiteLLM teacher model. If omitted, selected roles use scripted agents.")
 @click.option("--red-model", default=None, help="Override model for Red teacher.")
 @click.option("--blue-model", default=None, help="Override model for Blue teacher.")
-@click.option("--bootstrap-traces", multiple=True, type=click.Path(exists=True), help="Existing SFT JSONL files to merge into the output.")
-@click.option("--bootstrap-examples", default=0, type=click.IntRange(0), help="How many bootstrap traces to inject as few-shot examples per generated role.")
-@click.option("--merge-bootstrap/--generated-only", default=True, help="Merge bootstrap traces into the output file, or emit only newly generated records.")
-@click.option("--tool-info", multiple=True, type=click.Path(exists=True), help="Text, JSON, or YAML tool catalog file to append to generated system prompts.")
 @click.option("--temperature", default=0.2, type=float, help="Teacher sampling temperature.")
 @click.option("--max-tokens", default=512, type=int, help="Maximum completion tokens per teacher action.")
-@click.option("--template-only/--llm-builder", default=False, help="When using --manifest, force the deterministic template builder instead of the preferred LLM-backed path.")
+@click.option("--template-only/--llm-builder", default=True, help="When using --manifest, build snapshots deterministically instead of via LLM.")
 @click.option("--builder-model", default=None, help="LLM builder model when using --llm-builder.")
 @click.option("--randomize-flags/--static-flags", default=True, help="Randomize flag values per synthetic episode.")
 def synthetic_data(
@@ -252,10 +239,6 @@ def synthetic_data(
     teacher_model: str | None,
     red_model: str | None,
     blue_model: str | None,
-    bootstrap_traces: tuple[str, ...],
-    bootstrap_examples: int,
-    merge_bootstrap: bool,
-    tool_info: tuple[str, ...],
     temperature: float,
     max_tokens: int,
     template_only: bool,
@@ -267,13 +250,6 @@ def synthetic_data(
         SyntheticTraceGenerator,
         build_teacher_agents,
     )
-    from open_range.training.dataset import (
-        append_tool_context,
-        extract_bootstrap_messages,
-        load_jsonl_records,
-        load_tool_context,
-        write_jsonl_records,
-    )
 
     if bool(manifest) == bool(snapshot):
         click.echo("Error: provide exactly one of --manifest or --snapshot.", err=True)
@@ -284,25 +260,11 @@ def synthetic_data(
         teacher_model
         or os.environ.get("OPENRANGE_SYNTH_MODEL")
     )
-    bootstrap_records = load_jsonl_records(bootstrap_traces) if bootstrap_traces else []
-    tool_context = load_tool_context(tool_info) if tool_info else ""
     red_agent, blue_agent = build_teacher_agents(
         teacher_model=resolved_teacher_model,
         roles=selected_roles,
         red_model=red_model,
         blue_model=blue_model,
-        red_bootstrap_messages=extract_bootstrap_messages(
-            bootstrap_records,
-            role="red",
-            limit=bootstrap_examples,
-        ),
-        blue_bootstrap_messages=extract_bootstrap_messages(
-            bootstrap_records,
-            role="blue",
-            limit=bootstrap_examples,
-        ),
-        red_system_suffix=tool_context,
-        blue_system_suffix=tool_context,
         temperature=temperature,
         max_tokens=max_tokens,
     )
@@ -313,7 +275,6 @@ def synthetic_data(
             snapshot=_load_snapshot(snapshot),
             red_agent=red_agent,
             blue_agent=blue_agent,
-            active_roles=selected_roles,
             tier=tier,
             max_steps=max_steps,
             randomize_flags=randomize_flags,
@@ -324,7 +285,6 @@ def synthetic_data(
             _load_manifest(str(manifest)),
             red_agent=red_agent,
             blue_agent=blue_agent,
-            active_roles=selected_roles,
             template_only=template_only,
             builder_model=builder_model,
             tier=tier,
@@ -348,38 +308,18 @@ def synthetic_data(
         + (", ".join(teacher_roles) if teacher_roles else "none (scripted fallbacks)")
     )
     try:
-        logger = generator.generate(
+        logger, count = generator.export_jsonl(
+            output,
             num_traces=num_traces,
             seed=seed,
-        )
-        generated_records = logger.to_records(
             reward_threshold=reward_threshold,
             roles=selected_roles,
         )
-        if tool_context:
-            generated_records = append_tool_context(
-                generated_records,
-                tool_context,
-            )
-
-        records_to_write = [*bootstrap_records, *generated_records] if merge_bootstrap else generated_records
-        count = write_jsonl_records(output, records_to_write)
-        generated_count = len(generated_records)
-        bootstrap_count = len(bootstrap_records)
     except Exception as exc:
         click.echo(f"Error: synthetic data generation failed: {exc}", err=True)
         sys.exit(1)
 
     click.echo(f"Wrote {count} JSONL records to {output}")
-    click.echo(f"  Generated records: {generated_count}")
-    if bootstrap_traces and merge_bootstrap:
-        click.echo(f"  Bootstrap records: {bootstrap_count}")
-    elif bootstrap_traces:
-        click.echo(f"  Bootstrap records loaded for prompting only: {bootstrap_count}")
-    if bootstrap_examples:
-        click.echo(f"  Few-shot bootstrap examples per role: {bootstrap_examples}")
-    if tool_info:
-        click.echo(f"  Tool catalogs applied: {len(tool_info)}")
     click.echo(f"  Episodes: {len(logger.episodes)}")
     click.echo(f"  Randomized flags: {'yes' if randomize_flags else 'no'}")
 
@@ -391,13 +331,13 @@ def synthetic_data(
 
 @cli.command()
 @click.option("-s", "--snapshot", required=True, type=click.Path(exists=True), help="Path to snapshot JSON.")
-@click.option("-o", "--output", required=True, type=click.Path(), help="Output directory for Docker artifacts.")
+@click.option("-o", "--output", required=True, type=click.Path(), help="Output directory for Helm chart and Kind config.")
 def render(snapshot: str, output: str) -> None:
-    """Render a snapshot JSON into Docker artifacts (Dockerfiles, compose, configs)."""
-    from open_range.builder.renderer import SnapshotRenderer
+    """Render a snapshot JSON into a Helm chart targeting Kind."""
+    from open_range.builder.renderer import KindRenderer
 
     spec = _load_snapshot(snapshot)
-    renderer = SnapshotRenderer()
+    renderer = KindRenderer()
     output_path = Path(output)
 
     click.echo(f"Rendering snapshot to {output_path} ...")
@@ -413,6 +353,9 @@ def render(snapshot: str, output: str) -> None:
         click.echo(f"Produced {len(artifacts)} artifacts:")
         for name in artifacts:
             click.echo(f"  {name}")
+        chart_dir = output_path / "openrange"
+        if chart_dir.is_dir():
+            click.echo(f"  openrange/ (Helm chart)")
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +377,7 @@ _CHECK_REGISTRY: dict[str, str] = {
 }
 
 # Checks that require running Docker containers.
-_DOCKER_CHECKS = {"build_boot", "exploitability", "patchability", "evidence", "reward_grounding"}
+_DOCKER_CHECKS = {"build_boot", "exploitability", "patchability", "evidence"}
 
 
 def _import_check(dotted: str) -> Any:
@@ -450,23 +393,7 @@ def _import_check(dotted: str) -> Any:
 @click.option("-s", "--snapshot", required=True, type=click.Path(exists=True), help="Path to snapshot JSON.")
 @click.option("--checks", default=None, help="Comma-separated check names (default: all applicable).")
 @click.option("--docker/--no-docker", default=False, help="Include Docker-dependent checks (requires running containers).")
-@click.option("--deploy-hf", is_flag=True, default=False, help="After validation passes, publish the current app plus this snapshot to a Hugging Face Space.")
-@click.option("--hf-space", default=None, help="Hugging Face Space repo id (<user>/<space>). Defaults to $OPENRANGE_HF_SPACE.")
-@click.option("--hf-token", default=None, help="Hugging Face token. Defaults to $HF_TOKEN.")
-@click.option("--hf-create/--no-hf-create", default=True, help="Create the Space automatically if it does not exist.")
-@click.option("--hf-private/--hf-public", default=None, help="Visibility to use if the Space is created during deployment.")
-@click.option("--hf-commit-message", default=None, help="Optional commit message for the Space upload.")
-def validate(
-    snapshot: str,
-    checks: str | None,
-    docker: bool,
-    deploy_hf: bool,
-    hf_space: str | None,
-    hf_token: str | None,
-    hf_create: bool,
-    hf_private: bool | None,
-    hf_commit_message: str | None,
-) -> None:
+def validate(snapshot: str, checks: str | None, docker: bool) -> None:
     """Run validator checks against a snapshot.
 
     By default runs only offline checks (no Docker required). Use --docker
@@ -505,47 +432,47 @@ def validate(
         cls = _import_check(_CHECK_REGISTRY[name])
         check_instances.append(cls())
 
+    # Containers stub for offline mode, real discovery for docker mode
+    containers = ContainerSet()
     gate = ValidatorGate(check_instances)
     click.echo(f"Running {len(check_instances)} checks ...")
-    containers = ContainerSet()
 
     if docker:
-        from open_range.builder.renderer import SnapshotRenderer
-        from open_range.server.compose_runner import ComposeProjectRunner, apply_rendered_payloads
+        from open_range.builder.renderer import KindRenderer
+        from open_range.server.helm_runner import HelmRunner
 
         with tempfile.TemporaryDirectory(prefix="openrange-validate-") as tmpdir:
             artifacts_dir = Path(tmpdir)
-            renderer = SnapshotRenderer()
-            click.echo(f"Rendering Docker artifacts to {artifacts_dir} ...")
+            renderer = KindRenderer()
+            click.echo(f"Rendering Helm chart to {artifacts_dir} ...")
             try:
                 renderer.render(spec, artifacts_dir)
             except Exception as exc:
                 click.echo(f"Error: render failed: {exc}", err=True)
                 sys.exit(1)
 
-            compose_file = artifacts_dir / "docker-compose.yml"
-            if not compose_file.exists():
-                click.echo(f"Error: no docker-compose.yml found in {artifacts_dir}", err=True)
+            chart_path = artifacts_dir / "openrange"
+            values_path = chart_path / "values.yaml"
+            if not chart_path.exists():
+                click.echo(f"Error: no openrange/ chart found in {artifacts_dir}", err=True)
                 sys.exit(1)
 
-            compose = _load_compose_file(compose_file)
-            snapshot_id = spec.lineage.snapshot_id or Path(snapshot).stem or "validation"
-            click.echo("Booting temporary Docker project for validation ...")
-            runner = ComposeProjectRunner()
+            rendered_spec = spec.model_copy(deep=True)
+            if values_path.exists():
+                rendered_spec.compose = yaml.safe_load(values_path.read_text(encoding="utf-8")) or {}
+
+            snapshot_id = rendered_spec.lineage.snapshot_id or Path(snapshot).stem or "validation"
+            click.echo("Booting temporary Helm release for validation ...")
+            runner = HelmRunner()
             project = None
             try:
                 project = runner.boot(
                     snapshot_id=snapshot_id,
                     artifacts_dir=artifacts_dir,
-                    compose=compose,
-                )
-                apply_rendered_payloads(
-                    containers=project.containers,
-                    artifacts_dir=artifacts_dir,
-                    compose=compose,
+                    compose=rendered_spec.compose,
                 )
                 containers = project.containers
-                result = _run_async(gate.validate(spec, containers))
+                result = _run_async(gate.validate(rendered_spec, containers))
             finally:
                 if project is not None:
                     runner.teardown(project)
@@ -569,28 +496,6 @@ def validate(
         click.echo(f"Validation FAILED ({result.total_time_s:.2f}s)")
         sys.exit(1)
 
-    if deploy_hf:
-        from open_range.hf_space import deploy_validated_snapshot_to_space
-
-        click.echo("Deploying validated snapshot to Hugging Face Space ...")
-        try:
-            commit = deploy_validated_snapshot_to_space(
-                snapshot,
-                space_id=hf_space,
-                token=hf_token,
-                create_repo=hf_create,
-                private=hf_private,
-                commit_message=hf_commit_message,
-            )
-        except Exception as exc:
-            click.echo(f"Error: Hugging Face deployment failed: {exc}", err=True)
-            sys.exit(1)
-
-        commit_url = getattr(commit, "commit_url", "") or getattr(commit, "pr_url", "")
-        click.echo("Hugging Face deployment complete.")
-        if commit_url:
-            click.echo(f"  Commit: {commit_url}")
-
 
 # ---------------------------------------------------------------------------
 # deploy
@@ -599,176 +504,95 @@ def validate(
 
 @cli.command()
 @click.option("-s", "--snapshot", required=True, type=click.Path(exists=True), help="Path to snapshot JSON.")
-@click.option("--compose-dir", default=None, type=click.Path(), help="Directory containing docker-compose.yml (default: render into temp dir).")
-def deploy(snapshot: str, compose_dir: str | None) -> None:
-    """Deploy a snapshot to running Docker containers.
+@click.option("--chart-dir", default=None, type=click.Path(), help="Directory for rendered Helm chart (default: deploy/ next to snapshot).")
+def deploy(snapshot: str, chart_dir: str | None) -> None:
+    """Deploy a snapshot to a Kind cluster.
 
-    Renders the snapshot into Docker artifacts and runs docker compose up.
-    If --compose-dir is given, uses that directory; otherwise renders into
-    a temporary directory alongside the snapshot.
+    Renders the snapshot into a Helm chart, creates a Kind cluster,
+    and installs the chart.
     """
-    from open_range.builder.renderer import SnapshotRenderer
-    from open_range.server.compose_runner import ComposeProjectRunner, apply_rendered_payloads
+    import subprocess
+
+    from open_range.builder.renderer import KindRenderer
 
     spec = _load_snapshot(snapshot)
 
-    if compose_dir:
-        target = Path(compose_dir)
+    if chart_dir:
+        target = Path(chart_dir)
     else:
         target = Path(snapshot).parent / "deploy"
 
-    # Render artifacts
-    renderer = SnapshotRenderer()
-    click.echo(f"Rendering Docker artifacts to {target} ...")
+    # Render Helm chart + Kind config
+    renderer = KindRenderer()
+    click.echo(f"Rendering Helm chart to {target} ...")
     try:
         renderer.render(spec, target)
     except Exception as exc:
         click.echo(f"Error: render failed: {exc}", err=True)
         sys.exit(1)
 
-    compose_file = target / "docker-compose.yml"
-    if not compose_file.exists():
-        click.echo(f"Error: no docker-compose.yml found in {target}", err=True)
+    kind_config = target / "kind-config.yaml"
+    chart_path = target / "openrange"
+    if not chart_path.exists():
+        click.echo(f"Error: no openrange/ chart found in {target}", err=True)
         sys.exit(1)
 
-    compose = _load_compose_file(compose_file)
-    snapshot_id = spec.lineage.snapshot_id or Path(snapshot).stem or "deploy"
-    click.echo("Starting containers with docker compose ...")
-    runner = ComposeProjectRunner()
+    click.echo("Creating Kind cluster ...")
     try:
-        project = runner.boot(
-            snapshot_id=snapshot_id,
-            artifacts_dir=target,
-            compose=compose,
+        proc = subprocess.run(
+            ["kind", "create", "cluster", "--config", str(kind_config)],
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
-        apply_rendered_payloads(
-            containers=project.containers,
-            artifacts_dir=target,
-            compose=compose,
-        )
-    except Exception as exc:
-        click.echo(f"Error: docker compose up failed: {exc}", err=True)
+    except FileNotFoundError:
+        click.echo("Error: kind command not found. Install Kind: https://kind.sigs.k8s.io/", err=True)
+        sys.exit(1)
+    except subprocess.TimeoutExpired:
+        click.echo("Error: kind create cluster timed out after 300s.", err=True)
         sys.exit(1)
 
-    click.echo("Containers started.")
-    click.echo(f"Project: {project.project_name}")
-
-
-# ---------------------------------------------------------------------------
-# episode
-# ---------------------------------------------------------------------------
-
-
-@cli.command()
-@click.option("-s", "--snapshot", required=True, type=click.Path(exists=True), help="Path to snapshot JSON.")
-@click.option("--mode", default="red", type=click.Choice(["red", "blue", "both"]), help="Agent role(s) to play.")
-@click.option("--golden-path", "golden", is_flag=True, default=False, help="Replay golden path steps (Red only).")
-@click.option("--interactive", is_flag=True, default=False, help="Interactive mode (read commands from stdin).")
-@click.option("--docker/--no-docker", default=False, help="Use Docker containers (default: mock mode).")
-@click.option("--max-steps", default=50, type=click.IntRange(1), help="Maximum steps per episode.")
-def episode(
-    snapshot: str,
-    mode: str,
-    golden: bool,
-    interactive: bool,
-    docker: bool,
-    max_steps: int,
-) -> None:
-    """Run an episode against a snapshot.
-
-    Golden-path mode replays the snapshot's golden path commands as Red.
-    Interactive mode reads commands from stdin. Default runs golden path
-    if available, otherwise enters interactive mode.
-
-    \b
-    Examples:
-        openrange episode -s snapshots/spec.json --golden-path
-        openrange episode -s snapshots/spec.json --interactive --mode both
-    """
-    from open_range.models import RangeAction
-    from open_range.server.environment import RangeEnvironment
-
-    spec = _load_snapshot(snapshot)
-
-    env = RangeEnvironment(docker_available=docker, max_steps=max_steps)
-    obs = env.reset(snapshot=spec, episode_id="cli-episode")
-    click.echo(f"[RESET] {obs.stdout[:200]}")
-    click.echo()
-
-    if golden or (not interactive and spec.golden_path):
-        # Golden path replay
-        if not spec.golden_path:
-            click.echo("Error: snapshot has no golden path steps.", err=True)
-            sys.exit(1)
-
-        click.echo(f"Replaying {len(spec.golden_path)} golden path steps ...\n")
-        for gp in spec.golden_path:
-            action = RangeAction(command=gp.command, mode="red")
-            result = env.step(action)
-            reward = result.reward if result.reward is not None else 0.0
-
-            status = ""
-            if result.flags_captured:
-                status = f" FLAGS={result.flags_captured}"
-            if result.done:
-                status += " [DONE]"
-
-            click.echo(f"  [{gp.step:2d}] RED >> {gp.command[:80]}")
-            if docker:
-                stdout_preview = result.stdout[:120].replace("\n", " ")
-                click.echo(f"       stdout: {stdout_preview}")
-            else:
-                click.echo(f"       expect: {gp.expect_in_stdout[:60]}")
-            click.echo(f"       reward={reward:.4f}{status}")
-
-            if result.done:
-                break
-
-    elif interactive:
-        # Interactive REPL
-        click.echo("Interactive mode. Type commands, Ctrl-D to exit.\n")
-        current_mode = mode if mode != "both" else "red"
-        try:
-            while True:
-                prompt = f"[{current_mode.upper()}] >> "
-                try:
-                    cmd = input(prompt)
-                except EOFError:
-                    break
-                if not cmd.strip():
-                    continue
-                if cmd.strip() == "/switch" and mode == "both":
-                    current_mode = "blue" if current_mode == "red" else "red"
-                    click.echo(f"Switched to {current_mode.upper()}")
-                    continue
-
-                action = RangeAction(command=cmd, mode=current_mode)
-                result = env.step(action)
-                if result.stdout:
-                    click.echo(result.stdout)
-                if result.stderr:
-                    click.echo(result.stderr, err=True)
-                reward = result.reward if result.reward is not None else 0.0
-                click.echo(f"[reward={reward:.4f}]")
-                if result.done:
-                    click.echo("[EPISODE DONE]")
-                    break
-        except KeyboardInterrupt:
-            click.echo("\nInterrupted.")
-    else:
-        click.echo("No golden path and --interactive not set. Use --interactive for manual play.", err=True)
+    if proc.returncode != 0:
+        click.echo(f"Error: kind create cluster failed (exit {proc.returncode}):", err=True)
+        if proc.stderr:
+            click.echo(proc.stderr, err=True)
         sys.exit(1)
 
-    # Print final state
-    state = env.state
-    click.echo(f"\n{'='*60}")
-    click.echo(f"  RESULT")
-    click.echo(f"{'='*60}")
-    click.echo(f"  Steps:       {state.step_count}")
-    click.echo(f"  Flags found: {state.flags_found}")
-    click.echo(f"  Tier:        {state.tier}")
-    click.echo(f"  Episode:     {state.episode_id}")
-    click.echo(f"{'='*60}")
+    click.echo("Kind cluster created. Installing Helm chart ...")
+    try:
+        proc = subprocess.run(
+            ["helm", "install", "openrange", str(chart_path)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except FileNotFoundError:
+        click.echo("Error: helm command not found. Install Helm: https://helm.sh/", err=True)
+        sys.exit(1)
+    except subprocess.TimeoutExpired:
+        click.echo("Error: helm install timed out after 120s.", err=True)
+        sys.exit(1)
+
+    if proc.returncode != 0:
+        click.echo(f"Error: helm install failed (exit {proc.returncode}):", err=True)
+        if proc.stderr:
+            click.echo(proc.stderr, err=True)
+        sys.exit(1)
+
+    click.echo("Helm chart installed.")
+
+    # Show pod status
+    try:
+        ps = subprocess.run(
+            ["kubectl", "get", "pods", "--all-namespaces", "-l", "app.kubernetes.io/part-of=openrange"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if ps.stdout:
+            click.echo(ps.stdout)
+    except Exception:
+        pass  # Non-critical
 
 
 # ---------------------------------------------------------------------------

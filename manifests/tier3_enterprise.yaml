@@ -1055,3 +1055,40 @@ difficulty:
   max_steps: 30
   min_vulns: 2
   max_vulns: 5
+
+# ---------------------------------------------------------------------------
+# Pre-provisioned infrastructure (DO NOT regenerate — schema already exists)
+# ---------------------------------------------------------------------------
+
+infrastructure:
+  platform: kind
+  description: >-
+    Range runs on a Kind (Kubernetes-in-Docker) cluster with namespace-per-zone
+    isolation.  The database schema below is pre-created by the base init
+    script.  The LLM builder must ONLY generate INSERT/GRANT/USE statements
+    in db:sql — NO CREATE TABLE or CREATE DATABASE.
+
+  db_schema:
+    referral_db:
+      users:
+        columns: [id, username, password, email, full_name, role, department, created_at]
+        notes: "Column is 'username' NOT 'name'. Password is plaintext or MD5."
+      patients:
+        columns: [id, first_name, last_name, dob, phone, email, insurance_id, created_at]
+      patient_referrals:
+        columns: [id, patient_id, referring_physician, specialist, reason, status, created_at]
+      billing:
+        columns: [id, patient_id, amount, insurance_claim, status, created_at]
+      sessions:
+        columns: [id, user_id, session_token, created_at, expires_at]
+      access_log:
+        columns: [id, user_id, action, resource, ip_address, created_at]
+    flags:
+      secrets:
+        columns: [id, flag_name, flag, created_at]
+        notes: "Column is 'flag' NOT 'flag_value'."
+
+  web_docroot: /var/www/html
+  db_connection: "new mysqli('db', 'app_user', 'AppUs3r!2024', 'referral_db')"
+  samba_shares: [/srv/shares/contracts, /srv/shares/hr, /srv/shares/compliance, /srv/shares/general]
+

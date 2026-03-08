@@ -1,4 +1,4 @@
-"""Tests for the end-to-end replay demo."""
+"""Tests for the end-to-end scripted demo."""
 
 import json
 from pathlib import Path

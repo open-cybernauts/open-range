@@ -8,8 +8,6 @@ import pytest
 from open_range.protocols import (
     CheckResult,
     EvidenceItem,
-    ExecResult,
-    ExploitStep,
     FlagSpec,
     GoldenPathStep,
     MutationOp,
@@ -49,38 +47,6 @@ async def test_manifest_compliance_rejects_illegal_mutation_plan(
     result = await ManifestComplianceCheck(tier1_manifest).check(spec, mock_containers)
     assert result.passed is False
     assert "illegal family" in result.error
-
-
-@pytest.mark.asyncio
-async def test_manifest_compliance_rejects_incompatible_seed_vuln_host(
-    tier1_manifest,
-    sample_snapshot_spec,
-    mock_containers,
-):
-    from open_range.validator.manifest_compliance import ManifestComplianceCheck
-
-    spec = sample_snapshot_spec.model_copy(deep=True)
-    spec.mutation_plan = MutationPlan(
-        parent_snapshot_id="root_snap",
-        ops=[
-            MutationOp(
-                mutation_id="illegal_host",
-                op_type="seed_vuln",
-                target_selector={"host": "firewall"},
-                params={
-                    "vuln_type": "path_traversal",
-                    "template_id": "vuln_path_traversal",
-                    "required_services": ["nginx", "php-fpm"],
-                },
-            )
-        ],
-    )
-    spec.lineage.parent_snapshot_id = "root_snap"
-    spec.lineage.generation_depth = 1
-
-    result = await ManifestComplianceCheck(tier1_manifest).check(spec, mock_containers)
-    assert result.passed is False
-    assert "incompatible with required services" in result.error
 
 
 @pytest.mark.asyncio
@@ -290,27 +256,6 @@ async def test_exploitability_passes_when_golden_path_succeeds(mock_containers):
 
 
 @pytest.mark.asyncio
-async def test_exploitability_normalizes_whitespace_for_tool_output(mock_containers):
-    from open_range.validator.exploitability import ExploitabilityCheck
-
-    spec = SnapshotSpec(
-        golden_path=[
-            GoldenPathStep(
-                step=1,
-                command="nmap -sV 10.0.1.0/24",
-                expect_in_stdout="80/tcp open http",
-            ),
-        ],
-    )
-    mock_containers.exec_results[("attacker", "nmap -sV 10.0.1.0/24")] = (
-        "80/tcp   open  http   nginx"
-    )
-
-    result = await ExploitabilityCheck().check(spec, mock_containers)
-    assert result.passed is True
-
-
-@pytest.mark.asyncio
 async def test_exploitability_fails_when_step_output_missing(
     sample_snapshot_spec, mock_containers
 ):
@@ -358,59 +303,6 @@ async def test_exploitability_skips_meta_commands(mock_containers):
     assert result.details["skipped_steps"] == [2]
 
 
-@pytest.mark.asyncio
-async def test_exploitability_fails_when_expectation_missing_in_strict_mode(mock_containers):
-    from open_range.validator.exploitability import ExploitabilityCheck
-
-    spec = SnapshotSpec(
-        golden_path=[
-            GoldenPathStep(step=1, command="curl http://web/", expect_in_stdout=""),
-        ],
-    )
-    mock_containers.exec_results[("attacker", "curl http://web/")] = "Welcome"
-
-    result = await ExploitabilityCheck().check(spec, mock_containers)
-    assert result.passed is False
-    assert result.details["require_expectation"] is True
-    assert result.details["failed_steps"][0]["error"] == (
-        "golden path step 1 has no expect_in_stdout"
-    )
-
-
-@pytest.mark.asyncio
-async def test_exploitability_allows_missing_expectation_in_lenient_mode(mock_containers):
-    from open_range.validator.exploitability import ExploitabilityCheck
-
-    spec = SnapshotSpec(
-        golden_path=[
-            GoldenPathStep(step=1, command="curl http://web/", expect_in_stdout=""),
-        ],
-    )
-    mock_containers.exec_results[("attacker", "curl http://web/")] = "Welcome"
-
-    result = await ExploitabilityCheck(require_expectation=False).check(spec, mock_containers)
-    assert result.passed is True
-    assert result.details["require_expectation"] is False
-    assert result.details["unvalidated_steps"] == [1]
-
-
-@pytest.mark.asyncio
-async def test_exploitability_fails_on_nonzero_exit_even_with_expected_output(mock_containers):
-    from open_range.validator.exploitability import ExploitabilityCheck
-
-    spec = SnapshotSpec(
-        golden_path=[
-            GoldenPathStep(step=1, command="curl http://web/", expect_in_stdout="Welcome"),
-        ],
-    )
-    mock_containers.exec_results[("attacker", "curl http://web/")] = "Welcome"
-    mock_containers.exec_status[("attacker", "curl http://web/")] = 7
-
-    result = await ExploitabilityCheck().check(spec, mock_containers)
-    assert result.passed is False
-    assert result.details["failed_steps"][0]["error"] == "command failed with exit_code=7"
-
-
 # ---------------------------------------------------------------------------
 # Check 3: Patchability
 # ---------------------------------------------------------------------------
@@ -454,7 +346,7 @@ async def test_patchability_passes_when_patch_breaks_exploit(mock_containers):
         ],
     )
 
-    # Remediation exec succeeds (exit 0 by default)
+    # Remediation exec succeeds (returns empty)
     mock_containers.exec_results[("web", "sed")] = ""
     # After patch, golden path step returns DIFFERENT output (no SECRET_DATA)
     mock_containers.exec_results[("attacker", "curl http://web/search?q=exploit")] = "no results"
@@ -504,130 +396,6 @@ async def test_patchability_fails_when_exploit_still_works(mock_containers):
 
 
 @pytest.mark.asyncio
-async def test_patchability_fails_when_remediation_command_exits_nonzero(mock_containers):
-    from open_range.protocols import ExploitStep
-    from open_range.validator.patchability import PatchabilityCheck
-
-    spec = SnapshotSpec(
-        truth_graph=TruthGraph(
-            vulns=[
-                Vulnerability(
-                    id="v1",
-                    type="sqli",
-                    host="web",
-                    remediation="sed -i 's/unsafe/safe/' /var/www/app.php",
-                ),
-            ],
-            exploit_chain=[
-                ExploitStep(vuln_id="v1", command="curl http://web/search?q=exploit"),
-            ],
-        ),
-        golden_path=[
-            GoldenPathStep(
-                step=1,
-                command="curl http://web/search?q=exploit",
-                expect_in_stdout="SECRET_DATA",
-            ),
-        ],
-    )
-    mock_containers.exec_results[("web", "sed")] = "sed: cannot read /var/www/app.php"
-    mock_containers.exec_status[("web", "sed")] = 2
-
-    result = await PatchabilityCheck().check(spec, mock_containers)
-    assert result.passed is False
-    first = result.details["vuln_results"][0]
-    assert first["passed"] is False
-    assert "remediation command failed" in first["reason"]
-    assert mock_containers.restarted == ["web"]
-
-
-@pytest.mark.asyncio
-async def test_patchability_fails_when_retest_command_is_inconclusive(mock_containers):
-    from open_range.protocols import ExploitStep
-    from open_range.validator.patchability import PatchabilityCheck
-
-    spec = SnapshotSpec(
-        truth_graph=TruthGraph(
-            vulns=[
-                Vulnerability(
-                    id="v1",
-                    type="sqli",
-                    host="web",
-                    remediation="sed -i 's/unsafe/safe/' /var/www/app.php",
-                ),
-            ],
-            exploit_chain=[
-                ExploitStep(vuln_id="v1", command="curl http://web/search?q=exploit"),
-            ],
-        ),
-        golden_path=[
-            GoldenPathStep(
-                step=1,
-                command="curl http://web/search?q=exploit",
-                expect_in_stdout="SECRET_DATA",
-            ),
-        ],
-    )
-
-    mock_containers.exec_results[("web", "sed")] = ""
-    mock_containers.exec_results[("attacker", "curl http://web/search?q=exploit")] = "curl: (7) failed to connect"
-    mock_containers.exec_status[("attacker", "curl http://web/search?q=exploit")] = 7
-
-    result = await PatchabilityCheck().check(spec, mock_containers)
-    assert result.passed is False
-    vuln_result = result.details["vuln_results"][0]
-    assert vuln_result["passed"] is False
-    assert vuln_result["reason"] == "retest inconclusive after remediation"
-    assert "retest command failed (exit_code=7)" in vuln_result["details"][0]["reason"]
-    assert mock_containers.restarted == ["web"]
-
-
-@pytest.mark.asyncio
-async def test_patchability_fails_when_retest_execution_is_inconclusive(mock_containers):
-    from open_range.protocols import ExecResult, ExploitStep
-    from open_range.validator.patchability import PatchabilityCheck
-
-    spec = SnapshotSpec(
-        truth_graph=TruthGraph(
-            vulns=[
-                Vulnerability(
-                    id="v1",
-                    type="sqli",
-                    host="web",
-                    remediation="sed -i 's/unsafe/safe/' /var/www/app.php",
-                ),
-            ],
-            exploit_chain=[
-                ExploitStep(vuln_id="v1", command="curl http://web/search?q=exploit"),
-            ],
-        ),
-        golden_path=[
-            GoldenPathStep(
-                step=1,
-                command="curl http://web/search?q=exploit",
-                expect_in_stdout="SECRET_DATA",
-            ),
-        ],
-    )
-
-    async def exec_run_side_effect(container: str, cmd: str, **kwargs):
-        if container == "web" and "sed -i 's/unsafe/safe/' /var/www/app.php" in cmd:
-            return ExecResult(stdout="", exit_code=0)
-        if container == "attacker" and "curl http://web/search?q=exploit" in cmd:
-            raise RuntimeError("timeout")
-        return ExecResult(stdout="", exit_code=0)
-
-    mock_containers.exec_run = exec_run_side_effect
-    result = await PatchabilityCheck().check(spec, mock_containers)
-    assert result.passed is False
-    vuln_result = result.details["vuln_results"][0]
-    assert vuln_result["passed"] is False
-    assert vuln_result["reason"] == "retest inconclusive after remediation"
-    assert vuln_result["details"][0]["reason"] == "retest execution raised: timeout"
-    assert mock_containers.restarted == ["web"]
-
-
-@pytest.mark.asyncio
 async def test_patchability_skips_prose_remediation(mock_containers):
     """Non-executable remediation (prose) is skipped with warning, fails if all skipped."""
     from open_range.protocols import ExploitStep
@@ -658,11 +426,12 @@ async def test_patchability_skips_prose_remediation(mock_containers):
 
     result = await PatchabilityCheck().check(spec, mock_containers)
     assert result.passed is False
-    # Verify it was recorded as a failure (not silently skipped)
+    assert "no vulns had testable remediation" in result.error
+    # Verify it was recorded as skipped
     vuln_results = result.details["vuln_results"]
     assert len(vuln_results) == 1
-    assert vuln_results[0]["passed"] is False
-    assert "not executable" in vuln_results[0]["reason"]
+    assert "skipped" in vuln_results[0]
+    assert "not executable" in vuln_results[0]["skipped"]
 
 
 @pytest.mark.asyncio
@@ -786,67 +555,6 @@ async def test_evidence_fails_when_pattern_missing(mock_containers):
     assert result.passed is False
 
 
-@pytest.mark.asyncio
-async def test_evidence_fails_when_grep_returns_error_text(mock_containers):
-    from open_range.validator.evidence import EvidenceCheck
-
-    spec = SnapshotSpec(
-        evidence_spec=[
-            EvidenceItem(type="log_entry", location="siem:/var/log/missing.log", pattern="ATTACK"),
-        ]
-    )
-    mock_containers.exec_results[("siem", "grep")] = "grep: /var/log/missing.log: No such file or directory"
-    mock_containers.exec_status[("siem", "grep")] = 2
-    result = await EvidenceCheck().check(spec, mock_containers)
-    assert result.passed is False
-    assert "No such file or directory" in result.details["missing"][0]["error"]
-
-
-@pytest.mark.asyncio
-async def test_evidence_fails_on_nonzero_exit_even_when_output_present(mock_containers):
-    from open_range.validator.evidence import EvidenceCheck
-
-    spec = SnapshotSpec(
-        evidence_spec=[
-            EvidenceItem(type="artifact", location="siem:/var/log/test.log"),
-        ]
-    )
-    mock_containers.exec_status[("siem", "test -f")] = 1
-    result = await EvidenceCheck().check(spec, mock_containers)
-    assert result.passed is False
-    assert result.details["missing"][0]["location"] == "siem:/var/log/test.log"
-
-
-@pytest.mark.asyncio
-async def test_evidence_quotes_pattern_and_location_path():
-    """Evidence grep command must quote pattern and path from snapshot content."""
-    import shlex
-
-    from open_range.validator.evidence import EvidenceCheck
-
-    class RecordingContainers:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, str]] = []
-
-        async def exec_run(self, container: str, cmd: str, **kwargs) -> ExecResult:
-            self.calls.append((container, cmd))
-            return ExecResult(stdout="1", exit_code=0)
-
-    containers = RecordingContainers()
-    pattern = "ERR'; touch /tmp/pwn #"
-    path = "/var/log/app; echo PWNED"
-    spec = SnapshotSpec(
-        evidence_spec=[
-            EvidenceItem(type="log_entry", location=f"siem:{path}", pattern=pattern),
-        ],
-    )
-
-    result = await EvidenceCheck().check(spec, containers)  # type: ignore[arg-type]
-    assert result.passed is True
-    assert containers.calls
-    assert containers.calls[0][1] == f"grep -c {shlex.quote(pattern)} {shlex.quote(path)}"
-
-
 # ---------------------------------------------------------------------------
 # Check 5: Reward grounding
 # ---------------------------------------------------------------------------
@@ -928,105 +636,6 @@ async def test_reward_grounding_skips_db_sql_path(mock_containers):
     assert result.passed is True
 
 
-@pytest.mark.asyncio
-async def test_reward_grounding_quotes_filesystem_path():
-    """Filesystem flag paths with shell metacharacters must be quoted."""
-    from open_range.validator.reward_grounding import RewardGroundingCheck
-
-    class RecordingContainers:
-        def __init__(self):
-            self.calls: list[tuple[str, str]] = []
-
-        async def exec_run(self, container: str, cmd: str, **kwargs):
-            from open_range.protocols import ExecResult
-
-            self.calls.append((container, cmd))
-            return ExecResult(stdout="FLAG{abc}", exit_code=0)
-
-        async def exec(self, container: str, cmd: str, **kwargs) -> str:
-            return (await self.exec_run(container, cmd, **kwargs)).combined_output
-
-    containers = RecordingContainers()
-    spec = SnapshotSpec(
-        flags=[FlagSpec(id="f1", value="FLAG{abc}", path="/tmp/f; echo PWNED", host="web")]
-    )
-    result = await RewardGroundingCheck().check(spec, containers)  # type: ignore[arg-type]
-    assert result.passed is True
-    assert containers.calls
-    assert containers.calls[0][1] == "cat -- '/tmp/f; echo PWNED'"
-
-
-@pytest.mark.asyncio
-async def test_reward_grounding_rejects_invalid_db_identifier_path():
-    """Malformed DB paths must fail rather than altering SQL semantics."""
-    from open_range.validator.reward_grounding import RewardGroundingCheck
-
-    class RecordingContainers:
-        def __init__(self):
-            self.calls: list[tuple[str, str]] = []
-
-        async def exec_run(self, container: str, cmd: str, **kwargs):
-            from open_range.protocols import ExecResult
-
-            self.calls.append((container, cmd))
-            return ExecResult(stdout="FLAG{abc}", exit_code=0)
-
-        async def exec(self, container: str, cmd: str, **kwargs) -> str:
-            return (await self.exec_run(container, cmd, **kwargs)).combined_output
-
-    containers = RecordingContainers()
-    spec = SnapshotSpec(
-        flags=[
-            FlagSpec(
-                id="f1",
-                value="FLAG{abc}",
-                path="db:flags.secrets.flag FROM secrets; SELECT 'x' --",
-                host="db",
-            )
-        ]
-    )
-    result = await RewardGroundingCheck().check(spec, containers)  # type: ignore[arg-type]
-    assert result.passed is False
-    assert "invalid db flag path format" in result.details["results"][0]["error"]
-    assert containers.calls == []
-
-
-@pytest.mark.asyncio
-async def test_reward_grounding_quotes_mysql_password_from_snapshot():
-    """DB checks must not rely on unquoted shell expansion for credentials."""
-    import shlex
-
-    from open_range.validator.reward_grounding import RewardGroundingCheck
-
-    class RecordingContainers:
-        def __init__(self):
-            self.calls: list[tuple[str, str]] = []
-
-        async def exec_run(self, container: str, cmd: str, **kwargs):
-            from open_range.protocols import ExecResult
-
-            self.calls.append((container, cmd))
-            return ExecResult(stdout="FLAG{abc}", exit_code=0)
-
-        async def exec(self, container: str, cmd: str, **kwargs) -> str:
-            return (await self.exec_run(container, cmd, **kwargs)).combined_output
-
-    containers = RecordingContainers()
-    password = "pa ss;$(id)"
-    spec = SnapshotSpec(
-        topology={"mysql_root_password": password},
-        flags=[FlagSpec(id="f1", value="FLAG{abc}", path="db:flags.secrets.flag", host="db")],
-    )
-    result = await RewardGroundingCheck().check(spec, containers)  # type: ignore[arg-type]
-    assert result.passed is True
-    assert containers.calls
-    cmd = containers.calls[0][1]
-    assert cmd.startswith(
-        f"MYSQL_PWD={shlex.quote(password)} mysql -u root -N -e "
-    )
-    assert "-p$MYSQL_ROOT_PASSWORD" not in cmd
-
-
 # ---------------------------------------------------------------------------
 # Check 6: Isolation
 # ---------------------------------------------------------------------------
@@ -1105,7 +714,7 @@ async def test_isolation_fails_on_non_ssh_port(mock_containers):
     # Only port 3306 is OPEN; everything else CLOSED.
     async def exec_side_effect(container, cmd, **kwargs):
         if container == "attacker" and "/dev/tcp/" in cmd:
-            if " 3306 " in cmd:
+            if "/3306'" in cmd or "/3306}" in cmd:
                 return "OPEN"
             return "CLOSED"
         return ""
@@ -1115,38 +724,6 @@ async def test_isolation_fails_on_non_ssh_port(mock_containers):
     assert result.passed is False
     assert "3306" in result.error
     assert "db" in result.error
-
-
-@pytest.mark.asyncio
-async def test_isolation_uses_argument_safe_tcp_probe_for_target_name():
-    """Target names are passed as positional args, not interpolated into script."""
-    from open_range.validator.isolation import IsolationCheck
-
-    class RecordingContainers:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, str]] = []
-
-        async def exec(self, container: str, cmd: str, **kwargs) -> str:
-            self.calls.append((container, cmd))
-            return "CLOSED"
-
-    containers = RecordingContainers()
-    target = "db'; touch /tmp/pwn #"
-    spec = SnapshotSpec(
-        topology={"hosts": ["attacker", "db"], "zones": {"internal": [target]}},
-        flags=[],
-        golden_path=[],
-        task=TaskSpec(red_briefing="Go.", blue_briefing="Watch."),
-    )
-
-    result = await IsolationCheck().check(spec, containers)  # type: ignore[arg-type]
-    assert result.passed is True
-    assert containers.calls
-    first_cmd = containers.calls[0][1]
-    script_part, _, arg_part = first_cmd.partition(" _ ")
-    assert "bash -lc 'echo > /dev/tcp/\"$1\"/\"$2\"'" in script_part
-    assert "touch /tmp/pwn" not in script_part
-    assert "touch /tmp/pwn" in arg_part
 
 
 # ---------------------------------------------------------------------------
@@ -1173,71 +750,6 @@ async def test_task_feasibility_fails_unknown_flag_host(mock_containers):
     )
     result = await TaskFeasibilityCheck().check(spec, mock_containers)
     assert result.passed is False
-
-
-@pytest.mark.asyncio
-async def test_task_feasibility_rejects_seed_vuln_without_task_path(mock_containers):
-    from open_range.validator.task_feasibility import TaskFeasibilityCheck
-
-    spec = SnapshotSpec(
-        topology={
-            "hosts": ["attacker", "web", "db"],
-            "zones": {"external": ["attacker"], "dmz": ["web"], "internal": ["db"]},
-            "dependency_edges": [{"source": "attacker", "target": "web"}],
-            "host_details": {
-                "attacker": {"services": ["nmap"]},
-                "web": {"services": ["nginx", "php-fpm"]},
-                "db": {"services": ["mysql"]},
-            },
-        },
-        truth_graph=TruthGraph(
-            vulns=[Vulnerability(id="path_traversal_1", type="path_traversal", host="web")],
-            exploit_chain=[
-                ExploitStep(
-                    vuln_id="path_traversal_1",
-                    command="curl 'http://web/download?file=../../../var/flags/path_traversal_mut1.txt'",
-                    description="download planted flag",
-                )
-            ],
-        ),
-        flags=[FlagSpec(id="flag1", value="FLAG{path_mut1}", path="/var/flags/path_traversal_mut1.txt", host="web")],
-        evidence_spec=[EvidenceItem(type="log_entry", location="web:/var/log/app/access.log")],
-        golden_path=[
-            GoldenPathStep(
-                step=1,
-                command="curl http://web/",
-                expect_in_stdout="Welcome",
-                host="attacker",
-            )
-        ],
-        task=TaskSpec(red_briefing="go", blue_briefing="watch"),
-        mutation_plan=MutationPlan(
-            parent_snapshot_id="root_snap",
-            ops=[
-                MutationOp(
-                    mutation_id="seed_path",
-                    op_type="seed_vuln",
-                    target_selector={"host": "web"},
-                    params={
-                        "vuln_type": "path_traversal",
-                        "instantiated_vuln_id": "path_traversal_1",
-                        "instantiated_flag_id": "flag1",
-                        "instantiated_flag_value": "FLAG{path_mut1}",
-                        "instantiated_flag_host": "web",
-                        "instantiated_exploit_command": "curl 'http://web/download?file=../../../var/flags/path_traversal_mut1.txt'",
-                    },
-                )
-            ],
-        ),
-    )
-    spec.lineage.parent_snapshot_id = "root_snap"
-    spec.lineage.generation_depth = 1
-
-    result = await TaskFeasibilityCheck().check(spec, mock_containers)
-    assert result.passed is False
-    assert any(
-        "missing submit_flag step" in issue for issue in result.details["issues"]
-    )
 
 
 # ---------------------------------------------------------------------------

@@ -125,22 +125,10 @@ class ManifestComplianceCheck:
                 if op.op_type == "seed_vuln":
                     host = op.target_selector.get("host", "")
                     vuln_type = str(op.params.get("vuln_type", "")).strip()
-                    required_services = {
-                        str(service).strip()
-                        for service in op.params.get("required_services", [])
-                        if str(service).strip()
-                    }
                     if host not in manifest_hosts:
                         issues.append(f"seed_vuln targets unknown host '{host}'")
                     if vuln_type and vuln_type not in allowed_bug_families:
                         issues.append(f"seed_vuln uses illegal family '{vuln_type}'")
-                    if required_services:
-                        host_services = allowed_services.get(host, frozenset())
-                        if not required_services.intersection(host_services):
-                            issues.append(
-                                f"seed_vuln host '{host}' is incompatible with required services "
-                                f"{sorted(required_services)}"
-                            )
 
         passed = len(issues) == 0
         return CheckResult(

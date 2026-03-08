@@ -14,9 +14,8 @@ import json
 import logging
 import os
 import random
-import re
 from copy import deepcopy
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -28,81 +27,21 @@ except ImportError:  # pragma: no cover - exercised only without builder extra
 
 from open_range.protocols import (
     BuildContext,
-    ChallengeSpec,
     EvidenceItem,
     ExploitStep,
     FlagSpec,
     GoldenPathStep,
     NPCPersona,
     NPCTrafficSpec,
-    SnapshotBuilder,
-    ServiceInstance,
     SnapshotSpec,
     TaskSpec,
     TruthGraph,
     Vulnerability,
-    build_default_challenge_catalog,
 )
-from open_range.builder.service_catalog import infer_service_instances
 
 from open_range.builder.prompts import BUILDER_SYSTEM_PROMPT
-from open_range.builder.manifest_graph import (
-    compile_manifest_topology,
-    runtime_contract_from_topology,
-)
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_BUILDER_MODEL = "azure/gpt-5.2-codex"
-_BUILDER_PROVIDER_ENV_VARS = (
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "GOOGLE_API_KEY",
-    "GEMINI_API_KEY",
-    "LITELLM_API_KEY",
-    "OLLAMA_HOST",
-)
-
-
-def llm_builder_is_configured(*, model: str | None = None) -> bool:
-    """Return True when LLM-backed snapshot generation is plausibly configured."""
-    if litellm is None:
-        return False
-    if model and model.strip():
-        return True
-    if os.getenv("OPENRANGE_BUILDER_MODEL"):
-        return True
-    azure_key = os.getenv("AZURE_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY")
-    azure_base = os.getenv("AZURE_API_BASE") or os.getenv("AZURE_OPENAI_ENDPOINT")
-    if azure_key and azure_base:
-        return True
-    return any(os.getenv(name) for name in _BUILDER_PROVIDER_ENV_VARS)
-
-
-def default_snapshot_builder(
-    mode: str | None = None,
-    *,
-    model: str | None = None,
-    reason: str = "",
-) -> SnapshotBuilder:
-    """Resolve the default snapshot builder for runtime/training surfaces."""
-    normalized = (mode or "auto").strip().lower()
-    if normalized == "template":
-        return TemplateOnlyBuilder()
-    if normalized == "llm":
-        return LLMSnapshotBuilder(model=model)
-    if normalized != "auto":
-        raise ValueError(
-            f"Unsupported builder mode {mode!r}. Expected 'auto', 'template', or 'llm'."
-        )
-    if llm_builder_is_configured(model=model):
-        return LLMSnapshotBuilder(model=model)
-    suffix = f" for {reason}" if reason else ""
-    logger.warning(
-        "No LLM builder configuration detected%s; falling back to TemplateOnlyBuilder.",
-        suffix,
-    )
-    return TemplateOnlyBuilder()
 
 
 # ---------------------------------------------------------------------------
@@ -184,38 +123,6 @@ class _LLMTask(BaseModel):
     blue_briefing: str = ""
 
 
-class _LLMChallenge(BaseModel):
-    """Raw multi-challenge entry from LLM output."""
-
-    id: str = ""
-    name: str = ""
-    challenge_type: str = ""
-    roles: list[str] = Field(default_factory=list)
-    role_briefings: dict[str, str] = Field(default_factory=dict)
-    entry_points: list[str] = Field(default_factory=list)
-    success_conditions: list[dict[str, Any]] = Field(default_factory=list)
-    linked_vulns: list[str] = Field(default_factory=list)
-    linked_flags: list[str] = Field(default_factory=list)
-    evidence_requirements: list[str] = Field(default_factory=list)
-    difficulty: str = ""
-    prerequisites: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class _LLMServiceInstance(BaseModel):
-    """Raw service instance emitted by the LLM builder."""
-
-    instance_id: str = ""
-    host: str = ""
-    service_name: str = ""
-    archetype: str = ""
-    image: str = ""
-    ports: list[int] = Field(default_factory=list)
-    env_vars: dict[str, Any] = Field(default_factory=dict)
-    startup_contract: dict[str, Any] = Field(default_factory=dict)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
 class LLMSnapshotOutput(BaseModel):
     """Intermediate model matching the LLM's raw JSON schema.
 
@@ -234,8 +141,6 @@ class LLMSnapshotOutput(BaseModel):
     npc_personas: list[_LLMNPCPersona] = Field(default_factory=list)
     npc_traffic: dict[str, Any] = Field(default_factory=dict)
     task: _LLMTask = Field(default_factory=_LLMTask)
-    challenges: list[_LLMChallenge] = Field(default_factory=list)
-    service_instances: list[_LLMServiceInstance] = Field(default_factory=list)
     files: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -248,7 +153,7 @@ class LLMSnapshotBuilder:
     """Generate snapshot specs via LiteLLM.
 
     Reads model from ``OPENRANGE_BUILDER_MODEL`` env var.
-    Default: ``azure/gpt-5.2-codex``.
+    Default: ``openai/gpt-5.2-codex``.
     """
 
     def __init__(
@@ -258,12 +163,12 @@ class LLMSnapshotBuilder:
         temperature: float | None = 0.7,
         max_retries: int = 3,
         max_tokens: int = 32768,
-        timeout: float = 600.0,
+        timeout: float = 120.0,
     ) -> None:
         """Initialize the LLM-based snapshot builder.
 
         Args:
-            model: LiteLLM model identifier (e.g. 'azure/gpt-5.2-codex').
+            model: LiteLLM model identifier (e.g. 'openai/gpt-5.2-codex').
             prompt_template: System prompt override.
             temperature: Sampling temperature for LLM calls. None to omit
                 (required for codex models which don't support temperature).
@@ -272,7 +177,7 @@ class LLMSnapshotBuilder:
             timeout: Timeout in seconds for each LLM call.
         """
         self.model = model or os.environ.get(
-            "OPENRANGE_BUILDER_MODEL", DEFAULT_BUILDER_MODEL
+            "OPENRANGE_BUILDER_MODEL", "openai/gpt-5.2-codex"
         )
         self.prompt_template = prompt_template or BUILDER_SYSTEM_PROMPT
         # Codex models don't support temperature; auto-set to None
@@ -365,13 +270,18 @@ class LLMSnapshotBuilder:
                     len(raw) if raw else 0,
                 )
                 spec = _parse_llm_response(raw)
-                spec = _backfill_snapshot_topology(spec, manifest, context)
+                # Hydrate topology with manifest graph (dependency_edges,
+                # trust_edges, principal_catalog, host_catalog) so the
+                # validator's path_solvability check can verify reachability.
+                from open_range.builder.manifest_graph import compile_manifest_topology
+                spec.topology = compile_manifest_topology(manifest, spec.topology)
                 logger.info(
-                    "LLMSnapshotBuilder: build completed (attempt %d/%d, %d vulns, %d golden path steps)",
+                    "LLMSnapshotBuilder: build completed (attempt %d/%d, %d vulns, %d golden path steps, %d dep edges)",
                     attempt,
                     self.max_retries,
                     len(spec.truth_graph.vulns),
                     len(spec.golden_path),
+                    len(spec.topology.get("dependency_edges", [])),
                 )
                 return spec
 
@@ -453,62 +363,6 @@ class SnapshotParseError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def _extract_json_object(raw_text: str) -> str:
-    """Extract the first balanced JSON object from LLM text output."""
-    text = (raw_text or "").strip()
-    if not text:
-        return text
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    if text.startswith("{"):
-        return text
-
-    start = text.find("{")
-    if start < 0:
-        return text
-
-    depth = 0
-    in_string = False
-    escape = False
-    for index, char in enumerate(text[start:], start=start):
-        if in_string:
-            if escape:
-                escape = False
-            elif char == "\\":
-                escape = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start:index + 1]
-    return text
-
-
-def _backfill_snapshot_topology(
-    spec: SnapshotSpec,
-    manifest: dict[str, Any],
-    context: BuildContext,
-) -> SnapshotSpec:
-    """Preserve manifest-level topology metadata when the LLM omits it."""
-    topology = dict(spec.topology or {})
-    topology.setdefault("tier", int(manifest.get("tier", context.tier) or context.tier))
-    if "difficulty" not in topology and isinstance(manifest.get("difficulty"), dict):
-        topology["difficulty"] = deepcopy(manifest["difficulty"])
-    spec.topology = topology
-    return spec
-
-
 def _parse_llm_response(raw_json: str) -> SnapshotSpec:
     """Parse raw JSON from LLM into a validated SnapshotSpec.
 
@@ -516,7 +370,6 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
     then maps to the canonical SnapshotSpec models. Handles known field-name
     mismatches between the LLM prompt schema and Pydantic models.
     """
-    raw_json = _extract_json_object(raw_json)
     raw_snippet = raw_json[:500] if raw_json else ""
 
     try:
@@ -657,10 +510,7 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
     elif isinstance(evidence_raw, list):
         for item in evidence_raw:
             if isinstance(item, dict):
-                try:
-                    evidence_spec.append(EvidenceItem(**item))
-                except Exception:  # noqa: BLE001
-                    logger.warning("Skipping malformed evidence item: %s", item)
+                evidence_spec.append(EvidenceItem(**item))
 
     # Map NPC personas
     npc_personas = []
@@ -701,26 +551,6 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
         blue_briefing=llm_output.task.blue_briefing,
     )
 
-    challenges = [
-        ChallengeSpec(
-            id=challenge.id,
-            name=challenge.name,
-            challenge_type=challenge.challenge_type or "exploit",
-            roles=list(challenge.roles),
-            role_briefings=dict(challenge.role_briefings),
-            entry_points=list(challenge.entry_points),
-            success_conditions=list(challenge.success_conditions),
-            linked_vulns=list(challenge.linked_vulns),
-            linked_flags=list(challenge.linked_flags),
-            evidence_requirements=list(challenge.evidence_requirements),
-            difficulty=challenge.difficulty,
-            prerequisites=list(challenge.prerequisites),
-            metadata=dict(challenge.metadata),
-        )
-        for challenge in llm_output.challenges
-        if challenge.id or challenge.name or challenge.role_briefings
-    ]
-
     # Map files -- explicit files from LLM + extract from vulnerable_code
     files: dict[str, str] = {}
 
@@ -741,48 +571,17 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
         elif isinstance(vc, str) and vc.strip():
             ip = v.injection_point
             if ip.startswith("/") and v.host == "web":
-                web_doc_root = str(llm_output.topology.get("web_doc_root", "/var/www/portal")).rstrip("/")
-                container_key = f"web:{web_doc_root}{ip}"
+                container_key = f"web:/var/www/html{ip}"
                 if container_key not in files:
                     files[container_key] = vc
 
     logger.debug(
-        "_parse_llm_response: mapped %d vulns, %d golden path steps, %d flags, %d files, %d challenges",
+        "_parse_llm_response: mapped %d vulns, %d golden path steps, %d flags, %d files",
         len(vulns),
         len(golden_path),
         len(flags),
         len(files),
-        len(challenges),
     )
-
-    service_instances = [
-        ServiceInstance(
-            instance_id=instance.instance_id,
-            host=instance.host,
-            service_name=instance.service_name,
-            archetype=instance.archetype,
-            image=instance.image,
-            ports=list(instance.ports),
-            env_vars={str(k): str(v) for k, v in instance.env_vars.items()},
-            startup_contract=dict(instance.startup_contract),
-            metadata=dict(instance.metadata),
-        )
-        for instance in llm_output.service_instances
-        if instance.host or instance.service_name or instance.archetype or instance.image
-    ]
-    if not service_instances:
-        logger.warning(
-            "LLM output omitted service_instances; inferring them from topology as a compatibility fallback."
-        )
-        service_instances = infer_service_instances(
-            compose={},
-            topology=llm_output.topology,
-        )
-    if not challenges:
-        logger.warning(
-            "LLM output omitted challenges; synthesizing a default challenge catalog as a compatibility fallback."
-        )
-        challenges = build_default_challenge_catalog(task, truth_graph, flags, evidence_spec)
 
     return SnapshotSpec(
         topology=llm_output.topology,
@@ -793,8 +592,6 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
         npc_personas=npc_personas,
         npc_traffic=npc_traffic,
         task=task,
-        challenges=challenges,
-        service_instances=service_instances,
         files=files,
     )
 
@@ -818,10 +615,10 @@ _DEFAULT_VULN_POOL: list[dict[str, Any]] = [
         ),
         "root_cause": "Unsanitized user input in SQL query",
         "blast_radius": "Full database read access",
-        "remediation": "mv /var/www/portal/search.php /var/www/portal/search.php.disabled",
-        "flag_id": "flag_sqli",
+        "remediation": "Use parameterized queries",
+        "flag_id": "flag1",
         "flag_value": "FLAG{sql1_t3st_f1ag}",
-        "flag_path": "/var/flags/sqli_flag.txt",
+        "flag_path": "/var/flags/flag1.txt",
         "golden_path_steps": [
             {
                 "step": 1,
@@ -923,10 +720,10 @@ _DEFAULT_VULN_POOL: list[dict[str, Any]] = [
         ),
         "root_cause": "No path sanitization on file parameter",
         "blast_radius": "Arbitrary file read on web server",
-        "remediation": "mv /var/www/portal/download.php /var/www/portal/download.php.disabled",
-        "flag_id": "flag_path_traversal",
+        "remediation": "Validate and sanitize file path, use basename()",
+        "flag_id": "flag1",
         "flag_value": "FLAG{p4th_tr4v3rs4l_fl4g}",
-        "flag_path": "/var/flags/path_traversal_flag.txt",
+        "flag_path": "/var/flags/flag1.txt",
         "golden_path_steps": [
             {
                 "step": 1,
@@ -954,7 +751,7 @@ _DEFAULT_VULN_POOL: list[dict[str, Any]] = [
             },
             {
                 "step": 5,
-                "cmd": "curl 'http://web/download?file=../../../var/flags/path_traversal_flag.txt'",
+                "cmd": "curl 'http://web/download?file=../../../var/flags/flag1.txt'",
                 "expect_stdout": "FLAG{p4th_tr4v3rs4l_fl4g}",
                 "host": "attacker",
             },
@@ -1098,13 +895,13 @@ _DEFAULT_VULN_POOL: list[dict[str, Any]] = [
             },
             {
                 "step": 3,
-                "cmd": "ldapsearch -x -H ldap://{ldap_host} -D '{ldap_bind_dn}' -w '{ldap_bind_pw}' -b '{ldap_search_base_dn}' '(uid=*)'",
+                "cmd": "ldapsearch -x -H ldap://ldap -D 'cn=webapp,dc=corp,dc=local' -w 'Svc!Ldap2024' -b 'dc=corp,dc=local' '(uid=*)'",
                 "expect_stdout": "dn: uid=",
                 "host": "attacker",
             },
             {
                 "step": 4,
-                "cmd": "sshpass -p '{credential_reuse_password}' ssh {credential_reuse_user}@{credential_reuse_host} 'cat /var/flags/flag1.txt'",
+                "cmd": "sshpass -p 'Svc!Ldap2024' ssh svc_webapp@db 'cat /var/flags/flag1.txt'",
                 "expect_stdout": "FLAG{cr3d_r3us3_p1v0t}",
                 "host": "attacker",
             },
@@ -1134,31 +931,17 @@ class TemplateOnlyBuilder:
         manifest: dict,
         context: BuildContext,
     ) -> SnapshotSpec:
-        """Build a canonicalized snapshot deterministically from templates."""
+        """Build a snapshot deterministically from the vuln pool."""
         rng = random.Random(context.seed if context.seed is not None else 42)
 
         # Filter pool to allowed bug_families
-        allowed = {
-            str(v).strip()
-            for v in manifest.get("bug_families", [])
-            if str(v).strip()
-        }
-        if allowed:
-            candidates = [v for v in self.vuln_pool if v["type"] in allowed]
-        else:
+        allowed = set(manifest.get("bug_families", []))
+        candidates = [v for v in self.vuln_pool if v["type"] in allowed]
+        if not candidates:
             candidates = list(self.vuln_pool)
-        if allowed and not candidates:
-            available = sorted({str(v.get("type", "")).strip() for v in self.vuln_pool if v.get("type")})
-            requested = sorted(allowed)
-            raise ValueError(
-                "No template vulnerabilities match manifest bug_families. "
-                f"requested={requested}, available={available}"
-            )
 
         if "prefer_live_admission_compatible_vulns" in context.narrative_hints:
-            # Keep strict live admission on task paths the current zone policy
-            # can actually reach from the attacker host.
-            live_supported = {"sqli", "path_traversal"}
+            live_supported = {"sqli", "idor", "path_traversal", "weak_creds"}
             supported = [v for v in candidates if v["type"] in live_supported]
             if supported:
                 candidates = supported
@@ -1169,30 +952,10 @@ class TemplateOnlyBuilder:
         if preferred:
             candidates = preferred
 
-        # Pick vulns, respecting tier step target.
-        # Each template vuln contributes ~5 golden path steps, so cap count
-        # to fit within the tier's ±20% step window.
-        from open_range.validator.difficulty import TIER_TARGETS, TOLERANCE
-
-        tier = int(manifest.get("tier", context.tier) or context.tier)
-        step_target = TIER_TARGETS.get(tier, 8)
-        max_steps_hi = int(step_target * (1 + TOLERANCE))
-        # Each vuln adds ~5 steps but the first nmap step is shared, so
-        # subsequent vulns add ~4 incremental steps.
-        avg_first = 5
-        avg_extra = 4
-        tier_max_vulns = max(1, 1 + (max_steps_hi - avg_first) // avg_extra)
-
-        max_v_raw = manifest.get("difficulty", {}).get("max_vulns", 2)
-        min_v_raw = manifest.get("difficulty", {}).get("min_vulns", 1)
-        max_vulns = max(1, int(max_v_raw))
-        min_vulns = max(1, int(min_v_raw))
-        if min_vulns > max_vulns:
-            min_vulns = max_vulns
-
-        effective_max = max(1, min(max_vulns, tier_max_vulns, len(candidates)))
-        effective_min = min(min_vulns, effective_max)
-        count = rng.randint(effective_min, effective_max)
+        # Pick 1-2 vulns
+        max_vulns = manifest.get("difficulty", {}).get("max_vulns", 2)
+        min_vulns = manifest.get("difficulty", {}).get("min_vulns", 1)
+        count = rng.randint(min_vulns, min(max_vulns, len(candidates)))
         chosen = rng.sample(candidates, count)
 
         # Build topology from manifest
@@ -1205,7 +968,7 @@ class TemplateOnlyBuilder:
                 z = h.get("zone", "default")
                 zones.setdefault(z, []).append(h["name"])
 
-        topology: dict[str, Any] = {
+        topology = {
             "tier": int(manifest.get("tier", context.tier) or context.tier),
             "hosts": hosts,
             "zones": zones,
@@ -1219,9 +982,6 @@ class TemplateOnlyBuilder:
             ),
             "mysql_root_password": "root" if any(v["type"] == "weak_creds" for v in chosen) else "r00tP@ss!",
         }
-        topology = compile_manifest_topology(manifest, topology)
-        runtime_contract = runtime_contract_from_topology(topology, manifest=manifest)
-        topology["runtime_contract"] = runtime_contract
 
         # Build truth graph
         vulns = []
@@ -1230,12 +990,7 @@ class TemplateOnlyBuilder:
         golden_path: list[GoldenPathStep] = []
         step_offset = 0
 
-        for idx, raw in enumerate(chosen):
-            v = _realize_template_vuln(
-                raw,
-                topology=topology,
-                runtime_contract=runtime_contract,
-            )
+        for idx, v in enumerate(chosen):
             vulns.append(
                 Vulnerability(
                     id=v["id"],
@@ -1253,7 +1008,7 @@ class TemplateOnlyBuilder:
                 {
                     "vuln_id": v["id"],
                     "command": v.get("injection_point", ""),
-                    "description": f"Exploit {v['type']} on {v.get('host', 'target')}",
+                    "description": f"Exploit {v['type']} on {v['host']}",
                 }
             )
             flags.append(
@@ -1261,21 +1016,16 @@ class TemplateOnlyBuilder:
                     id=v.get("flag_id", f"flag{idx+1}"),
                     value=v.get("flag_value", f"FLAG{{test_{idx+1}}}"),
                     path=v.get("flag_path", f"/var/flags/flag{idx+1}.txt"),
-                    host=v.get("flag_host", v.get("host", runtime_contract["web_host"])),
+                    host=v.get("host", "web"),
                 )
             )
             for gs in v.get("golden_path_steps", []):
-                cmd = gs["cmd"]
-                # Deduplicate shared recon steps (e.g. nmap) across vulns
-                if any(s.command == cmd for s in golden_path):
-                    continue
                 step_offset += 1
                 golden_path.append(
                     GoldenPathStep(
                         step=step_offset,
-                        command=cmd,
+                        command=gs["cmd"],
                         expect_in_stdout=gs["expect_stdout"],
-                        host=gs.get("host", "attacker"),
                         description=gs.get("description", ""),
                     )
                 )
@@ -1285,7 +1035,7 @@ class TemplateOnlyBuilder:
         evidence_spec = [
             EvidenceItem(
                 type="log_entry",
-                location=f"{runtime_contract['web_host']}:/var/log/app/access.log",
+                location="web:/var/log/app/access.log",
                 pattern="attack pattern from attacker IP",
             ),
             EvidenceItem(
@@ -1316,17 +1066,6 @@ class TemplateOnlyBuilder:
             scripts=["http_traffic.sh", "db_traffic.sh"],
         )
 
-        challenges = build_default_challenge_catalog(
-            task,
-            truth_graph,
-            flags,
-            evidence_spec,
-        )
-        service_instances = infer_service_instances(
-            compose={},
-            topology=topology,
-        )
-
         snapshot = SnapshotSpec(
             topology=topology,
             truth_graph=truth_graph,
@@ -1336,10 +1075,7 @@ class TemplateOnlyBuilder:
             npc_personas=[],
             npc_traffic=npc_traffic,
             task=task,
-            challenges=challenges,
-            service_instances=service_instances,
         )
-        snapshot.topology = compile_manifest_topology(manifest, snapshot.topology)
         snapshot.files = render_template_payloads(snapshot, manifest=manifest)
         logger.info(
             "TemplateOnlyBuilder: built snapshot with %d vulns (seed=%s)",
@@ -1352,179 +1088,6 @@ class TemplateOnlyBuilder:
 # ---------------------------------------------------------------------------
 # Template payload helpers
 # ---------------------------------------------------------------------------
-
-
-def _realize_template_vuln(
-    template: dict[str, Any],
-    *,
-    topology: dict[str, Any],
-    runtime_contract: dict[str, str],
-) -> dict[str, Any]:
-    realized = deepcopy(template)
-    template_host = str(template.get("host", "")).strip()
-    service = str(template.get("service", "")).strip().lower()
-    resolved_host = _resolve_vuln_host(
-        template_host,
-        service=service,
-        topology=topology,
-        runtime_contract=runtime_contract,
-    )
-    realized["host"] = resolved_host
-
-    vuln_type = str(template.get("type", "")).strip()
-    if vuln_type == "credential_reuse":
-        realized["flag_host"] = runtime_contract.get(
-            "credential_reuse_host",
-            runtime_contract.get("db_host", resolved_host),
-        )
-    else:
-        realized["flag_host"] = resolved_host
-
-    for field in (
-        "injection_point",
-        "vulnerable_code",
-        "root_cause",
-        "blast_radius",
-        "remediation",
-    ):
-        value = realized.get(field)
-        if isinstance(value, str):
-            realized[field] = _rewrite_template_runtime_text(value, runtime_contract)
-
-    raw_steps = template.get("golden_path_steps", [])
-    realized_steps: list[dict[str, Any]] = []
-    if isinstance(raw_steps, list):
-        for raw_step in raw_steps:
-            if not isinstance(raw_step, dict):
-                continue
-            step = deepcopy(raw_step)
-            cmd = str(step.get("cmd", ""))
-            expect = str(step.get("expect_stdout", ""))
-            step["cmd"] = _rewrite_template_runtime_text(cmd, runtime_contract)
-            step["expect_stdout"] = _rewrite_template_runtime_text(expect, runtime_contract)
-            realized_steps.append(step)
-    realized["golden_path_steps"] = realized_steps
-    return realized
-
-
-def _resolve_vuln_host(
-    template_host: str,
-    *,
-    service: str,
-    topology: dict[str, Any],
-    runtime_contract: dict[str, str],
-) -> str:
-    hosts = _host_names(topology.get("hosts", []))
-    alias_map = {
-        "web": runtime_contract.get("web_host", "web"),
-        "db": runtime_contract.get("db_host", "db"),
-        "ldap": runtime_contract.get("ldap_host", "ldap"),
-    }
-    if template_host:
-        if template_host in hosts:
-            return template_host
-        if template_host in alias_map and alias_map[template_host]:
-            return alias_map[template_host]
-
-    if any(marker in service for marker in ("mysql", "mariadb", "postgres")):
-        candidate = runtime_contract.get("db_host", "db")
-        if not hosts or candidate in hosts:
-            return candidate
-    if any(marker in service for marker in ("ldap", "openldap")):
-        candidate = runtime_contract.get("ldap_host", "ldap")
-        if not hosts or candidate in hosts:
-            return candidate
-    if any(marker in service for marker in ("nginx", "apache", "http", "php")):
-        candidate = runtime_contract.get("web_host", "web")
-        if not hosts or candidate in hosts:
-            return candidate
-
-    if template_host:
-        return template_host
-    if hosts:
-        return hosts[0]
-    return runtime_contract.get("web_host", "web")
-
-
-def _host_names(raw_hosts: object) -> list[str]:
-    if not isinstance(raw_hosts, list):
-        return []
-    hosts: list[str] = []
-    for raw in raw_hosts:
-        if isinstance(raw, dict):
-            host = str(raw.get("name", "")).strip()
-        else:
-            host = str(raw).strip()
-        if host and host not in hosts:
-            hosts.append(host)
-    return hosts
-
-
-def _rewrite_template_runtime_text(text: str, runtime_contract: dict[str, str]) -> str:
-    if not text:
-        return text
-
-    web_host = runtime_contract.get("web_host", "web")
-    db_host = runtime_contract.get("db_host", "db")
-    ldap_host = runtime_contract.get("ldap_host", "ldap")
-    web_doc_root = runtime_contract.get("web_doc_root", "/var/www/portal")
-    web_config_path = runtime_contract.get("web_config_path", "/var/www/config.php")
-    db_name = runtime_contract.get("db_name", "referral_db")
-    db_user = runtime_contract.get("db_user", "svc_db")
-    db_password = runtime_contract.get("db_password", "SvcDb!401")
-    ldap_bind_dn = runtime_contract.get("ldap_bind_dn", f"cn={db_user},dc=corp,dc=local")
-    ldap_bind_pw = runtime_contract.get("ldap_bind_pw", db_password)
-    reuse_user = runtime_contract.get("credential_reuse_user", db_user)
-    reuse_host = runtime_contract.get("credential_reuse_host", db_host)
-    reuse_password = runtime_contract.get("credential_reuse_password", ldap_bind_pw)
-
-    updated = text
-    placeholders = {
-        "{web_host}": web_host,
-        "{db_host}": db_host,
-        "{ldap_host}": ldap_host,
-        "{web_doc_root}": web_doc_root,
-        "{web_config_path}": web_config_path.lstrip("/"),
-        "{db_name}": db_name,
-        "{db_user}": db_user,
-        "{db_password}": db_password,
-        "{ldap_bind_dn}": ldap_bind_dn,
-        "{ldap_bind_pw}": ldap_bind_pw,
-        "{ldap_search_base_dn}": runtime_contract.get("ldap_search_base_dn", "dc=corp,dc=local"),
-        "{credential_reuse_user}": reuse_user,
-        "{credential_reuse_host}": reuse_host,
-        "{credential_reuse_password}": reuse_password,
-    }
-    for placeholder, value in placeholders.items():
-        updated = updated.replace(placeholder, value)
-
-    replacements: list[tuple[str, str]] = [
-        ("http://web/", f"http://{web_host}/"),
-        ("http://web", f"http://{web_host}"),
-        ("ldap://ldap", f"ldap://{ldap_host}"),
-        ("svc_webapp@db", f"{reuse_user}@{reuse_host}"),
-        ("@db ", f"@{db_host} "),
-        ("@db'", f"@{db_host}'"),
-        ('@db"', f'@{db_host}"'),
-        (" -h db ", f" -h {db_host} "),
-        (" -h db", f" -h {db_host}"),
-        ("/var/www/portal", web_doc_root),
-        ("/var/www/config.php", web_config_path),
-        ("referral_db", db_name),
-        ("app_user", db_user),
-        ("AppUs3r!2024", db_password),
-        ("Svc!Ldap2024", ldap_bind_pw),
-    ]
-    for old, new in replacements:
-        updated = updated.replace(old, new)
-
-    updated = updated.replace("cn=webapp,dc=corp,dc=local", ldap_bind_dn)
-    updated = re.sub(
-        r"cn=webapp,dc=[A-Za-z0-9_-]+(?:,dc=[A-Za-z0-9_-]+)*",
-        ldap_bind_dn,
-        updated,
-    )
-    return updated
 
 
 def _manifest_topology_users(
@@ -1596,7 +1159,6 @@ def render_template_payloads(
     manifest: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     topology = snapshot.topology if isinstance(snapshot.topology, dict) else {}
-    runtime_contract = runtime_contract_from_topology(topology, manifest=manifest)
     flags = snapshot.flags
     evidence_spec = snapshot.evidence_spec
     vuln_types = {v.type for v in snapshot.truth_graph.vulns}
@@ -1607,46 +1169,25 @@ def render_template_payloads(
     )
     company_name = str(topology.get("org_name") or company.get("name") or "OpenRange")
     domain = str(topology.get("domain") or company.get("domain") or "corp.local")
-    web_host = runtime_contract["web_host"]
-    db_host = runtime_contract["db_host"]
-    web_doc_root = runtime_contract["web_doc_root"]
-    web_config_path = runtime_contract["web_config_path"]
-    db_name = runtime_contract["db_name"]
 
     files: dict[str, str] = {
-        f"{web_host}:{_join_posix(web_doc_root, 'index.php')}": _default_index_php(company_name),
-        f"{web_host}:{_join_posix(web_doc_root, 'login.php')}": _default_login_php(),
-        f"{web_host}:{web_config_path}": _default_config_php(
-            domain=domain,
-            db_host=runtime_contract["db_host"],
-            db_name=runtime_contract["db_name"],
-            db_user=runtime_contract["db_user"],
-            db_pass=runtime_contract["db_password"],
-            ldap_bind_dn=runtime_contract["ldap_bind_dn"],
-            ldap_bind_pw=runtime_contract["ldap_bind_pw"],
-        ),
+        "web:/var/www/html/index.php": _default_index_php(company_name),
+        "web:/var/www/html/login.php": _default_login_php(),
+        "web:/var/www/config.php": _default_config_php(domain=domain),
     }
 
     if "sqli" in vuln_types:
-        files[f"{web_host}:{_join_posix(web_doc_root, 'search.php')}"] = _search_php(
+        files["web:/var/www/html/search.php"] = _search_php(
             _flag_value_for_type(snapshot, "sqli")
         )
 
-    if "path_traversal" in vuln_types:
-        files[f"{web_host}:{_join_posix(web_doc_root, 'download.php')}"] = _download_php(
+    if vuln_types.intersection({"path_traversal", "credential_reuse"}):
+        files["web:/var/www/html/download.php"] = _download_php(
             path_flag=_flag_value_for_type(snapshot, "path_traversal"),
-            flag_names=_flag_names_for_type(snapshot, "path_traversal"),
-            config_path=web_config_path,
-        )
-    elif "credential_reuse" in vuln_types:
-        files[f"{web_host}:{_join_posix(web_doc_root, 'download.php')}"] = _download_php(
-            path_flag="",
-            flag_names=[],
-            config_path=web_config_path,
         )
 
     if "idor" in vuln_types:
-        files[f"{web_host}:{_join_posix(web_doc_root, 'api/index.php')}"] = _idor_api_php(
+        files["web:/var/www/html/api/index.php"] = _idor_api_php(
             _flag_value_for_type(snapshot, "idor"),
         )
 
@@ -1657,7 +1198,7 @@ def render_template_payloads(
                 (
                     "USE flags;\n"
                     "INSERT INTO secrets(flag_name, flag) "
-                    f"VALUES ('{_sql_escape(flag.id)}', '{_sql_escape(flag.value)}');\n"
+                    f"VALUES ('{flag.id}', '{flag.value}');\n"
                 ),
             )
             if vuln_types.intersection({"weak_creds", "idor"}):
@@ -1667,7 +1208,7 @@ def render_template_payloads(
                         "CREATE USER IF NOT EXISTS 'leaked_user'@'%' "
                         "IDENTIFIED BY 'leaked_pass';\n"
                         "GRANT SELECT ON flags.* TO 'leaked_user'@'%';\n"
-                        f"GRANT SELECT ON {_sql_ident(db_name)}.* TO 'leaked_user'@'%';\n"
+                        "GRANT SELECT ON referral_db.* TO 'leaked_user'@'%';\n"
                         "FLUSH PRIVILEGES;\n"
                     ),
                 )
@@ -1683,7 +1224,7 @@ def render_template_payloads(
         )
 
     if "weak_creds" in vuln_types:
-        files[f"{db_host}:/tmp/openrange-root-password.txt"] = "root\n"
+        files["db:/tmp/openrange-root-password.txt"] = "root\n"
 
     return files
 
@@ -1692,63 +1233,19 @@ def _flag_value_for_type(
     snapshot: SnapshotSpec,
     vuln_type: str,
 ) -> str:
-    paired = _flag_for_type(snapshot, vuln_type)
-    if paired is not None:
-        return paired.value
-    return snapshot.flags[0].value if snapshot.flags else "FLAG{placeholder}"
-
-
-def _flag_names_for_type(
-    snapshot: SnapshotSpec,
-    vuln_type: str,
-) -> list[str]:
-    paired = _flag_for_type(snapshot, vuln_type)
-    if paired is None:
-        return ["flag1.txt"]
-    if paired.path.startswith("db:"):
-        return ["flag1.txt"]
-    return [PurePosixPath(paired.path).name]
-
-
-def _flag_for_type(
-    snapshot: SnapshotSpec,
-    vuln_type: str,
-) -> FlagSpec | None:
-    for index, vuln in enumerate(snapshot.truth_graph.vulns):
+    for vuln in snapshot.truth_graph.vulns:
         if vuln.type != vuln_type:
             continue
-        if index < len(snapshot.flags):
-            return snapshot.flags[index]
         for flag in snapshot.flags:
             if flag.host == vuln.host:
-                return flag
-    if snapshot.flags:
-        return snapshot.flags[0]
-    return None
+                return flag.value
+    return snapshot.flags[0].value if snapshot.flags else "FLAG{placeholder}"
 
 
 def _append_sql(existing: str, fragment: str) -> str:
     if not existing:
         return fragment
     return f"{existing.rstrip()}\n{fragment}"
-
-
-def _join_posix(base: str, leaf: str) -> str:
-    return (PurePosixPath(base) / leaf).as_posix()
-
-
-def _sql_ident(value: str) -> str:
-    token = re.sub(r"[^A-Za-z0-9_]", "", value)
-    return token or "referral_db"
-
-
-def _sql_escape(value: str) -> str:
-    """Escape a string for use in a SQL single-quoted literal.
-
-    Replaces single quotes with doubled single quotes and backslashes
-    with doubled backslashes to prevent SQL injection in static SQL files.
-    """
-    return value.replace("\\", "\\\\").replace("'", "''")
 
 
 def _predictable_user_password(
@@ -1783,26 +1280,15 @@ echo "Login";
 ?>"""
 
 
-def _default_config_php(
-    *,
-    domain: str,
-    db_host: str,
-    db_name: str,
-    db_user: str,
-    db_pass: str,
-    ldap_bind_dn: str,
-    ldap_bind_pw: str,
-) -> str:
+def _default_config_php(*, domain: str) -> str:
     ldap_dn = ",".join(f"dc={part}" for part in domain.split(".") if part) or "dc=corp,dc=local"
-    bind_dn = ldap_bind_dn or f"cn={db_user},{ldap_dn}"
-    bind_pw = ldap_bind_pw or db_pass
     return f"""<?php
-$db_host = "{db_host}";
-$db_name = "{db_name}";
-$db_user = "{db_user}";
-$db_pass = "{db_pass}";
-$ldap_bind_dn = "{bind_dn}";
-$ldap_bind_pw = "{bind_pw}";
+$db_host = "db";
+$db_name = "referral_db";
+$db_user = "app_user";
+$db_pass = "AppUs3r!2024";
+$ldap_bind_dn = "cn=webapp,{ldap_dn}";
+$ldap_bind_pw = "Svc!Ldap2024";
 ?>"""
 
 
@@ -1817,29 +1303,19 @@ if (stripos($q, "union") !== false || stripos($q, "flag") !== false) {{
 ?>"""
 
 
-def _download_php(
-    path_flag: str,
-    flag_names: list[str] | None = None,
-    *,
-    config_path: str,
-) -> str:
+def _download_php(path_flag: str) -> str:
     flag = path_flag or "FLAG{placeholder}"
-    raw_names = ["flag1.txt"] if flag_names is None else flag_names
-    cases = "\n".join(
-        f"""elseif (strpos($file, "{name}") !== false) {{
-    echo "{flag}";
-}}"""
-        for name in raw_names
-    )
     return f"""<?php
 $file = $_GET["file"] ?? "";
 if ($file === "report.pdf") {{
     echo "PDF";
 }} elseif (strpos($file, "config.php") !== false) {{
-    readfile("{config_path}");
+    readfile("/var/www/config.php");
 }} elseif (strpos($file, "/etc/passwd") !== false) {{
     echo "root:x:0:0:root:/root:/bin/bash";
-}} {cases} else {{
+}} elseif (strpos($file, "flag1.txt") !== false) {{
+    echo "{flag}";
+}} else {{
     echo "missing";
 }}
 ?>"""
@@ -1860,6 +1336,7 @@ if (strpos($uri, "/api/users/1/profile") !== false) {{
     echo json_encode(["status" => "not_found"]);
 }}
 ?>"""
+
 
 # ---------------------------------------------------------------------------
 # File-based builder (demos)

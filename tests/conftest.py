@@ -176,31 +176,14 @@ def mock_containers():
     class MockContainerSet:
         def __init__(self):
             self.exec_results = {}  # {(container, cmd_fragment): output}
-            self.exec_status = {}  # {(container, cmd_fragment): exit_code}
             self.healthy = set()
             self.restarted = []  # track restart calls: list of container names
 
-        @staticmethod
-        def _lookup(mapping, container: str, cmd: str):
-            for (c, pattern), result in mapping.items():
+        async def exec(self, container: str, cmd: str, **kwargs) -> str:
+            for (c, pattern), result in self.exec_results.items():
                 if c == container and pattern in cmd:
                     return result
-            return None
-
-        async def exec_run(self, container: str, cmd: str, **kwargs):
-            from open_range.protocols import ExecResult
-
-            output = self._lookup(self.exec_results, container, cmd)
-            status = self._lookup(self.exec_status, container, cmd)
-            text = output if isinstance(output, str) else ""
-            code = int(status) if status is not None else 0
-            if code == 0:
-                return ExecResult(stdout=text, exit_code=0)
-            return ExecResult(stderr=text, exit_code=code)
-
-        async def exec(self, container: str, cmd: str, **kwargs) -> str:
-            result = await self.exec_run(container, cmd, **kwargs)
-            return result.combined_output
+            return ""
 
         async def is_healthy(self, container: str) -> bool:
             return container in self.healthy

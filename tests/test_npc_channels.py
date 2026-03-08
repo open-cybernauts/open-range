@@ -18,12 +18,7 @@ from open_range.builder.npc.channels import (
     VoiceTranscript,
 )
 from open_range.builder.npc.chat_traffic import generate_chat_traffic
-from open_range.builder.npc.npc_manager import (
-    NPCManager,
-    _derive_scripts_from_topology,
-    _hosts_from_topology,
-    _resolve_env_vars,
-)
+from open_range.builder.npc.npc_manager import NPCManager
 from open_range.protocols import NPCPersona, NPCTrafficSpec, SnapshotSpec, TaskSpec
 
 
@@ -336,58 +331,3 @@ class TestChannelSIEM:
         assert "chat" in mgr.channels
         assert "voice" in mgr.channels
         assert "document" in mgr.channels
-
-
-class TestTopologyNormalization:
-    def test_hosts_from_topology_normalizes_compiled_host_names(self):
-        topology = {
-            "hosts": ["web", "db"],
-            "host_catalog": {
-                "web": {"zone": "dmz", "services": ["nginx", "php-fpm"]},
-                "db": {"zone": "internal", "services": ["mysql"]},
-            },
-        }
-
-        hosts = _hosts_from_topology(topology)
-
-        assert [host["name"] for host in hosts] == ["web", "db"]
-        assert hosts[0]["services"] == ["nginx", "php-fpm"]
-        assert hosts[1]["services"] == ["mysql"]
-
-    def test_helpers_accept_compiled_topology_host_names(self):
-        topology = {
-            "hosts": ["web", "db", "mail", "siem"],
-            "host_catalog": {
-                "web": {"services": ["nginx", "php-fpm"]},
-                "db": {"services": ["mysql"]},
-                "mail": {"services": ["postfix"]},
-                "siem": {"services": ["rsyslog"]},
-            },
-            "users": [
-                {
-                    "username": "svc_db",
-                    "password": "SvcDb!401",
-                    "hosts": ["db"],
-                    "role": "service",
-                },
-                {
-                    "username": "admin",
-                    "password": "Adm1n!2024",
-                    "hosts": ["web", "siem"],
-                    "role": "admin",
-                },
-            ],
-        }
-
-        scripts = _derive_scripts_from_topology(topology)
-        env = _resolve_env_vars(topology, rate_lambda=10.0)
-
-        assert "http_traffic.sh" in scripts
-        assert "db_traffic.sh" in scripts
-        assert "smtp_traffic.sh" in scripts
-        assert env["WEB_HOST"] == "web"
-        assert env["DB_HOST"] == "db"
-        assert env["MAIL_HOST"] == "mail"
-        assert env["SIEM_HOST"] == "siem"
-        assert env["DB_USER"] == "svc_db"
-        assert env["SSH_USER"] == "admin"

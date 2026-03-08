@@ -1,118 +1,64 @@
-"""FastAPI application for OpenRange."""
+"""FastAPI application for OpenRange.
+
+Uses the OpenEnv app factory when openenv is installed, otherwise
+creates a standalone FastAPI app with equivalent endpoints.
+"""
 
 from __future__ import annotations
 
-import json
-import inspect
 import logging
-import os
-from pathlib import Path
+import sys
+import traceback
 
 from fastapi import FastAPI
 
 logger = logging.getLogger(__name__)
 
 
-def _extract_openenv_server(fastapp: FastAPI) -> object | None:
-    """Best-effort extraction of OpenEnv's HTTPEnvServer from route closure."""
-    for route in fastapp.router.routes:
-        if getattr(route, "path", None) != "/ws":
-            continue
-        endpoint = getattr(route, "endpoint", None)
-        if endpoint is None:
-            continue
-        try:
-            closure = inspect.getclosurevars(endpoint)
-        except Exception:
-            continue
-        server = closure.nonlocals.get("self")
-        if server is not None and hasattr(server, "active_sessions"):
-            return server
-    return None
-
-
 def create_app() -> FastAPI:
-    """Create the OpenRange app through the canonical OpenEnv factory."""
-    from openenv.core.env_server import create_app as create_openenv_app
+    """Create the OpenRange app.
 
-    from open_range.protocols import SnapshotSpec
-    from open_range.models import RangeAction, RangeObservation
+    Tries the OpenEnv factory first; falls back to a standalone
+    FastAPI app if openenv is not installed or if the runtime
+    fails to initialise (e.g. missing manifest on HF Spaces).
+    """
     from open_range.server.environment import RangeEnvironment
+    from open_range.server.models import RangeAction, RangeObservation
 
-    default_snapshot = None
-    snapshot_env = os.getenv("OPENRANGE_RUNTIME_SNAPSHOT", "").strip()
-    if snapshot_env:
-        snapshot_path = Path(snapshot_env)
-        if snapshot_path.exists():
-            payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
-            default_snapshot = SnapshotSpec.model_validate(payload)
-            logger.info("OpenRange app using fixed runtime snapshot from %s", snapshot_path)
-        else:
-            logger.warning(
-                "OPENRANGE_RUNTIME_SNAPSHOT points to missing file: %s. Falling back to managed runtime selection.",
-                snapshot_path,
-            )
-
+    # Try to create the managed runtime (snapshot pool, validator, etc.)
     runtime = None
-    runtime_enabled = default_snapshot is None and (
-        os.getenv("OPENRANGE_ENABLE_MANAGED_RUNTIME", "").lower() in {
-        "1",
-        "true",
-        "yes",
-    } or bool(os.getenv("OPENRANGE_RUNTIME_MANIFEST"))
-    )
-    if runtime_enabled:
+    try:
         from open_range.server.runtime import ManagedSnapshotRuntime
-
         runtime = ManagedSnapshotRuntime.from_env()
+    except Exception:
+        logger.warning(
+            "ManagedSnapshotRuntime.from_env() failed — running without managed snapshots:\n%s",
+            traceback.format_exc(),
+        )
 
     def env_factory() -> RangeEnvironment:
-        execution_mode = os.getenv(
-            "OPENRANGE_EXECUTION_MODE",
-            "subprocess" if default_snapshot is not None else "auto",
-        )
-        return RangeEnvironment(
-            runtime=runtime,
-            default_snapshot=default_snapshot,
-            execution_mode=execution_mode,
-        )
+        return RangeEnvironment(runtime=runtime)
 
-    fastapp = create_openenv_app(
-        env_factory,
-        RangeAction,
-        RangeObservation,
-        env_name="open_range",
-    )
-    openenv_server = _extract_openenv_server(fastapp)
-    if openenv_server is not None:
-        fastapp.state.openenv_server = openenv_server
-
-    # Mount custom Gradio dashboard at /dashboard (separate from the OpenEnv
-    # Playground at /web which provides interactive reset/step via the
-    # WebInterfaceManager's persistent environment instance).
+    # Try OpenEnv factory first
     try:
-        import gradio as gr
-        from open_range.server.gradio_ui import build_openrange_gradio_app
-
-        blocks = build_openrange_gradio_app(
-            web_manager=None,
-            action_fields=[],
-            metadata=None,
-            is_chat_env=False,
-            title="OpenRange",
-            quick_start_md="",
+        from openenv.core.env_server import create_app as create_openenv_app
+        fastapp = create_openenv_app(
+            env_factory,
+            RangeAction,
+            RangeObservation,
+            env_name="open_range",
         )
-        fastapp = gr.mount_gradio_app(fastapp, blocks, path="/dashboard")
     except Exception:
-        pass  # Gradio is optional
+        logger.warning(
+            "OpenEnv create_app failed — creating standalone FastAPI:\n%s",
+            traceback.format_exc(),
+        )
+        fastapp = _create_standalone_app(env_factory)
 
     fastapp.state.env = env_factory()
     if runtime is not None:
         fastapp.state.runtime = runtime
-        # NOTE: Do NOT register runtime.start() as a startup event — it
-        # synchronously generates snapshots which blocks the health check on
-        # resource-constrained hardware (HF Spaces cpu-basic).  The runtime
-        # lazy-starts on the first acquire_snapshot() call (triggered by reset()).
+        fastapp.add_event_handler("startup", runtime.start)
         fastapp.add_event_handler("shutdown", runtime.stop)
 
     try:
@@ -124,13 +70,75 @@ def create_app() -> FastAPI:
     return fastapp
 
 
+def _create_standalone_app(
+    env_factory: object,
+) -> FastAPI:
+    """Standalone FastAPI app with OpenEnv-compatible endpoints.
+
+    Used when the openenv package is not available.
+    """
+    from open_range.server.models import RangeAction, RangeObservation
+
+    fastapp = FastAPI(title="OpenRange", version="0.1.0")
+    _env_holder: dict = {}
+
+    def _get_env():
+        if "env" not in _env_holder:
+            _env_holder["env"] = env_factory()  # type: ignore[operator]
+        return _env_holder["env"]
+
+    @fastapp.get("/health")
+    def health():
+        return {"status": "healthy"}
+
+    @fastapp.get("/metadata")
+    def metadata():
+        env = _get_env()
+        return env.get_metadata()
+
+    @fastapp.post("/reset")
+    def reset(seed: int | None = None, episode_id: str | None = None):
+        env = _get_env()
+        obs = env.reset(seed=seed, episode_id=episode_id)
+        return {"observation": obs.model_dump()}
+
+    @fastapp.post("/step")
+    def step(action: RangeAction):
+        env = _get_env()
+        obs = env.step(action)
+        return {
+            "observation": obs.model_dump(),
+            "reward": obs.reward,
+            "done": obs.done,
+        }
+
+    @fastapp.get("/state")
+    def state():
+        env = _get_env()
+        return env.state.model_dump()
+
+    return fastapp
+
+
 def main() -> None:
     """Run the installed package entrypoint via uvicorn."""
     import uvicorn
     uvicorn.run("open_range.server.app:app", host="0.0.0.0", port=8000)
 
 
-app = create_app()
+# Module-level app creation with error reporting
+try:
+    app = create_app()
+except Exception:
+    # If create_app fails entirely, print the error and create a minimal
+    # health-only app so HF Spaces doesn't show "no logs".
+    traceback.print_exc()
+    print("[app.py] FATAL: create_app() failed. Creating minimal health endpoint.", file=sys.stderr)
+    app = FastAPI(title="OpenRange (degraded)")
+
+    @app.get("/health")
+    def _health():
+        return {"status": "degraded", "error": "App failed to initialize"}
 
 
 if __name__ == "__main__":

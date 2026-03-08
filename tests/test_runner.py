@@ -17,25 +17,6 @@ from open_range.training.runner import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _clear_training_builder_env(monkeypatch: pytest.MonkeyPatch):
-    for name in (
-        "OPENRANGE_TRAINING_BUILDER",
-        "OPENRANGE_BUILDER_MODEL",
-        "AZURE_API_KEY",
-        "AZURE_OPENAI_API_KEY",
-        "AZURE_API_BASE",
-        "AZURE_OPENAI_ENDPOINT",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "GOOGLE_API_KEY",
-        "GEMINI_API_KEY",
-        "LITELLM_API_KEY",
-        "OLLAMA_HOST",
-    ):
-        monkeypatch.delenv(name, raising=False)
-
-
 # ---------------------------------------------------------------------------
 # Mock environment and agents
 # ---------------------------------------------------------------------------
@@ -65,12 +46,10 @@ class MockEnvironment:
         self._flags = flags or []
         self._step_count = 0
         self._state = _MockState()
-        self.reset_calls: list[dict[str, Any]] = []
 
     def reset(self, seed: int | None = None, **kwargs: Any) -> _MockObs:
         self._step_count = 0
         self._state = _MockState()
-        self.reset_calls.append({"seed": seed, **kwargs})
         return _MockObs(stdout=f"Range ready. Seed={seed}")
 
     def step(self, action: Any) -> _MockObs:
@@ -233,30 +212,6 @@ class TestCurriculumRunner:
         results = runner.run()
         assert len(results) == 3
         assert all(r.episode in (1, 2, 3) for r in results)
-
-    def test_manifest_axis_is_passed_to_reset_with_snapshot(self):
-        root = Path(__file__).resolve().parent.parent
-        manifests = [
-            str(root / "manifests" / "tier1_basic.yaml"),
-            str(root / "manifests" / "tier2_corporate.yaml"),
-        ]
-        env = MockEnvironment(max_env_steps=1)
-        red = MockAgent()
-        blue = MockAgent()
-        config = RunConfig(
-            manifests=manifests,
-            seeds=[7],
-            episodes_per_seed=1,
-            max_steps=1,
-        )
-        runner = CurriculumRunner(env, red, blue, config)
-        runner.run()
-
-        assert len(env.reset_calls) == 2
-        assert env.reset_calls[0]["manifest_path"].endswith("tier1_basic.yaml")
-        assert env.reset_calls[1]["manifest_path"].endswith("tier2_corporate.yaml")
-        assert env.reset_calls[0]["snapshot"].topology["tier"] == 1
-        assert env.reset_calls[1]["snapshot"].topology["tier"] == 2
 
 
 # ---------------------------------------------------------------------------

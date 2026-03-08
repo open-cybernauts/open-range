@@ -1,5 +1,8 @@
 """RangeEnvironment -- OpenEnv Environment for the OpenRange cyber gymnasium.
 
+If openenv is installed, inherits from Environment[RangeAction, RangeObservation, RangeState].
+Otherwise works standalone with the same API surface.
+
 Design:
 - reset() selects a pre-validated snapshot from SnapshotStore (or accepts one via kwargs)
 - step() routes commands via Docker SDK (docker exec)
@@ -14,52 +17,34 @@ from __future__ import annotations
 
 import logging
 import os
-import re
-import signal
 import shlex
-import socket
 import subprocess as sp
 import time
-import urllib.request
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from open_range.protocols import SnapshotSpec, TaskSpec
 
-def _install_zombie_reaper() -> None:
-    """Install SIGCHLD handler to reap orphaned child processes.
-
-    When Python runs as PID 1 (e.g. in Docker containers), it doesn't
-    automatically reap zombie children.  This handler ensures service
-    daemons started via subprocess don't accumulate as zombies.
-    """
-    def _reap_children(signum: int, frame: Any) -> None:
-        while True:
-            try:
-                pid, _ = os.waitpid(-1, os.WNOHANG)
-                if pid == 0:
-                    break
-            except ChildProcessError:
-                break
-
-    signal.signal(signal.SIGCHLD, _reap_children)
-
-
-# Install at import time so it's active before any service starts
-if os.getpid() == 1:
-    _install_zombie_reaper()
-
-from openenv.core.env_server.mcp_environment import MCPEnvironment
-from openenv.core.env_server.mcp_types import CallToolAction, ListToolsAction
-from openenv.core.env_server.types import Action, EnvironmentMetadata, Observation
-
-from open_range.models import RangeAction, RangeObservation, RangeState
-from open_range.protocols import ReadinessCheck, ServiceSpec, SnapshotSpec, TaskSpec
+from open_range.server.models import RangeAction, RangeObservation, RangeState
 
 if TYPE_CHECKING:
-    from open_range.server.compose_runner import BootedSnapshotProject
+    from open_range.server.helm_runner import BootedRelease as BootedSnapshotProject
     from open_range.server.runtime import ManagedSnapshotRuntime
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Try to inherit from OpenEnv's Environment base class
+# ---------------------------------------------------------------------------
+
+try:
+    from openenv.core.env_server.interfaces import Environment
+
+    _BASE = Environment  # type: ignore[assignment]
+    _HAS_OPENENV = True
+except ImportError:
+    _BASE = object  # type: ignore[assignment,misc]
+    _HAS_OPENENV = False
 
 # Meta-commands processed by the environment itself (not forwarded to containers)
 META_COMMANDS = {"submit_flag", "submit_evidence", "submit_finding", "auth", "logout"}
@@ -69,6 +54,7 @@ DEFAULT_MAX_STEPS = 100
 
 # Timeout for individual docker exec calls (seconds)
 EXEC_TIMEOUT = 30.0
+
 
 def _extract_command_name(command: str) -> str:
     """Extract the base command name from a full command string."""
@@ -86,217 +72,38 @@ def _extract_command_name(command: str) -> str:
     return parts[0] if parts else ""
 
 
-_FINDING_TOKEN_RE = re.compile(r"[a-z0-9_./:-]{3,}")
-_FINDING_STOPWORDS = {
-    "the", "and", "for", "with", "from", "that", "this", "then", "host",
-    "user", "users", "detected", "detection", "attempt", "activity", "attack",
-    "alert", "alerts", "found", "event", "events", "possible", "likely",
-    "against", "into", "onto", "over", "under", "was", "were", "has", "have",
-}
-_ATTACK_SIGNAL_KEYWORDS = (
-    "sqli", "sql injection", "xss", "path traversal", "command injection",
-    "ssrf", "bruteforce", "brute force", "scan", "nmap", "nikto", "sqlmap",
-    "hydra", "ldap injection", "smb enumeration", "phish", "phishing",
-)
+class RangeEnvironment(_BASE):  # type: ignore[misc]
+    """OpenEnv Environment subclass for the cybersecurity range.
 
-
-def _tokenize_finding_text(text: str) -> set[str]:
-    tokens = {m.group(0).lower() for m in _FINDING_TOKEN_RE.finditer(text.lower())}
-    return {token for token in tokens if token not in _FINDING_STOPWORDS}
-
-class RangeEnvironment(MCPEnvironment):
-    """OpenEnv MCPEnvironment subclass for the cybersecurity range.
-
-    Agents can interact via two paths:
-
-    - **Text commands**: ``RangeAction(command="nmap -sV ...", mode="red")``
-    - **MCP tool calls**: ``CallToolAction(tool_name="run_command", ...)``
-
-    Both paths route to the same Docker exec / subprocess backend.
+    Manages episode lifecycle, command routing, action tracking, and
+    reward computation for Red/Blue tandem training.
     """
 
     SUPPORTS_CONCURRENT_SESSIONS = False
 
-    def get_metadata(self) -> EnvironmentMetadata:
-        return EnvironmentMetadata(
-            name="open_range",
-            version="0.1.0",
-            description="Multi-agent cybersecurity gymnasium built on OpenEnv",
-        )
+    def get_metadata(self) -> dict[str, Any]:
+        """Return environment metadata for /metadata endpoint.
 
-    def _build_mcp_server(self) -> "Any":
-        """Create FastMCP server with range tools.
-
-        Tool names follow open-trajectory-gym canonical names
-        (``shell_command``, ``submit_flag``, ``read_file``, ``grep``,
-        ``python_code``) for SFT data compatibility.
+        Matches OpenEnv's EnvironmentMetadata schema.
         """
-        from fastmcp import FastMCP
-
-        mcp = FastMCP("open_range")
-        env = self
-
-        # -- Execution tools (trajgym-compatible) ------------------------------
-
-        @mcp.tool
-        def shell_command(command: str, mode: str = "red") -> str:
-            """Execute a shell command on your workstation.
-
-            Red runs on the attacker container (nmap, curl, sqlmap, ssh,
-            hydra, smbclient, etc.).  Blue runs on the SIEM container
-            (grep, awk, jq, curl, ssh, python3, etc.).
-
-            Args:
-                command: Shell command string.
-                mode: ``"red"`` (attacker) or ``"blue"`` (siem).
-            """
-            action = RangeAction(command=command, mode=mode)  # type: ignore[arg-type]
-            obs = env._step_impl(action)
-            parts = [obs.stdout]
-            if obs.stderr:
-                parts.append(f"STDERR: {obs.stderr}")
-            return "\n".join(parts)
-
-        @mcp.tool
-        def python_code(code: str, timeout: int = 120) -> str:
-            """Execute Python code on your workstation.
-
-            Runs ``python3 -c <code>`` in the active container.
-
-            Args:
-                code: Python source code to execute.
-                timeout: Execution timeout in seconds (1-120).
-            """
-            escaped = code.replace("'", "'\\''")
-            action = RangeAction(
-                command=f"python3 -c '{escaped}'",
-                mode="red",
-            )  # type: ignore[arg-type]
-            obs = env._step_impl(action, timeout_s=float(min(timeout, 120)))
-            parts = [obs.stdout]
-            if obs.stderr:
-                parts.append(f"STDERR: {obs.stderr}")
-            return "\n".join(parts)
-
-        # -- Flag submission ---------------------------------------------------
-
-        @mcp.tool
-        def submit_flag(flag: str) -> str:
-            """Submit a captured flag for verification.
-
-            Correct flags earn reward.  Incorrect flags incur a -0.3
-            hallucination penalty.
-
-            Args:
-                flag: The flag string (e.g. ``"FLAG{idor_2_db}"``).
-            """
-            action = RangeAction(command=f"submit_flag {flag}", mode="red")  # type: ignore[arg-type]
-            obs = env._step_impl(action)
-            return obs.stdout
-
-        # -- Blue meta-commands ------------------------------------------------
-
-        @mcp.tool
-        def submit_finding(description: str) -> str:
-            """Report a detected attack for detection reward scoring.
-
-            Accurate findings (matching real Red actions in the logs)
-            earn reward.  False positives incur a -0.2 penalty.
-
-            Args:
-                description: What was detected, with evidence from logs.
-            """
-            action = RangeAction(command=f"submit_finding {description}", mode="blue")  # type: ignore[arg-type]
-            obs = env._step_impl(action)
-            return obs.stdout
-
-        # -- Episode context ---------------------------------------------------
-
-        @mcp.tool
-        def get_challenge(role: str = "red") -> str:
-            """Get the challenge briefing and objectives for your role.
-
-            Returns the task description, milestones, and success
-            conditions.  Call this to review your objectives mid-episode.
-
-            Args:
-                role: ``"red"`` or ``"blue"``.
-            """
-            snap = env._snapshot
-            if snap is None or snap.task is None:
-                return "No challenge loaded. Call reset() first."
-            task = snap.task
-            briefing = task.red_briefing if role == "red" else task.blue_briefing
-            parts = [briefing or "(no briefing)"]
-            if task.milestones:
-                parts.append("\nMilestones:")
-                for i, m in enumerate(task.milestones, 1):
-                    done = m in env._state.milestones_completed
-                    mark = "[x]" if done else "[ ]"
-                    parts.append(f"  {mark} {i}. {m}")
-            if task.success_conditions:
-                parts.append("\nSuccess conditions:")
-                for sc in task.success_conditions:
-                    parts.append(f"  - {sc}")
-            return "\n".join(parts)
-
-        @mcp.tool
-        def get_progress() -> str:
-            """Get current episode progress.
-
-            Returns step count, flags captured, milestones completed,
-            and active sessions.
-            """
-            s = env._state
-            total_flags = len(env._snapshot.flags) if env._snapshot else 0
-            parts = [
-                f"Episode: {s.episode_id or '(none)'}",
-                f"Tier: {s.tier}",
-                f"Steps: {s.step_count} / {env._max_steps}",
-                f"Flags: {len(s.flags_found)} / {total_flags}",
-            ]
-            if s.flags_found:
-                parts.append(f"  captured: {s.flags_found}")
-            if s.milestones_completed:
-                parts.append(f"Milestones completed: {s.milestones_completed}")
-            if s.active_sessions:
-                parts.append(f"Active sessions: {s.active_sessions}")
-            return "\n".join(parts)
-
-        # -- Infrastructure ----------------------------------------------------
-
-        @mcp.tool
-        def check_services() -> str:
-            """Check health status of all range services.
-
-            Returns the up/down status of each container.  Blue's
-            availability reward depends on services staying up after
-            defensive actions.
-            """
-            env._refresh_services_status()
-            status = env._state.services_status
-            if not status:
-                return "No services status available."
-            lines = [f"  {svc}: {st}" for svc, st in sorted(status.items())]
-            return "Service Status:\n" + "\n".join(lines)
-
-        return mcp
+        return {
+            "name": "open_range",
+            "version": "0.1.0",
+            "description": "Multi-agent cybersecurity gymnasium built on OpenEnv",
+        }
 
     def __init__(
         self,
         runtime: "ManagedSnapshotRuntime | None" = None,
-        default_snapshot: SnapshotSpec | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         exec_timeout: float = EXEC_TIMEOUT,
         docker_available: bool | None = None,
         execution_mode: str = "auto",
     ) -> None:
-        super().__init__(self._build_mcp_server())
+        if _HAS_OPENENV:
+            super().__init__()
         self._state = RangeState()
         self._snapshot: SnapshotSpec | None = None
-        self._default_snapshot = (
-            default_snapshot.model_copy(deep=True) if default_snapshot is not None else None
-        )
         self._snapshot_id: str | None = None
         self._red_history: list[dict[str, Any]] = []
         self._blue_history: list[dict[str, Any]] = []
@@ -319,24 +126,13 @@ class RangeEnvironment(MCPEnvironment):
         self._episode_recorded = False
         self._active_project: "BootedSnapshotProject | None" = None
 
-        # Service PIDs tracked for subprocess mode lifecycle
-        self._service_pids: list[int] = []
-
-        # Zone router for subprocess mode enforcement
-        self._zone_router: Any = None
-
         # Execution mode: "auto", "docker", or "subprocess"
         self._execution_mode = execution_mode
-
-        # OPENRANGE_MOCK=1 forces mock mode (docker_available=False)
-        if os.environ.get("OPENRANGE_MOCK") == "1" and docker_available is None:
-            self._docker_available = False
-
         if execution_mode == "auto":
             env_mode = os.environ.get("OPENRANGE_EXECUTION_MODE", "")
             if env_mode:
                 self._execution_mode = env_mode
-            elif docker_available is False or self._docker_available is False:
+            elif docker_available is False:
                 # Explicit docker_available=False (unit tests) → mock mode,
                 # NOT subprocess. Keep execution_mode as "auto" so
                 # _exec_in_container falls through to mock.
@@ -344,9 +140,7 @@ class RangeEnvironment(MCPEnvironment):
             elif self._get_docker() is not None:
                 self._execution_mode = "docker"
             else:
-                # Missing Docker must not silently change the environment
-                # semantics to host-shell execution. Degrade to mock mode.
-                self._execution_mode = "docker"
+                self._execution_mode = "subprocess"
 
     # -----------------------------------------------------------------
     # Docker helpers
@@ -409,19 +203,15 @@ class RangeEnvironment(MCPEnvironment):
         if self._execution_mode == "subprocess":
             return host
 
-        # In unit-test mock mode or when no containers are running,
-        # return the bare hostname.  Execution will fail gracefully
-        # (docker exec won't find the container → stderr returned).
+        # In unit-test mock mode, return the bare hostname for compatibility
         if self._docker_available is False and self._execution_mode == "docker":
             return host
 
-        # Docker is reachable but no matching container exists — return bare
-        # hostname so the exec layer can report the error in the observation
-        # instead of crashing the API.
-        logger.debug(
-            "No running container found for host '%s'; returning bare name", host
+        raise RuntimeError(
+            f"Cannot resolve container for host '{host}'. "
+            f"No compose config, no running container found, and no mock mode active. "
+            f"Ensure Docker is running or provide a snapshot with compose configuration."
         )
-        return host
 
     def _exec_via_subprocess(self, host: str, command: str, timeout: float = 30.0) -> tuple[str, str]:
         """Execute a command via local subprocess (all-in-one container mode).
@@ -631,20 +421,11 @@ class RangeEnvironment(MCPEnvironment):
         for key, content in snapshot.files.items():
             try:
                 if key == "db:sql":
-                    # Auto-create databases referenced by USE statements
-                    import re
-
-                    db_names = re.findall(r"(?i)USE\s+(\w+)\s*;", content)
-                    preamble = ""
-                    for db in dict.fromkeys(db_names):  # dedupe, preserve order
-                        preamble += f"CREATE DATABASE IF NOT EXISTS `{db}`;\n"
-                    sql_content = preamble + content
-
                     # Write SQL to temp file, execute via mysql CLI
                     with tempfile.NamedTemporaryFile(
                         mode="w", suffix=".sql", delete=False
                     ) as tmp:
-                        tmp.write(sql_content)
+                        tmp.write(content)
                         tmp_path = tmp.name
                     try:
                         db_creds = self._db_credentials()
@@ -686,282 +467,8 @@ class RangeEnvironment(MCPEnvironment):
         )
 
     # -----------------------------------------------------------------
-    # Service lifecycle (subprocess mode)
+    # NPC lifecycle
     # -----------------------------------------------------------------
-
-    def _stop_services(self) -> None:
-        """Stop services started by a previous episode.
-
-        Derives daemon names from the snapshot's ``services`` list.
-        """
-        if self._execution_mode != "subprocess":
-            return
-
-        import signal
-
-        # Kill tracked PIDs first
-        for pid in self._service_pids:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            except Exception as exc:
-                logger.debug("Failed to stop PID %d: %s", pid, exc)
-
-        daemon_names: list[str] = []
-        if self._snapshot and self._snapshot.services:
-            for svc in self._snapshot.services:
-                name = svc.daemon.split("/")[-1].split()[0]
-                if name and name not in daemon_names:
-                    daemon_names.append(name)
-
-        for daemon_name in daemon_names:
-            try:
-                sp.run(
-                    ["pkill", "-x", daemon_name],
-                    capture_output=True,
-                    timeout=5,
-                    text=True,
-                    check=False,
-                )
-            except Exception as exc:
-                logger.debug("Failed to stop daemon %s: %s", daemon_name, exc)
-
-        self._service_pids = []
-        logger.info("Stopped previous episode services")
-
-    def _start_snapshot_services(self, snapshot: SnapshotSpec) -> None:
-        """Start services based on snapshot spec (subprocess mode only).
-
-        The snapshot's ``services`` list is normally populated by the renderer.
-        Snapshots without explicit service specs skip subprocess provisioning.
-        """
-        if self._execution_mode != "subprocess":
-            return
-
-        if snapshot.services:
-            self._start_services_from_specs(snapshot.services)
-        else:
-            logger.info("No service specs in snapshot -- skipping service provisioning")
-
-    def _start_services_from_specs(self, services: list[ServiceSpec]) -> None:
-        """Start a list of :class:`ServiceSpec` entries generically."""
-        for candidate in ("/var/log/siem/consolidated", "/tmp/openrange/siem/consolidated"):
-            try:
-                os.makedirs(candidate, exist_ok=True)
-                break
-            except PermissionError:
-                continue
-
-        started: list[str] = []
-        for svc in services:
-            try:
-                self._start_service(svc)
-                started.append(svc.daemon)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to start service %s (host=%s): %s",
-                    svc.daemon, svc.host, exc,
-                )
-
-        # Capture PIDs of started service processes
-        self._capture_service_pids()
-        logger.info(
-            "Service provisioning complete (spec-driven): %s",
-            ", ".join(started) or "none",
-        )
-
-    def _start_service(self, svc: ServiceSpec) -> None:
-        """Run init commands, start daemon, wait for readiness."""
-        logger.info("Starting service: %s (host=%s)", svc.daemon, svc.host)
-
-        # Set env vars
-        env = os.environ.copy()
-        env.update(svc.env_vars)
-
-        original_log_dir = svc.log_dir or "/var/log/siem"
-        log_dir = original_log_dir
-        try:
-            os.makedirs(log_dir, exist_ok=True)
-        except PermissionError:
-            if original_log_dir.startswith("/var/log/"):
-                log_dir = os.path.join(
-                    "/tmp/openrange",
-                    original_log_dir.removeprefix("/var/log/"),
-                )
-            else:
-                log_dir = os.path.join("/tmp/openrange", original_log_dir.strip("/"))
-            os.makedirs(log_dir, exist_ok=True)
-
-        init_commands = [
-            cmd.replace(original_log_dir, log_dir)
-            if original_log_dir and original_log_dir != log_dir
-            else cmd
-            for cmd in svc.init_commands
-        ]
-        start_command = (
-            svc.start_command.replace(original_log_dir, log_dir)
-            if original_log_dir and original_log_dir != log_dir
-            else svc.start_command
-        )
-
-        # Run init commands synchronously (blocking, no session isolation needed)
-        for cmd in init_commands:
-            try:
-                result = sp.run(
-                    ["bash", "-c", cmd],
-                    capture_output=True,
-                    timeout=30,
-                    text=True,
-                    env=env,
-                    check=False,
-                )
-                if result.returncode != 0 and result.stderr:
-                    logger.debug(
-                        "Init cmd stderr for %s: %s",
-                        svc.daemon, result.stderr[:200],
-                    )
-            except Exception as exc:
-                logger.warning("Init command failed for %s: %s", svc.daemon, exc)
-
-        # Start the daemon using Popen with DEVNULL file descriptors.
-        # Using sp.run() with capture_output=True creates pipes that race
-        # with the SIGCHLD zombie reaper (waitpid(-1) steals children from
-        # sp.run's internal waitpid).  Popen + DEVNULL avoids all pipe/signal
-        # issues — the daemon's own start_command redirects to its log file.
-        effective_cmd = start_command
-        if not effective_cmd.rstrip().endswith("&"):
-            effective_cmd = f"({effective_cmd}) &"
-
-        try:
-            proc = sp.Popen(
-                ["bash", "-c", effective_cmd],
-                stdin=sp.DEVNULL,
-                stdout=sp.DEVNULL,
-                stderr=sp.DEVNULL,
-                env=env,
-                start_new_session=True,
-            )
-            # Wait for bash to exit (it backgrounds the daemon and exits
-            # immediately).  The zombie reaper handles cleanup if we lose
-            # the race.
-            try:
-                proc.wait(timeout=5)
-            except sp.TimeoutExpired:
-                pass
-            except ChildProcessError:
-                pass
-        except Exception as exc:
-            logger.warning("Start command failed for %s: %s", svc.daemon, exc)
-            return
-
-        # Brief pause to let the daemon initialize before probing readiness
-        time.sleep(0.5)
-
-        # Wait for readiness
-        self._wait_for_readiness(svc)
-
-    def _wait_for_readiness(self, svc: ServiceSpec) -> None:
-        """Poll the readiness check until success or timeout."""
-        check = svc.readiness
-        if check.type == "tcp" and check.port == 0 and not check.url and not check.command:
-            logger.info("  %s: started (no readiness check)", svc.daemon)
-            return
-
-        max_attempts = max(int(check.timeout_s / max(check.interval_s, 0.1)), 1)
-        for attempt in range(max_attempts):
-            if self._probe_readiness(check):
-                logger.info("  %s: ready (%ds)", svc.daemon, attempt + 1)
-                return
-            time.sleep(check.interval_s)
-
-        logger.warning("  %s: readiness timeout after %ds", svc.daemon, check.timeout_s)
-
-    @staticmethod
-    def _probe_readiness(check: ReadinessCheck) -> bool:
-        """Execute a single readiness probe. Returns True on success."""
-        try:
-            if check.type == "tcp" and check.port > 0:
-                import socket
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(2)
-                    s.connect(("127.0.0.1", check.port))
-                return True
-            elif check.type == "http" and check.url:
-                result = sp.run(
-                    ["curl", "-sf", check.url],
-                    capture_output=True, timeout=3,
-                )
-                return result.returncode == 0
-            elif check.type == "command" and check.command:
-                result = sp.run(
-                    ["bash", "-c", check.command],
-                    capture_output=True, timeout=5,
-                )
-                return result.returncode == 0
-        except Exception:
-            pass
-        return False
-
-    def _capture_service_pids(self) -> None:
-        """Capture PIDs of running service processes."""
-        self._service_pids = []
-        daemon_names: list[str] = []
-        if self._snapshot and self._snapshot.services:
-            for svc in self._snapshot.services:
-                name = svc.daemon.split("/")[-1].split()[0]
-                if name and name not in daemon_names:
-                    daemon_names.append(name)
-
-        for daemon_name in daemon_names:
-            try:
-                result = sp.run(
-                    ["pgrep", "-x", daemon_name],
-                    capture_output=True, timeout=5, text=True, check=False,
-                )
-            except Exception:
-                continue
-            for line in result.stdout.splitlines():
-                pid = line.strip()
-                if pid.isdigit():
-                    self._service_pids.append(int(pid))
-
-    def _build_container_set(self) -> "ContainerSet | None":
-        """Build a ContainerSet from running Docker containers.
-
-        Returns None when Docker is unavailable or no containers are found.
-        """
-        from open_range.protocols import ContainerSet
-
-        client = self._get_docker()
-        if client is None:
-            return None
-
-        container_ids: dict[str, str] = {}
-        try:
-            for container in client.containers.list():
-                name = container.name
-                # Map service name to container id (open-range-web-1 → web)
-                for suffix in ("-1",):
-                    if name.endswith(suffix):
-                        svc = name.rsplit("-", 1)[0]  # open-range-web
-                        svc = svc.rsplit("-", 1)[-1]   # web
-                        container_ids[svc] = name
-                        break
-                else:
-                    container_ids[name] = name
-        except Exception as exc:
-            logger.debug("Container discovery failed: %s", exc)
-            return None
-
-        if not container_ids:
-            return None
-
-        project = "open-range"
-        if self._snapshot and self._snapshot.compose:
-            project = self._snapshot.compose.get("x-project-name", project)
-
-        return ContainerSet(project_name=project, container_ids=container_ids)
 
     def _start_npcs(self, snapshot: SnapshotSpec) -> None:
         """Start NPC traffic generators for the current episode.
@@ -977,24 +484,19 @@ class RangeEnvironment(MCPEnvironment):
             from open_range.builder.npc.npc_manager import NPCManager
 
             mock = (self._docker_available is False) or (self._execution_mode != "docker")
-            npc_model = os.environ.get("OPENRANGE_NPC_MODEL")
-            mgr = NPCManager(mock_mode=mock, model=npc_model)
+            mgr = NPCManager(mock_mode=mock)
             self._npc_manager = mgr
 
-            # Build ContainerSet for live Docker mode
-            containers = None if mock else self._build_container_set()
-
             # Start synchronously (NPCManager.start_sync handles mock vs live)
-            mgr.start_sync(snapshot, containers)
+            mgr.start_sync(snapshot)
 
             # Seed the traffic log immediately from chat traffic generated at
             # start time so that Blue has NPC noise from step 1.
             self._refresh_npc_traffic_log()
 
             logger.info(
-                "NPC manager started (mock=%s, containers=%s, personas=%d)",
+                "NPC manager started (mock=%s, personas=%d)",
                 mock,
-                bool(containers),
                 len(snapshot.npc_personas or []),
             )
         except Exception as exc:
@@ -1056,20 +558,6 @@ class RangeEnvironment(MCPEnvironment):
         snapshot.compose = compose
         return True
 
-    def _ensure_clean_reset_path(self, *, activated: bool) -> None:
-        """Reject live Docker resets that would overlay onto mutable containers."""
-        if activated or self._execution_mode != "docker":
-            return
-        if self._docker_available is False:
-            return
-        if self._get_docker() is None:
-            return
-        raise RuntimeError(
-            "Direct docker snapshot reset is disabled because it overlays mutable "
-            "container state across episodes. Use ManagedSnapshotRuntime or "
-            "explicitly opt into execution_mode='subprocess'."
-        )
-
     def _refresh_npc_traffic_log(self) -> None:
         """Pull latest NPC activity from the manager into the traffic log."""
         if self._npc_manager is not None:
@@ -1077,24 +565,6 @@ class RangeEnvironment(MCPEnvironment):
                 self._npc_traffic_log = self._npc_manager.get_traffic_log()
             except Exception as exc:
                 logger.debug("NPC traffic log refresh failed: %s", exc)
-
-    def _publish_console_state(self) -> None:
-        """Publish the latest snapshot/state to the operator console."""
-        try:
-            from open_range.server.console import publish_episode
-
-            publish_episode(self._snapshot, self._state)
-        except Exception:
-            pass
-
-    def _record_console_action(self, mode: str, action_record: dict[str, Any]) -> None:
-        """Record a console-visible action without coupling to console internals."""
-        try:
-            from open_range.server.console import record_action
-
-            record_action({"mode": mode, **action_record})
-        except Exception:
-            pass
 
     # -----------------------------------------------------------------
     # Snapshot selection
@@ -1106,16 +576,11 @@ class RangeEnvironment(MCPEnvironment):
         Priority:
         1. Explicit snapshot passed via kwargs["snapshot"]
         2. Snapshot loaded from store via kwargs["snapshot_id"]
-        3. Acquired from the managed runtime snapshot pool
-
-        Raises RuntimeError if no snapshot source is available.
+        3. A minimal fallback (for testing without Docker)
         """
         if "snapshot" in kwargs and isinstance(kwargs["snapshot"], SnapshotSpec):
             self._snapshot_id = kwargs.get("snapshot_id")
             snap = kwargs["snapshot"]
-        elif self._default_snapshot is not None:
-            snap = self._default_snapshot.model_copy(deep=True)
-            self._snapshot_id = kwargs.get("snapshot_id") or snap.lineage.snapshot_id or None
         elif self._runtime is not None:
             if "snapshot_id" in kwargs and kwargs["snapshot_id"]:
                 admitted = self._runtime.get_snapshot(str(kwargs["snapshot_id"]))
@@ -1124,11 +589,17 @@ class RangeEnvironment(MCPEnvironment):
             self._snapshot_id = admitted.snapshot_id
             snap = admitted.snapshot
         else:
-            raise RuntimeError(
-                "No snapshot source available. Provide a snapshot via "
-                "kwargs['snapshot'], set OPENRANGE_RUNTIME_SNAPSHOT or "
-                "OPENRANGE_RUNTIME_MANIFEST, or pass a runtime/default snapshot "
-                "to the constructor."
+            # Backward-compatible minimal stub for tests, demos, and local
+            # mock-mode usage when a managed runtime is not configured.
+            self._snapshot_id = None
+            snap = SnapshotSpec(
+                topology={"hosts": ["attacker", "siem"]},
+                flags=[],
+                golden_path=[],
+                task={
+                    "red_briefing": "Test mode.",
+                    "blue_briefing": "Test mode.",
+                },
             )
 
         # Defensive: ensure required fields are not None
@@ -1144,47 +615,6 @@ class RangeEnvironment(MCPEnvironment):
     # -----------------------------------------------------------------
     # Special command handling
     # -----------------------------------------------------------------
-
-    def _is_finding_grounded(self, finding: str) -> bool:
-        """Infer whether a Blue finding is grounded in observed Red activity."""
-        content = (finding or "").strip().lower()
-        if not content:
-            return False
-
-        red_actions = [
-            record
-            for record in self._red_history
-            if record.get("type") not in ("hallucinated_flag", "evidence")
-        ]
-        if not red_actions:
-            return False
-
-        cmd_names = {
-            str(record.get("cmd_name", "")).lower()
-            for record in red_actions
-            if record.get("cmd_name")
-        }
-        if any(cmd and cmd in content for cmd in cmd_names):
-            return True
-
-        finding_tokens = _tokenize_finding_text(content)
-        if not finding_tokens:
-            return False
-
-        red_tokens: set[str] = set()
-        for record in red_actions:
-            red_tokens.update(_tokenize_finding_text(str(record.get("command", ""))))
-            red_tokens.update(_tokenize_finding_text(str(record.get("target", ""))))
-            cmd_name = str(record.get("cmd_name", "")).lower()
-            if cmd_name:
-                red_tokens.add(cmd_name)
-
-        overlap = finding_tokens & red_tokens
-        if len(overlap) >= 2:
-            return True
-
-        has_attack_signal = any(keyword in content for keyword in _ATTACK_SIGNAL_KEYWORDS)
-        return has_attack_signal and len(overlap) >= 1
 
     def _handle_submit_flag(self, action: RangeAction) -> RangeObservation:
         """Process a submit_flag command from Red."""
@@ -1246,12 +676,10 @@ class RangeEnvironment(MCPEnvironment):
         """Process a submit_finding command from Blue."""
         parts = action.command.strip().split(maxsplit=1)
         finding = parts[1] if len(parts) > 1 else ""
-        grounded = self._is_finding_grounded(finding)
         self._blue_history.append({
             "step": self._state.step_count,
             "type": "finding",
             "content": finding,
-            "grounded": grounded,
             "time": time.time(),
         })
         return RangeObservation(
@@ -1412,123 +840,47 @@ class RangeEnvironment(MCPEnvironment):
         """Determine which container to route the command to.
 
         Reads from the snapshot topology to find the appropriate host:
-        - Red: host with role=attacker or zone=external
-        - Blue: host with role=siem or zone=management
+        - Red: host with ``role: "attacker"`` or ``zone: "external"``.
+        - Blue: host with ``role: "siem"`` or ``zone: "management"``.
 
-        Resolution priority:
-        1. host_catalog metadata (compiled from manifest)
-        2. dict entries in topology["hosts"] with role/zone
-        3. literal host-name match ("attacker"/"siem")
-        4. zone membership fallback via topology["zones"]
-        5. positional fallback (first host for Red, last for Blue)
+        Falls back to ``"attacker"``/``"siem"`` if no snapshot is loaded
+        or no matching host is found in the topology.
         """
-        if not self._snapshot or not isinstance(self._snapshot.topology, dict):
-            raise RuntimeError("Cannot resolve target — no snapshot topology loaded")
+        red_default = "attacker"
+        blue_default = "siem"
 
-        topology = self._snapshot.topology
-        hosts = topology.get("hosts", [])
-        if not hosts:
-            raise RuntimeError("Cannot resolve target — snapshot topology has no hosts")
+        if self._snapshot and isinstance(self._snapshot.topology, dict):
+            hosts = self._snapshot.topology.get("hosts", [])
 
-        target_role = "attacker" if action.mode == "red" else "siem"
-        target_zone = "external" if action.mode == "red" else "management"
-
-        host_catalog = topology.get("host_catalog", {})
-        if isinstance(host_catalog, dict):
-            for host_name, meta in host_catalog.items():
-                if not isinstance(meta, dict):
-                    continue
-                if meta.get("role") == target_role or meta.get("zone") == target_zone:
-                    if host_name:
-                        return self._container_name(str(host_name))
-
-        # Look for a host with matching role or zone
-        for h in hosts:
-            if isinstance(h, dict):
-                if h.get("role") == target_role or h.get("zone") == target_zone:
-                    host_name = h.get("name", h.get("hostname", ""))
-                    if host_name:
-                        return self._container_name(host_name)
-
-        # String host list: match by name
-        for h in hosts:
-            name = h if isinstance(h, str) else h.get("name", "")
-            if name == target_role:
-                return self._container_name(name)
-
-        zones = topology.get("zones", {})
-        if isinstance(zones, dict):
-            candidates = zones.get(target_zone, [])
-            if isinstance(candidates, list):
-                for candidate in candidates:
-                    host_name = str(candidate).strip()
-                    if host_name:
-                        return self._container_name(host_name)
-
-        # Use positional convention: first host for Red, last for Blue
-        fallback = hosts[0] if action.mode == "red" else hosts[-1]
-        name = fallback if isinstance(fallback, str) else fallback.get("name", fallback.get("hostname", ""))
-        logger.warning(
-            "No host with role=%s or zone=%s found; using positional fallback: %s",
-            target_role, target_zone, name,
-        )
-        return self._container_name(name)
-
-    def _topology_host_names(self) -> list[str]:
-        """Return deduplicated host names from the active snapshot topology."""
-        if not self._snapshot or not isinstance(self._snapshot.topology, dict):
-            return []
-        hosts = self._snapshot.topology.get("hosts", [])
-        names: list[str] = []
-        for host in hosts:
-            if isinstance(host, str):
-                candidate = host
-            elif isinstance(host, dict):
-                candidate = host.get("name") or host.get("hostname") or ""
+            if action.mode == "red":
+                # Look for a host with role "attacker" or zone "external"
+                for h in hosts:
+                    if isinstance(h, dict):
+                        if h.get("role") == "attacker" or h.get("zone") == "external":
+                            host_name = h.get("name", h.get("hostname", red_default))
+                            return self._container_name(host_name)
+                # Fallback: check if "attacker" is in the hosts list (string entries)
+                for h in hosts:
+                    if isinstance(h, str) and h == "attacker":
+                        return self._container_name("attacker")
+                # Last resort
+                return self._container_name(red_default)
             else:
-                candidate = ""
-            name = str(candidate).strip()
-            if name and name not in names:
-                names.append(name)
-        return names
+                # Look for a host with role "siem" or zone "management"
+                for h in hosts:
+                    if isinstance(h, dict):
+                        if h.get("role") == "siem" or h.get("zone") == "management":
+                            host_name = h.get("name", h.get("hostname", blue_default))
+                            return self._container_name(host_name)
+                # Fallback: check if "siem" is in the hosts list (string entries)
+                for h in hosts:
+                    if isinstance(h, str) and h == "siem":
+                        return self._container_name("siem")
+                # Last resort
+                return self._container_name(blue_default)
 
-    def _refresh_services_status(self) -> None:
-        """Refresh ``state.services_status`` from runtime/container health.
-
-        Availability reward should never rely on an empty status map after reset.
-        When health cannot be verified, host status is marked ``"unknown"``.
-        """
-        host_names = self._topology_host_names()
-        if not host_names:
-            self._state.services_status = {}
-            return
-
-        status_map = {host: "unknown" for host in host_names}
-
-        if self._execution_mode == "docker" and self._docker_available is not False:
-            client = self._get_docker()
-            if client is not None:
-                for host in host_names:
-                    container_name = self._container_name(host)
-                    try:
-                        container = client.containers.get(container_name)
-                        status_map[host] = str(getattr(container, "status", "unknown") or "unknown")
-                    except Exception:
-                        status_map[host] = "down"
-                self._state.services_status = status_map
-                return
-
-        if self._execution_mode == "subprocess" and self._snapshot and self._snapshot.services:
-            checks_by_host: dict[str, list[bool]] = {}
-            for svc in self._snapshot.services:
-                host = str(getattr(svc, "host", "") or "").strip()
-                if not host:
-                    continue
-                checks_by_host.setdefault(host, []).append(self._probe_readiness(svc.readiness))
-            for host, checks in checks_by_host.items():
-                status_map[host] = "healthy" if checks and all(checks) else "degraded"
-
-        self._state.services_status = status_map
+        # No snapshot loaded — use hardcoded defaults as last resort
+        return self._container_name(red_default if action.mode == "red" else blue_default)
 
     # -----------------------------------------------------------------
     # Core API
@@ -1555,9 +907,6 @@ class RangeEnvironment(MCPEnvironment):
         self._stop_npcs()
         self._teardown_active_project()
 
-        # Stop services from previous episode (subprocess mode)
-        self._stop_services()
-
         # Select snapshot
         self._snapshot = self._select_snapshot(**kwargs)
 
@@ -1580,9 +929,8 @@ class RangeEnvironment(MCPEnvironment):
         self._episode_start = time.time()
         self._episode_recorded = False
         try:
-            from open_range.server.console import clear_episode, clear_history
+            from open_range.server.console import clear_history
 
-            clear_episode()
             clear_history()
         except Exception:
             pass
@@ -1590,27 +938,11 @@ class RangeEnvironment(MCPEnvironment):
         # Runtime-backed episodes boot a fresh project per reset. Manual/mock
         # snapshots still use direct artifact application.
         activated = self._activate_runtime_snapshot(self._snapshot, episode_id=eid)
-        self._ensure_clean_reset_path(activated=activated)
-
-        # Start services BEFORE applying snapshot data so that daemons
-        # (MySQL, slapd, etc.) are ready to receive SQL / LDIF payloads.
-        self._start_snapshot_services(self._snapshot)
-
         if not activated:
             self._apply_snapshot(self._snapshot)
 
-        # Initialize zone router from topology (subprocess mode)
-        if self._execution_mode == "subprocess":
-            from open_range.server.zone_router import ZoneRouter
-
-            topology = self._snapshot.topology if isinstance(self._snapshot.topology, dict) else {}
-            self._zone_router = ZoneRouter.from_snapshot(topology)
-
         # Start NPC traffic for this episode
         self._start_npcs(self._snapshot)
-
-        # Prime service health map for availability reward grounding.
-        self._refresh_services_status()
 
         # Build initial briefing
         task = self._snapshot.task
@@ -1637,95 +969,74 @@ class RangeEnvironment(MCPEnvironment):
             len(self._snapshot.golden_path or []),
         )
 
-        self._publish_console_state()
-        self._record_console_action(
-            "system",
-            {
-                "step": 0,
-                "command": "reset",
-                "cmd_name": "reset",
-                "time": time.time(),
-                "episode_id": eid,
-            },
-        )
         return RangeObservation(stdout=briefing)
 
     def step(
-        self,
-        action: Action,
-        timeout_s: float | None = None,
-        **kwargs: Any,
-    ) -> Observation:
-        """Route MCP tool calls or text commands.
-
-        ``ListToolsAction`` and ``CallToolAction`` are handled by the
-        ``MCPEnvironment`` base class.  ``RangeAction`` text commands
-        are forwarded to ``_step_impl``.
-        """
-        if isinstance(action, (ListToolsAction, CallToolAction)):
-            return super().step(action, timeout_s=timeout_s, **kwargs)
-        return self._step_impl(action, timeout_s=timeout_s, **kwargs)
-
-    def _step_impl(
         self,
         action: RangeAction,
         timeout_s: float | None = None,
         **kwargs: Any,
     ) -> RangeObservation:
-        """Execute a text-command action against the range."""
-        if self._snapshot is None:
-            self._snapshot = self._select_snapshot(**kwargs)
-            tier = self._snapshot.topology.get("tier", 1) if isinstance(
-                self._snapshot.topology, dict
-            ) else 1
-            self._state = RangeState(
-                episode_id=self._state.episode_id or str(uuid4()),
-                step_count=0,
-                mode=action.mode,
-                flags_found=list(self._state.flags_found),
-                services_status=dict(self._state.services_status),
-                tier=tier,
-            )
+        """Execute an agent action against the range.
 
+        Routes the command to the appropriate container, logs it for
+        cross-role reward coupling, computes rewards, and checks
+        termination conditions.
+
+        Args:
+            action: The agent's action (command + mode).
+            timeout_s: Optional per-step timeout override.
+
+        Returns:
+            RangeObservation with command output and reward.
+        """
         self._state.step_count += 1
         self._state.mode = action.mode
 
         cmd_name = _extract_command_name(action.command)
         if not cmd_name:
-            obs = RangeObservation(
+            return RangeObservation(
                 stdout="",
                 stderr="Empty command",
                 done=self._state.step_count >= self._max_steps,
             )
-            self._publish_console_state()
-            return obs
 
         # Handle meta-commands (processed by environment, not forwarded to containers)
-        meta_handlers = {
-            "submit_flag": self._handle_submit_flag,
-            "submit_evidence": self._handle_submit_evidence,
-            "submit_finding": self._handle_submit_finding,
-            "auth": self._handle_auth,
-            "logout": self._handle_logout,
-        }
-
-        if cmd_name in meta_handlers:
-            self._record_console_action(
-                action.mode,
-                {
-                    "step": self._state.step_count,
-                    "command": action.command,
-                    "cmd_name": cmd_name,
-                    "time": time.time(),
-                },
-            )
-            obs = meta_handlers[cmd_name](action)
-            self._refresh_services_status()
+        if cmd_name == "submit_flag":
+            obs = self._handle_submit_flag(action)
             obs = self._apply_rewards(action, obs)
             self._check_termination(obs)
             self._report_if_done(obs)
-            self._publish_console_state()
             return obs
+
+        if cmd_name == "submit_evidence":
+            obs = self._handle_submit_evidence(action)
+            obs = self._apply_rewards(action, obs)
+            self._check_termination(obs)
+            self._report_if_done(obs)
+            return obs
+
+        if cmd_name == "submit_finding":
+            obs = self._handle_submit_finding(action)
+            obs = self._apply_rewards(action, obs)
+            self._check_termination(obs)
+            self._report_if_done(obs)
+            return obs
+
+        if cmd_name == "auth":
+            obs = self._handle_auth(action)
+            obs = self._apply_rewards(action, obs)
+            self._check_termination(obs)
+            self._report_if_done(obs)
+            return obs
+
+        if cmd_name == "logout":
+            obs = self._handle_logout(action)
+            obs = self._apply_rewards(action, obs)
+            self._check_termination(obs)
+            self._report_if_done(obs)
+            return obs
+
 
         # Route to container
         target = self._resolve_target(action)
@@ -1749,7 +1060,12 @@ class RangeEnvironment(MCPEnvironment):
             self._red_history.append(action_record)
         else:
             self._blue_history.append(action_record)
-        self._record_console_action(action.mode, action_record)
+        try:
+            from open_range.server.console import record_action
+
+            record_action({"mode": action.mode, **action_record})
+        except Exception:
+            pass
 
         # Check for milestone completion (#17)
         milestone = self._check_milestone(stdout)
@@ -1761,7 +1077,6 @@ class RangeEnvironment(MCPEnvironment):
 
         # Refresh NPC traffic log for reward computation
         self._refresh_npc_traffic_log()
-        self._refresh_services_status()
 
         # Build observation
         obs = RangeObservation(
@@ -1776,7 +1091,6 @@ class RangeEnvironment(MCPEnvironment):
         self._check_termination(obs)
         self._report_if_done(obs)
 
-        self._publish_console_state()
         return obs
 
     @property
@@ -1898,8 +1212,8 @@ class RangeEnvironment(MCPEnvironment):
 
         In production (docker or subprocess mode with real infrastructure),
         queries the SIEM container for actual log-based alerts. Falls back
-        to synthetic alerts derived from Red action history when SIEM queries
-        return nothing or in unit-test mock mode (capped to recent 20 lines).
+        to synthetic alerts derived from ALL Red actions when SIEM queries
+        return nothing or in unit-test mock mode.
         """
         # Try real SIEM query in non-mock modes
         if self._docker_available is not False or self._execution_mode == "subprocess":
@@ -1907,23 +1221,16 @@ class RangeEnvironment(MCPEnvironment):
             if siem_alerts:
                 return siem_alerts
 
-        # Fallback: synthesize alerts from recent Red actions so Blue still
-        # receives actionable signal in mock/degraded SIEM paths.
-        synthetic: list[str] = []
+        # Synthetic fallback: treat ALL Red actions as potential alerts
+        alerts: list[str] = []
         for record in self._red_history:
-            if record.get("type") in ("hallucinated_flag", "evidence"):
-                continue
-            command = str(record.get("command", "")).strip()
-            if not command:
-                continue
-            step = record.get("step", "?")
-            cmd_name = str(record.get("cmd_name", "")).strip() or _extract_command_name(command)
-            target = str(record.get("target", "")).strip()
-            if target:
-                synthetic.append(f"[synthetic] step={step} cmd={cmd_name} target={target} :: {command}")
-            else:
-                synthetic.append(f"[synthetic] step={step} cmd={cmd_name} :: {command}")
-        return synthetic[-20:]
+            cmd = record.get("cmd_name", "")
+            if cmd:
+                alerts.append(
+                    f"[IDS] Suspicious activity detected: {cmd} "
+                    f"at step {record['step']}"
+                )
+        return alerts
 
     # -----------------------------------------------------------------
     # Introspection (for reward computation and debugging)
@@ -1950,17 +1257,9 @@ class RangeEnvironment(MCPEnvironment):
         return list(self._npc_traffic_log)
 
     def close(self) -> None:
-        """Release resources (Docker client, NPC manager, episode state).
-
-        In subprocess mode, services are global system processes shared across
-        env instances.  They are managed by reset() (episode lifecycle), not by
-        close() — the stateless HTTP handler creates and closes an env per
-        request, and killing services here would undo the work done in reset().
-        """
+        """Release resources (Docker client, NPC manager, episode state)."""
         self._report_episode_result(completed=False)
         self._stop_npcs()
-        if self._execution_mode != "subprocess":
-            self._stop_services()
         self._teardown_active_project()
         if self._docker_client is not None:
             try:

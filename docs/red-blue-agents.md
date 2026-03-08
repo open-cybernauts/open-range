@@ -92,49 +92,20 @@ Blue runs commands on the **siem** container (management zone) and can issue def
 
 Blue sees the full log stream (web access logs, DB query logs, auth logs, firewall logs) mixed with NPC traffic. Blue must distinguish real attacks from noise.
 
-### MCP Alternative (Implemented)
+### MCP Alternative
 
-For agents that prefer structured tool discovery (OpenEnv RFC 003), `RangeEnvironment` extends `MCPEnvironment` and exposes 9 MCP tools via `ListToolsAction` / `CallToolAction`. Tool names follow the [open-trajectory-gym](https://github.com/open-cybernauts/open-trajectory-gym) canonical registry for SFT data compatibility.
-
-| Tool | Args | Role | TrajGym | What it does |
-|------|------|------|---------|-------------|
-| `shell_command` | `command`, `mode="red"` | Both | `shell_command` | Execute a shell command on your workstation |
-| `python_code` | `code`, `timeout=120` | Both | `python_code` | Execute Python code in the container |
-| `submit_flag` | `flag` | Red | `submit_flag` | Submit a captured flag for verification |
-| `submit_finding` | `description` | Blue | — | Report a detected attack for detection reward |
-| `get_challenge` | `role="red"` | Both | — | Get briefing, milestones, and success conditions |
-| `get_progress` | *(none)* | Both | — | Get steps taken, flags captured, milestones completed |
-| `check_services` | *(none)* | Both | — | Check health status of all range services |
+For agents that prefer structured tool discovery (RFC 003), OpenRange can expose tools via MCP:
 
 ```python
-from openenv.core.env_server.mcp_types import (
-    CallToolAction, CallToolObservation,
-    ListToolsAction, ListToolsObservation,
-)
+# Agent discovers tools
+tools = await env.list_tools()
+# [Tool(name="run_command", ...), Tool(name="submit_flag", ...)]
 
-env = RangeEnvironment(docker_available=False)
-
-# Discover available tools
-obs = env.step(ListToolsAction())
-# obs.tools -> [Tool(name="shell_command", ...), Tool(name="python_code", ...), ...]
-
-# Run a shell command
-obs = env.step(CallToolAction(tool_name="shell_command", arguments={"command": "nmap -sV web"}))
-# obs.result -> "Starting Nmap 7.94 ..."
-
-# Run Python code
-obs = env.step(CallToolAction(tool_name="python_code", arguments={"code": "import socket; print(socket.gethostname())"}))
-
-# Submit a flag
-obs = env.step(CallToolAction(tool_name="submit_flag", arguments={"flag": "FLAG{idor_2_db}"}))
-# obs.result -> "Correct! Flag accepted."
-
-# Check progress
-obs = env.step(CallToolAction(tool_name="get_progress", arguments={}))
-# obs.result -> "Episode: ep-123\nTier: 1\nSteps: 5 / 100\nFlags: 1 / 3"
+# Agent calls tool
+result = await env.call_tool("run_command", command="nmap -sV web")
 ```
 
-Both modes (`RangeAction` text commands and MCP `CallToolAction` structured calls) route to the same backend. Use whichever matches your agent framework. Text commands go through `_step_impl()` directly; MCP actions are dispatched by the `MCPEnvironment` base class.
+Both modes (`RangeAction` string commands and MCP tool calls) route to the same `docker exec` backend. Use whichever matches your agent framework.
 
 ## Episode Loop (Implemented)
 
@@ -142,7 +113,7 @@ The **orchestration layer** (not the agent) controls `reset()` and episode lifec
 
 ```python
 from open_range.agents.protocol import EpisodeMetrics, EpisodeResult
-from open_range.models import RangeAction
+from open_range.server.models import RangeAction
 
 def run_episode(
     env: object,
@@ -236,6 +207,8 @@ Default is strict alternation (Red → Blue → Red → ...). Configurable:
 | `ratio` | RRR → B → RRR → B | Red gets N steps per Blue step. More realistic. |
 | `async` | Both act on own schedule | Most realistic. Blue observes log stream continuously. |
 
+For hackathon: use `alternating`. Async mode is a post-hackathon stretch.
+
 ## BYO Agents
 
 ### Pattern 1: LiteLLM (Any Model) (Implemented)
@@ -312,7 +285,7 @@ blue = LLMRangeAgent(model="together_ai/meta-llama/Meta-Llama-3.1-405B")
 
 ### Pattern 2: Scripted Agent (Testing / Demo) (Implemented)
 
-For demos and integration tests. No LLM required. There is a generic `ScriptedAgent` base class and pre-built `ScriptedRedAgent` / `ScriptedBlueAgent` subclasses.
+For hackathon demo and integration tests. No LLM required. There is a generic `ScriptedAgent` base class and pre-built `ScriptedRedAgent` / `ScriptedBlueAgent` subclasses.
 
 ```python
 class ScriptedAgent:
@@ -350,9 +323,9 @@ class ScriptedBlueAgent(ScriptedAgent):
         super().__init__(commands=DEMO_BLUE_SCRIPT, fallback="check_services")
 ```
 
-### Pattern 3: Open-Weight Model (Local Inference)
+### Pattern 3: Open-Weight Model (Local Inference) (Planned)
 
-For GRPO training with gradient access. The model runs locally and generates commands directly. This pattern shows how to satisfy the `RangeAgent` protocol with a local HuggingFace model:
+For GRPO training with gradient access. The model runs locally and generates commands directly. No `LocalModelAgent` is implemented yet -- this pattern shows how to satisfy the `RangeAgent` protocol with a local HuggingFace model.
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -555,7 +528,7 @@ logger, lines = generator.export_jsonl(
 
 For live Docker episodes or custom rollout loops, `TrajectoryLogger` still remains the low-level recorder and JSONL exporter.
 
-### Asymmetric GRPO
+### Asymmetric GRPO (Planned)
 
 Train one side via GRPO while the other plays as a fixed opponent:
 
@@ -715,7 +688,7 @@ agents/
 ├── __init__.py           # Public API (re-exports all key symbols)
 ├── protocol.py           # RangeAgent protocol + EpisodeResult + EpisodeMetrics dataclasses
 ├── llm_agent.py          # LLMRangeAgent (LiteLLM -- any model)
-├── replay_agent.py       # ScriptedAgent, ScriptedRedAgent, ScriptedBlueAgent (demo/test)
+├── scripted_agent.py     # ScriptedAgent, ScriptedRedAgent, ScriptedBlueAgent (demo/test)
 ├── human_agent.py        # HumanAgent (interactive terminal)
 ├── prompts.py            # RED_SYSTEM_PROMPT, BLUE_SYSTEM_PROMPT
 ├── parsing.py            # extract_command() -- pull command from LLM text

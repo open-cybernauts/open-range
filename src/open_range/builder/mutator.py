@@ -31,7 +31,6 @@ from open_range.protocols import (
     SnapshotSpec,
     TruthGraph,
     Vulnerability,
-    build_default_challenge_catalog,
 )
 
 logger = logging.getLogger(__name__)
@@ -296,12 +295,6 @@ class Mutator:
         self._validate_plan_legality(manifest, plan)
         self._apply_plan(child, plan, manifest, context)
         child.files = render_template_payloads(child, manifest=manifest)
-        child.challenges = build_default_challenge_catalog(
-            child.task,
-            child.truth_graph,
-            child.flags,
-            child.evidence_spec,
-        )
 
         lineage = parent_snapshot.lineage.model_copy(deep=True)
         child.lineage = LineageMetadata(
@@ -355,14 +348,6 @@ class Mutator:
             context=context,
             rng=rng,
         )
-        if ops:
-            logger.info(
-                "Mutator policy %s chose ops=%s score=%.3f breakdown=%s",
-                self.policy.name,
-                [op.mutation_id for op in ops],
-                policy_score,
-                score_breakdown,
-            )
 
         if not ops:
             fallback = self._candidate_add_benign_noise(snapshot, rng)
@@ -637,7 +622,7 @@ class Mutator:
         compatible = [
             template
             for template in templates
-            if str(template.get("type", "")) in candidate_types
+            if str(template.get("type", "")).strip() in candidate_types
         ]
         if not compatible:
             return None
@@ -647,6 +632,7 @@ class Mutator:
         host = str(template.get("host", "")).strip()
         service = str(template.get("service", "")).strip()
         required_services = sorted(self._template_required_services(snapshot, template))
+
         return MutationOp(
             mutation_id=f"mut_seed_vuln_{vuln_type}_{host}_{len(snapshot.truth_graph.vulns)+1}",
             op_type="seed_vuln",
@@ -936,7 +922,9 @@ def _manifest_services(manifest: dict[str, Any]) -> dict[str, frozenset[str]]:
         raw_services = raw.get("services", [])
         if not isinstance(raw_services, list):
             raw_services = []
-        services[host] = frozenset(str(service).strip() for service in raw_services if str(service).strip())
+        services[host] = frozenset(
+            str(service).strip() for service in raw_services if str(service).strip()
+        )
     return services
 
 
@@ -1175,8 +1163,6 @@ def _reset_child_challenge_state(snapshot: SnapshotSpec) -> None:
     snapshot.evidence_spec = []
     snapshot.files = {}
     snapshot.compose = {}
-    snapshot.services = []
-    snapshot.challenges = []
     snapshot.task = snapshot.task.model_copy(
         update={
             "milestones": [],

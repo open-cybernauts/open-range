@@ -52,59 +52,8 @@ _ROLE_SERVICE_KEYWORDS: dict[str, list[str]] = {
 
 
 def _hosts_from_topology(topology: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return normalized host dicts for compiled or manifest-style topology.
-
-    ``compile_manifest_topology()`` canonicalizes ``topology["hosts"]`` to a
-    list of host names and keeps the richer metadata in ``host_catalog`` /
-    ``host_details``. NPC helpers need the richer dict shape, so normalize the
-    compiled form back into ``{"name": ..., "services": ...}`` records here.
-    """
-    raw_hosts = topology.get("hosts") or []
-    host_catalog = topology.get("host_catalog")
-    if not isinstance(host_catalog, dict):
-        host_catalog = {}
-    host_details = topology.get("host_details")
-    if not isinstance(host_details, dict):
-        host_details = {}
-
-    hosts: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    def _append_host(raw_host: Any) -> None:
-        if isinstance(raw_host, dict):
-            name = str(raw_host.get("name", "")).strip()
-        else:
-            name = str(raw_host).strip()
-        if not name or name in seen:
-            return
-
-        merged: dict[str, Any] = {}
-        catalog_detail = host_catalog.get(name)
-        if isinstance(catalog_detail, dict):
-            merged.update(catalog_detail)
-        detailed_detail = host_details.get(name)
-        if isinstance(detailed_detail, dict):
-            merged.update(detailed_detail)
-        if isinstance(raw_host, dict):
-            merged.update(raw_host)
-
-        merged["name"] = name
-        services = merged.get("services")
-        merged["services"] = list(services) if isinstance(services, list) else []
-        seen.add(name)
-        hosts.append(merged)
-
-    if isinstance(raw_hosts, list):
-        for raw_host in raw_hosts:
-            _append_host(raw_host)
-
-    for name in host_catalog:
-        _append_host(name)
-
-    for name in host_details:
-        _append_host(name)
-
-    return hosts
+    """Extract the list of host dicts from *topology*, tolerating missing keys."""
+    return topology.get("hosts") or []
 
 
 def _host_matches_keywords(host: dict[str, Any], keywords: list[str]) -> bool:
@@ -140,11 +89,10 @@ def _container_for_script(script_name: str, topology: dict[str, Any]) -> str:
 
 
 def _resolve_env_vars(topology: dict[str, Any], rate_lambda: float) -> dict[str, str]:
-    """Build environment variables by resolving roles and credentials from topology.
+    """Build environment variables by resolving roles from the topology.
 
-    Resolves host roles (WEB_HOST, DB_HOST, etc.) and credentials (DB_USER,
-    DB_PASS, SSH_USER, SSH_PASS) from the topology so shell scripts don't
-    need hardcoded values.
+    Instead of hardcoding ``WEB_HOST=web``, this finds the host whose
+    services list contains web/nginx/etc and maps the role to its name.
     """
     hosts = _hosts_from_topology(topology)
     env: dict[str, str] = {"RATE_LAMBDA": str(int(rate_lambda))}
@@ -154,21 +102,6 @@ def _resolve_env_vars(topology: dict[str, Any], rate_lambda: float) -> dict[str,
             if _host_matches_keywords(host, keywords):
                 env[role] = host["name"]
                 break
-
-    # Pass DB and SSH credentials from topology to shell scripts
-    users = topology.get("users", [])
-    for user in users:
-        if not isinstance(user, dict):
-            continue
-        hosts_list = user.get("hosts", [])
-        if "db" in hosts_list and "DB_USER" not in env:
-            env["DB_USER"] = user.get("username", "app_user")
-            env["DB_PASS"] = user.get("password", "AppUs3r!2024")
-        if any(h in hosts_list for h in ("web", "files", "ldap", "siem")):
-            role = user.get("role", "")
-            if role in ("admin", "sysadmin", "root") and "SSH_USER" not in env:
-                env["SSH_USER"] = user.get("username", "admin")
-                env["SSH_PASS"] = user.get("password", "Adm1n!2024")
 
     return env
 
@@ -194,20 +127,10 @@ def _derive_scripts_from_topology(topology: dict[str, Any]) -> list[str]:
 
 
 class NPCManager:
-    """Start and stop NPC background traffic for a snapshot.
+    """Start and stop NPC background traffic for a snapshot."""
 
-    Args:
-        mock_mode: When True, skip Docker exec and LLM calls (unit tests).
-        model: LiteLLM model string for Level 1 NPC agents.
-            Defaults to ``OPENRANGE_NPC_MODEL`` env var, then
-            ``azure/gpt-5.2-codex``.  Any LiteLLM-supported model works
-            (e.g. ``openai/gpt-4o``, ``anthropic/claude-haiku-4-5-20251001``,
-            ``ollama/llama3``).
-    """
-
-    def __init__(self, mock_mode: bool = False, model: str | None = None) -> None:
+    def __init__(self, mock_mode: bool = False) -> None:
         self._mock_mode = mock_mode
-        self._model = model  # passed to LLMNPCAgent
         self._processes: list[asyncio.subprocess.Process] = []
         self._tasks: list[asyncio.Task[Any]] = []
         self._running = False
@@ -338,9 +261,9 @@ class NPCManager:
             from open_range.builder.npc.npc_agent import LLMNPCAgent
 
             for persona in snapshot.npc_personas:
-                agent = LLMNPCAgent(model=self._model)
+                agent = LLMNPCAgent()
                 task = asyncio.create_task(
-                    agent.run_loop(persona, containers, snapshot),
+                    agent.run_loop(persona, containers),
                     name=f"npc_{persona.name}",
                 )
                 self._tasks.append(task)
@@ -431,6 +354,8 @@ class NPCManager:
 
         self._running = True
         self._containers = containers
+        npc_cfg = snapshot.npc_traffic
+
         # Re-initialise channels for the new episode
         self.channels = {
             "chat": ChatChannel(),

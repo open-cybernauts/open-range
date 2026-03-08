@@ -2,7 +2,7 @@
 
 ## System Overview
 
-OpenRange uses a **snapshot-based architecture**. A manifest defines a legal family of company worlds. A builder/mutator (LLM-driven via LiteLLM) proposes candidate snapshots inside that family. A layered validator gate admits only snapshots that boot, remain coherent, and are actually solvable. `reset()` selects a frozen validated snapshot for the next episode. Mutation happens asynchronously between episodes.
+OpenRange uses a **snapshot-based architecture**. A manifest defines a legal family of company worlds. A builder/mutator (LLM-driven via LiteLLM) proposes candidate snapshots inside that family. A validator gate (purely mechanical) admits only snapshots that boot, remain coherent, and are actually solvable. `reset()` selects a frozen validated snapshot for the next episode. Mutation happens asynchronously between episodes.
 
 ```mermaid
 flowchart LR
@@ -50,16 +50,11 @@ flowchart LR
 
 ## Key Principle
 
-**LLM generates, rules validate.** The builder/mutator uses LiteLLM (any model -- Claude, GPT-4o, open models) to generate snapshots creatively. The validator gate runs a layered admission pipeline: manifest compliance, graph-native checks (consistency, path solvability, evidence sufficiency, reward grounding), structural/task checks, and optionally live container-backed checks. Two LLM advisory checks (NPC consistency, realism review) can trigger retry but never override a mechanical pass. Rewards are grounded in container state, never LLM-evaluated.
+**LLM generates, rules validate.** The builder/mutator uses LiteLLM (any model -- Claude, GPT-4o, open models) to generate snapshots creatively. The validator gate runs a 10-check admission pipeline: 8 mechanical checks (deterministic, no LLM) plus 2 LLM advisory checks (configurable, removable). Advisory failures can trigger retry but never override a mechanical pass. Rewards are grounded in container state, never LLM-evaluated.
 
 ## Infrastructure
 
-OpenRange supports two execution modes:
-
-- **Docker mode** (local dev): The OpenEnv server and range services run in separate Docker Compose containers. The server communicates with range containers via the Docker SDK (mounted `/var/run/docker.sock`).
-- **Subprocess mode** (HF Spaces): All services (nginx, MySQL, slapd, rsyslog, samba, postfix, sshd) run as background processes in a single container. Commands execute via `subprocess.run()`. Set `OPENRANGE_EXECUTION_MODE=subprocess`.
-
-Both modes expose the same OpenEnv API. Agents cannot tell which mode they're hitting.
+**Everything runs in Docker Compose.** The OpenEnv server is a container in the same compose stack as the range. It communicates with range containers via the Docker SDK (mounted `/var/run/docker.sock`).
 
 ### Tier 1 Containers (8 total)
 
@@ -140,25 +135,16 @@ sequenceDiagram
     Note over B: Topology graph, truth graph,<br/>evidence spec, task set,<br/>Dockerfiles, configs, app code
 
     B->>V: Candidate snapshot artifacts
-    Note over V: Graph checks (no containers needed)
-    V->>V: ManifestComplianceCheck
-    V->>V: GraphConsistencyCheck
-    V->>V: PathSolvabilityCheck
-    V->>V: GraphEvidenceSufficiencyCheck
-    V->>V: GraphRewardGroundingCheck
-    Note over V: Structural / task checks
-    V->>V: TaskFeasibilityCheck
-    V->>V: DifficultyCheck
-    Note over V: Live checks (training profile only)
-    V->>V: BuildBootCheck: compose up + healthchecks
-    V->>V: ExploitabilityCheck: golden path end-to-end
-    V->>V: PatchabilityCheck: inverse mutation test
-    V->>V: EvidenceCheck: logs + alerts exist
-    V->>V: RewardGroundingCheck: rubrics produce valid scores
-    V->>V: IsolationCheck: zones enforced, no flag leaks
-    Note over V: LLM advisory (never block alone)
-    V->>V: NPCConsistencyCheck: persona phish calibration
-    V->>V: RealismReviewCheck: scenario plausibility
+    V->>V: 1. BuildBootCheck: compose up + healthchecks
+    V->>V: 2. ExploitabilityCheck: golden path end-to-end
+    V->>V: 3. PatchabilityCheck: inverse mutation test
+    V->>V: 4. EvidenceSufficiencyCheck: logs + alerts exist
+    V->>V: 5. RewardGroundingCheck: rubrics produce valid scores
+    V->>V: 6. IsolationLeakageCheck: zones enforced, no flag leaks
+    V->>V: 7. TaskFeasibilityCheck: hosts/evidence/vulns reachable
+    V->>V: 8. DifficultyCheck: golden path steps ±20% of tier target
+    V->>V: 9. NPCConsistencyCheck: personas pass phish calibration (LLM, advisory)
+    V->>V: 10. RealismReviewCheck: scenario plausibility (LLM, advisory)
 
     alt All mechanical checks pass
         V->>SS: Publish Acme v_k
@@ -366,12 +352,12 @@ agents:
   builder:
     class: open_range.builder.builder.LLMSnapshotBuilder
     kwargs:
-      model: "azure/gpt-5.2-codex"
+      model: "anthropic/claude-sonnet-4-20250514"
       temperature: 0.7
   npc_behavior:
     class: open_range.builder.npc.npc_agent.LLMNPCAgent
     kwargs:
-      model: "azure/gpt-5.2-codex"
+      model: "anthropic/claude-haiku-4-5-20251001"
   validator_checks:
     - class: open_range.validator.build_boot.BuildBootCheck
     - class: open_range.validator.exploitability.ExploitabilityCheck
@@ -407,7 +393,7 @@ def resolve_component(class_path: str, kwargs: dict, protocol: type) -> Any:
 |----------|---------|-------------|
 | `SnapshotBuilder` | `LLMSnapshotBuilder` (LiteLLM) | `TemplateOnlyBuilder` (testing), `FileBuilder` (demo) |
 | `NPCBehavior` | `NullNPCBehavior` (Level 0, no-op) | `LLMNPCAgent` (Level 1+, LiteLLM), `RuleBasedNPCBehavior` (heuristic, no LLM) |
-| `ValidatorCheck` | 13 mechanical + 2 LLM advisory | Add, remove, or reorder via config |
+| `ValidatorCheck` | 8 mechanical + 2 LLM advisory | Add, remove, or reorder via config |
 | `RangeAgent` | `ScriptedAgent` (replay commands) | `LLMRangeAgent` (LiteLLM), `HumanAgent` (interactive stdin), `ScriptedRedAgent`/`ScriptedBlueAgent` (pre-built demo sequences) |
 
 ### Environment Variables
@@ -416,8 +402,8 @@ Env vars override YAML config at deploy time:
 
 | Env Var | Overrides | Default |
 |---------|-----------|---------|
-| `OPENRANGE_BUILDER_MODEL` | Builder LLM model | `azure/gpt-5.2-codex` |
-| `OPENRANGE_NPC_MODEL` | NPC LLM model | `azure/gpt-5.2-codex` |
+| `OPENRANGE_BUILDER_MODEL` | Builder LLM model | `anthropic/claude-sonnet-4-20250514` |
+| `OPENRANGE_NPC_MODEL` | NPC LLM model | `anthropic/claude-haiku-4-5-20251001` |
 | `LITELLM_API_KEY` | Global API key | (or model-specific keys) |
 
-All checks except NPCConsistencyCheck and RealismReviewCheck are **purely mechanical** -- deterministic, no LLM. The two LLM checks are advisory (`advisory=True`): failure triggers retry but never blocks admission. Both are configurable -- remove them from the validator_checks list to run fully mechanical.
+Checks 1-8 are **purely mechanical** -- deterministic, no LLM. Check 9 (NPC consistency) uses an LLM for NPC persona testing. Check 10 (realism review) is an LLM advisory check. Both LLM checks are advisory (`advisory=True`): failure triggers retry but never blocks admission. Both are configurable -- remove them from the validator_checks list to run fully mechanical.

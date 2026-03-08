@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import json
-import logging
 from pathlib import Path
 
 import pytest
-import yaml
 
 from open_range.protocols import (
     CheckResult,
@@ -24,110 +21,12 @@ from open_range.server.runtime import ManagedSnapshotRuntime
 from open_range.validator.validator import ValidationResult
 
 
-@pytest.fixture(autouse=True)
-def _clear_runtime_builder_env(monkeypatch: pytest.MonkeyPatch):
-    for name in (
-        "OPENRANGE_RUNTIME_BUILDER",
-        "OPENRANGE_BUILDER_MODEL",
-        "AZURE_API_KEY",
-        "AZURE_OPENAI_API_KEY",
-        "AZURE_API_BASE",
-        "AZURE_OPENAI_ENDPOINT",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "GOOGLE_API_KEY",
-        "GEMINI_API_KEY",
-        "LITELLM_API_KEY",
-        "OLLAMA_HOST",
-    ):
-        monkeypatch.delenv(name, raising=False)
-
-
 class TestManagedSnapshotRuntime:
-    def test_from_env_prefers_llm_builder_when_provider_config_is_present(
-        self,
-        tier1_manifest,
-        tmp_path,
-        monkeypatch,
-    ):
-        from open_range.builder.builder import LLMSnapshotBuilder, litellm
-
-        if litellm is None:
-            pytest.skip("builder extra not installed")
-
-        manifest_path = tmp_path / "manifest.yaml"
-        manifest_path.write_text(yaml.safe_dump(tier1_manifest), encoding="utf-8")
-
-        monkeypatch.setenv("OPENRANGE_RUNTIME_MANIFEST", str(manifest_path))
-        monkeypatch.setenv("OPENRANGE_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
-        monkeypatch.setenv("AZURE_API_KEY", "test-key")
-        monkeypatch.setenv("AZURE_API_BASE", "https://example.openai.azure.com")
-
-        runtime = ManagedSnapshotRuntime.from_env()
-        assert isinstance(runtime.builder, LLMSnapshotBuilder)
-
-    def test_from_env_defaults_to_training_and_live(self, tier1_manifest, tmp_path, monkeypatch):
-        manifest_path = tmp_path / "manifest.yaml"
-        manifest_path.write_text(yaml.safe_dump(tier1_manifest), encoding="utf-8")
-
-        monkeypatch.setenv("OPENRANGE_RUNTIME_MANIFEST", str(manifest_path))
-        monkeypatch.setenv("OPENRANGE_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
-        monkeypatch.delenv("OPENRANGE_RUNTIME_VALIDATOR_PROFILE", raising=False)
-        monkeypatch.delenv("OPENRANGE_ENABLE_LIVE_ADMISSION", raising=False)
-        monkeypatch.delenv("OPENRANGE_ALLOW_NON_LIVE_ADMISSION", raising=False)
-
-        runtime = ManagedSnapshotRuntime.from_env()
-        assert runtime.validator_profile == "training"
-        assert runtime.live_admission_enabled is True
-
-    def test_from_env_rejects_non_live_without_explicit_opt_out(
-        self,
-        tier1_manifest,
-        tmp_path,
-        monkeypatch,
-    ):
-        manifest_path = tmp_path / "manifest.yaml"
-        manifest_path.write_text(yaml.safe_dump(tier1_manifest), encoding="utf-8")
-
-        monkeypatch.setenv("OPENRANGE_RUNTIME_MANIFEST", str(manifest_path))
-        monkeypatch.setenv("OPENRANGE_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
-        monkeypatch.setenv("OPENRANGE_RUNTIME_VALIDATOR_PROFILE", "offline")
-        monkeypatch.setenv("OPENRANGE_ENABLE_LIVE_ADMISSION", "0")
-        monkeypatch.delenv("OPENRANGE_ALLOW_NON_LIVE_ADMISSION", raising=False)
-
-        with pytest.raises(RuntimeError, match="OPENRANGE_ALLOW_NON_LIVE_ADMISSION=1"):
-            ManagedSnapshotRuntime.from_env()
-
-    def test_from_env_allows_non_live_with_explicit_opt_out_warning(
-        self,
-        tier1_manifest,
-        tmp_path,
-        monkeypatch,
-        caplog,
-    ):
-        manifest_path = tmp_path / "manifest.yaml"
-        manifest_path.write_text(yaml.safe_dump(tier1_manifest), encoding="utf-8")
-
-        monkeypatch.setenv("OPENRANGE_RUNTIME_MANIFEST", str(manifest_path))
-        monkeypatch.setenv("OPENRANGE_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
-        monkeypatch.setenv("OPENRANGE_RUNTIME_VALIDATOR_PROFILE", "offline")
-        monkeypatch.setenv("OPENRANGE_ENABLE_LIVE_ADMISSION", "0")
-        monkeypatch.setenv("OPENRANGE_ALLOW_NON_LIVE_ADMISSION", "1")
-
-        with caplog.at_level(logging.WARNING):
-            runtime = ManagedSnapshotRuntime.from_env()
-
-        assert runtime.validator_profile == "offline"
-        assert runtime.live_admission_enabled is False
-        assert "strict live admission" in caplog.text
-        assert "OPENRANGE_ALLOW_NON_LIVE_ADMISSION=1" in caplog.text
-
     def test_offline_validator_profile_includes_static_checks(self, tier1_manifest, tmp_path):
         runtime = ManagedSnapshotRuntime(
             manifest=tier1_manifest,
             store_dir=tmp_path / "snapshots",
             validator_profile="offline",
-            allow_insecure_offline_profile=True,
             refill_enabled=False,
         )
         names = [type(check).__name__ for check in runtime.validator.checks]
@@ -163,59 +62,10 @@ class TestManagedSnapshotRuntime:
         assert "RewardGroundingCheck" in names
         assert "DifficultyCheck" in names
 
-    def test_offline_validator_profile_requires_explicit_opt_out(
-        self,
-        tier1_manifest,
-        tmp_path,
-        monkeypatch,
-    ):
-        monkeypatch.delenv("OPENRANGE_ALLOW_OFFLINE_ADMISSION", raising=False)
-        with pytest.raises(RuntimeError, match="OPENRANGE_ALLOW_OFFLINE_ADMISSION=1"):
-            ManagedSnapshotRuntime(
-                manifest=tier1_manifest,
-                store_dir=tmp_path / "snapshots",
-                validator_profile="offline",
-                refill_enabled=False,
-            )
-
-    def test_offline_validator_profile_logs_warning_when_opted_out(
-        self,
-        tier1_manifest,
-        tmp_path,
-        caplog,
-    ):
-        caplog.set_level("WARNING")
-        ManagedSnapshotRuntime(
-            manifest=tier1_manifest,
-            store_dir=tmp_path / "snapshots",
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
-            refill_enabled=False,
-        )
-        assert any(
-            "container-backed admission checks are disabled" in record.message
-            for record in caplog.records
-        )
-
-    def test_from_env_defaults_to_training_validator_profile(self, tmp_path, monkeypatch):
-        repo_root = Path(__file__).resolve().parent.parent
-        monkeypatch.setenv(
-            "OPENRANGE_RUNTIME_MANIFEST",
-            str(repo_root / "manifests" / "tier1_basic.yaml"),
-        )
-        monkeypatch.setenv("OPENRANGE_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
-        monkeypatch.delenv("OPENRANGE_RUNTIME_VALIDATOR_PROFILE", raising=False)
-        monkeypatch.delenv("OPENRANGE_ALLOW_OFFLINE_ADMISSION", raising=False)
-
-        runtime = ManagedSnapshotRuntime.from_env()
-        assert runtime.validator_profile == "training"
-
     def test_start_preloads_snapshot_pool(self, tier1_manifest, tmp_path):
         runtime = ManagedSnapshotRuntime(
             manifest=tier1_manifest,
             store_dir=tmp_path / "snapshots",
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
             pool_size=2,
             refill_enabled=False,
         )
@@ -228,56 +78,10 @@ class TestManagedSnapshotRuntime:
         finally:
             runtime.stop()
 
-    def test_start_revalidates_persisted_snapshots_by_default(self, tier1_manifest, tmp_path):
-        store_dir = tmp_path / "snapshots"
-
-        runtime = ManagedSnapshotRuntime(
-            manifest=tier1_manifest,
-            store_dir=store_dir,
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
-            pool_size=1,
-            refill_enabled=False,
-        )
-        runtime.start()
-        runtime.stop()
-
-        spec_path = next(store_dir.glob("*/spec.json"))
-        raw = json.loads(spec_path.read_text(encoding="utf-8"))
-        raw["truth_graph"]["vulns"] = []
-        raw["golden_path"] = []
-        raw["flags"] = []
-        spec_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
-
-        runtime = ManagedSnapshotRuntime(
-            manifest=tier1_manifest,
-            store_dir=store_dir,
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
-            pool_size=1,
-            refill_enabled=False,
-        )
-        with pytest.raises(RuntimeError, match="persisted snapshot failed startup revalidation"):
-            runtime.start()
-
-        trust_runtime = ManagedSnapshotRuntime(
-            manifest=tier1_manifest,
-            store_dir=store_dir,
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
-            pool_size=1,
-            refill_enabled=False,
-            persisted_snapshot_validation="trust",
-        )
-        trust_runtime.start()
-        trust_runtime.stop()
-
     def test_start_materializes_rendered_artifacts(self, tier1_manifest, tmp_path):
         runtime = ManagedSnapshotRuntime(
             manifest=tier1_manifest,
             store_dir=tmp_path / "snapshots",
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
             pool_size=1,
             refill_enabled=False,
         )
@@ -297,8 +101,6 @@ class TestManagedSnapshotRuntime:
         runtime = ManagedSnapshotRuntime(
             manifest=tier1_manifest,
             store_dir=tmp_path / "snapshots",
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
             pool_size=1,
             selection_strategy="latest",
             refill_enabled=False,
@@ -317,8 +119,6 @@ class TestManagedSnapshotRuntime:
         runtime = ManagedSnapshotRuntime(
             manifest=tier1_manifest,
             store_dir=tmp_path / "snapshots",
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
             pool_size=1,
             refill_enabled=False,
         )
@@ -337,8 +137,6 @@ class TestManagedSnapshotRuntime:
         runtime = ManagedSnapshotRuntime(
             manifest=tier1_manifest,
             store_dir=tmp_path / "snapshots",
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
             pool_size=2,
             selection_strategy="latest",
             parent_selection_strategy="policy",
@@ -360,8 +158,6 @@ class TestManagedSnapshotRuntime:
         runtime = ManagedSnapshotRuntime(
             manifest=tier1_manifest,
             store_dir=tmp_path / "snapshots",
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
             pool_size=1,
             parent_selection_strategy="policy",
             refill_enabled=False,
@@ -373,8 +169,6 @@ class TestManagedSnapshotRuntime:
         runtime = ManagedSnapshotRuntime(
             manifest=tier1_manifest,
             store_dir=tmp_path / "snapshots",
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
             pool_size=2,
             refill_enabled=False,
         )
@@ -439,8 +233,6 @@ class TestManagedSnapshotRuntime:
         runtime = ManagedSnapshotRuntime(
             manifest=tier1_manifest,
             store_dir=tmp_path / "snapshots",
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
             pool_size=1,
             refill_enabled=False,
             live_admission_enabled=True,
@@ -455,92 +247,9 @@ class TestManagedSnapshotRuntime:
             assert compose_runner.teardown_calls == [f"openrange-{admitted.snapshot_id}"]
             assert admitted.snapshot.topology["live_validated"] is True
             assert admitted.snapshot.compose["x-project-name"] == f"openrange-{admitted.snapshot_id}"
-            assert any(dest.endswith("/var/www/portal/index.php") for _, _, dest in compose_runner.containers.cp_calls)
+            assert compose_runner.containers.cp_calls == []
             listing = runtime.list_snapshots()
             assert listing[0]["live_validated"] is True
-        finally:
-            runtime.stop()
-
-    def test_training_live_validation_uses_compose_runner_boot(
-        self,
-        tier1_manifest,
-        tmp_path,
-    ):
-        class FakeContainers:
-            def __init__(self) -> None:
-                self.exec_calls: list[tuple[str, str]] = []
-                self.cp_calls: list[tuple[str, str, str]] = []
-
-            async def exec(self, container: str, cmd: str, **kwargs) -> str:
-                self.exec_calls.append((container, cmd))
-                return "ok"
-
-            async def cp(self, container: str, src: str, dest: str) -> None:
-                self.cp_calls.append((container, src, dest))
-
-            async def is_healthy(self, container: str) -> bool:
-                return True
-
-        class FakeComposeRunner:
-            def __init__(self) -> None:
-                self.boot_calls: list[tuple[str, str, str | None]] = []
-                self.compose_payloads: list[dict[str, object]] = []
-                self.teardown_calls: list[str] = []
-                self.containers = FakeContainers()
-
-            def boot(self, *, snapshot_id, artifacts_dir, compose, project_name=None):
-                self.boot_calls.append((snapshot_id, str(artifacts_dir), project_name))
-                self.compose_payloads.append(compose)
-                return BootedSnapshotProject(
-                    project_name=project_name or f"openrange-{snapshot_id}",
-                    compose_file=artifacts_dir / "docker-compose.yml",
-                    artifacts_dir=artifacts_dir,
-                    containers=self.containers,  # type: ignore[arg-type]
-                )
-
-            def teardown(self, project):
-                self.teardown_calls.append(project.project_name)
-
-        class FakeTrainingValidator:
-            def __init__(self) -> None:
-                self.calls: list[tuple[SnapshotSpec, object]] = []
-
-            async def validate(self, snapshot, containers):
-                self.calls.append((snapshot, containers))
-                return ValidationResult(
-                    passed=True,
-                    checks=[CheckResult(name="build_boot", passed=True)],
-                    total_time_s=0.0,
-                )
-
-        compose_runner = FakeComposeRunner()
-        validator = FakeTrainingValidator()
-        runtime = ManagedSnapshotRuntime(
-            manifest=tier1_manifest,
-            store_dir=tmp_path / "snapshots",
-            validator_profile="training",
-            pool_size=1,
-            refill_enabled=False,
-            compose_runner=compose_runner,  # type: ignore[arg-type]
-            validator=validator,  # type: ignore[arg-type]
-        )
-
-        runtime.start()
-        try:
-            listing = runtime.list_snapshots()
-            assert listing
-            assert compose_runner.boot_calls
-            snapshot_id, artifacts_dir, project_name = compose_runner.boot_calls[0]
-            assert Path(artifacts_dir).name.startswith(f"openrange-validate-{snapshot_id}")
-            expected_project_name = runtime._project_name(snapshot_id)
-            assert project_name == expected_project_name
-            assert compose_runner.compose_payloads[0]["services"]
-            assert compose_runner.teardown_calls == [expected_project_name]
-            assert validator.calls
-            assert any(
-                dest.endswith("/var/www/portal/index.php")
-                for _, _, dest in compose_runner.containers.cp_calls
-            )
         finally:
             runtime.stop()
 
@@ -589,8 +298,6 @@ class TestManagedSnapshotRuntime:
         runtime = ManagedSnapshotRuntime(
             manifest=tier1_manifest,
             store_dir=tmp_path / "snapshots",
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
             pool_size=1,
             refill_enabled=False,
             compose_runner=compose_runner,  # type: ignore[arg-type]
@@ -623,7 +330,6 @@ class TestManagedSnapshotRuntime:
             manifest=tier1_manifest,
             store_dir=tmp_path / "snapshots",
             validator_profile="offline",
-            allow_insecure_offline_profile=True,
             pool_size=0,
             refill_enabled=False,
             generation_retries=2,
@@ -662,28 +368,10 @@ class TestManagedSnapshotRuntime:
 
 
 class TestEnvironmentRuntimeIntegration:
-    def test_reset_rejects_direct_live_docker_overlay(self):
-        snapshot = SnapshotSpec(
-            topology={"hosts": ["attacker", "siem", "web"]},
-            compose={"services": {"attacker": {}, "siem": {}, "web": {}}},
-            files={"web:/var/www/html/index.php": "<?php echo 'hi'; ?>"},
-            task={"red_briefing": "Go.", "blue_briefing": "Watch."},
-        )
-        env = RangeEnvironment(docker_available=True, execution_mode="docker")
-        env._get_docker = lambda: object()  # type: ignore[method-assign]
-
-        try:
-            with pytest.raises(RuntimeError, match="Direct docker snapshot reset is disabled"):
-                env.reset(snapshot=snapshot)
-        finally:
-            env.close()
-
     def test_reset_uses_managed_runtime_snapshot(self, tier1_manifest, tmp_path):
         runtime = ManagedSnapshotRuntime(
             manifest=tier1_manifest,
             store_dir=tmp_path / "snapshots",
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
             pool_size=1,
             refill_enabled=False,
         )
@@ -703,8 +391,6 @@ class TestEnvironmentRuntimeIntegration:
         runtime = ManagedSnapshotRuntime(
             manifest=tier1_manifest,
             store_dir=tmp_path / "snapshots",
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
             pool_size=1,
             refill_enabled=False,
         )
@@ -724,8 +410,6 @@ class TestEnvironmentRuntimeIntegration:
         runtime = ManagedSnapshotRuntime(
             manifest=tier1_manifest,
             store_dir=tmp_path / "snapshots",
-            validator_profile="offline",
-            allow_insecure_offline_profile=True,
             pool_size=1,
             refill_enabled=False,
         )
