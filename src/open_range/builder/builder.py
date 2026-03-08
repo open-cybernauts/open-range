@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover - exercised only without builder extra
 from open_range.protocols import (
     BuildContext,
     EvidenceItem,
+    ExploitStep,
     FlagSpec,
     GoldenPathStep,
     NPCPersona,
@@ -55,6 +56,7 @@ class LLMSnapshotBuilder:
         prompt_template: str | None = None,
         temperature: float = 0.7,
         max_retries: int = 3,
+        max_tokens: int = 32768,
     ) -> None:
         self.model = model or os.environ.get(
             "OPENRANGE_BUILDER_MODEL", "anthropic/claude-sonnet-4-20250514"
@@ -62,6 +64,7 @@ class LLMSnapshotBuilder:
         self.prompt_template = prompt_template or BUILDER_SYSTEM_PROMPT
         self.temperature = temperature
         self.max_retries = max_retries
+        self.max_tokens = max_tokens
 
     async def build(
         self,
@@ -75,12 +78,15 @@ class LLMSnapshotBuilder:
                 "Install with `pip install open-range[builder]`."
             )
 
-        user_payload = json.dumps(
-            {
-                "manifest": manifest,
-                "runtime_context": context.model_dump(),
-            },
-            indent=2,
+        user_payload = (
+            "Generate a complete cybersecurity range snapshot as valid JSON.\n\n"
+            + json.dumps(
+                {
+                    "manifest": manifest,
+                    "runtime_context": context.model_dump(),
+                },
+                indent=2,
+            )
         )
 
         last_error: Exception | None = None
@@ -104,12 +110,18 @@ class LLMSnapshotBuilder:
                         }
                     )
 
-                response = await litellm.acompletion(
-                    model=self.model,
-                    messages=messages,
-                    response_format={"type": "json_object"},
-                    temperature=self.temperature,
-                )
+                kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": messages,
+                    "max_tokens": self.max_tokens,
+                }
+                # Codex models don't support temperature
+                if self.temperature is not None:
+                    kwargs["temperature"] = self.temperature
+                # Request JSON output; some models need the word "json"
+                # in messages to use json_object format
+                kwargs["response_format"] = {"type": "json_object"}
+                response = await litellm.acompletion(**kwargs)
 
                 raw = response.choices[0].message.content
                 spec = _parse_llm_response(raw)
@@ -160,9 +172,20 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
             )
         )
 
+    # Map exploit_chain -- LLM uses "vuln"/"action", protocol uses "vuln_id"/"command"
+    exploit_chain = []
+    for ec in data.get("truth_graph", {}).get("exploit_chain", []):
+        exploit_chain.append(
+            ExploitStep(
+                vuln_id=ec.get("vuln_id", ec.get("vuln", "")),
+                command=ec.get("command", ec.get("action", "")),
+                description=ec.get("description", ec.get("yields", "")),
+            )
+        )
+
     truth_graph = TruthGraph(
         vulns=vulns,
-        exploit_chain=data.get("truth_graph", {}).get("exploit_chain", []),
+        exploit_chain=exploit_chain,
     )
 
     # Map golden_path -- LLM uses "expect_stdout", protocol uses "expect_in_stdout"
@@ -241,6 +264,31 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
         blue_briefing=task_raw.get("blue_briefing", ""),
     )
 
+    # Map files -- explicit files from LLM + extract from vulnerable_code
+    files: dict[str, str] = {}
+
+    # 1. Explicit files field from LLM output
+    files_raw = data.get("files", {})
+    if isinstance(files_raw, dict):
+        for key, content in files_raw.items():
+            if isinstance(content, str):
+                files[key] = content
+
+    # 2. Extract deployable files from vulnerable_code entries
+    for v in vulns:
+        vc = v.vulnerable_code
+        if isinstance(vc, dict):
+            for file_path, code in vc.items():
+                container_key = f"{v.host}:{file_path}"
+                if container_key not in files:
+                    files[container_key] = code
+        elif isinstance(vc, str) and vc.strip():
+            ip = v.injection_point
+            if ip.startswith("/") and v.host == "web":
+                container_key = f"web:/var/www/portal{ip}"
+                if container_key not in files:
+                    files[container_key] = vc
+
     return SnapshotSpec(
         topology=data.get("topology", {}),
         truth_graph=truth_graph,
@@ -250,6 +298,7 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
         npc_personas=npc_personas,
         npc_traffic=npc_traffic,
         task=task,
+        files=files,
     )
 
 

@@ -1,69 +1,80 @@
 -- OpenRange database initialization
 -- Generated from SnapshotSpec
 
--- Application database
-CREATE DATABASE IF NOT EXISTS app;
-USE app;
+-- Application database (referral_db)
+CREATE DATABASE IF NOT EXISTS referral_db;
+USE referral_db;
 
 -- Users table (web app authentication)
 CREATE TABLE IF NOT EXISTS users (
     id INT AUTO_INCREMENT PRIMARY KEY,
     username VARCHAR(64) NOT NULL UNIQUE,
     password VARCHAR(255) NOT NULL,
+    full_name VARCHAR(128),
     email VARCHAR(128),
-    role VARCHAR(32) DEFAULT 'user',
+    role VARCHAR(64) DEFAULT 'user',
     department VARCHAR(64),
     last_login DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-{% for user in users %}
-INSERT INTO users (username, password, email, role, department) VALUES (
-    '{{ user.username }}',
-    '{{ user.password }}',
-    '{{ user.username }}@{{ domain | default("acmecorp.local") }}',
-    '{{ user.get("role", "user") }}',
-    '{{ user.get("department", "General") }}'
-);
-{% endfor %}
-
--- Products table (app data)
-CREATE TABLE IF NOT EXISTS products (
+-- Patients table
+CREATE TABLE IF NOT EXISTS patients (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    name VARCHAR(128) NOT NULL,
-    category VARCHAR(64),
-    price DECIMAL(10, 2),
-    description TEXT,
+    first_name VARCHAR(64) NOT NULL,
+    last_name VARCHAR(64) NOT NULL,
+    dob DATE,
+    phone VARCHAR(20),
+    email VARCHAR(128),
+    address VARCHAR(256),
+    emergency_contact VARCHAR(128),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT INTO products (name, category, price, description) VALUES
-    ('Widget Pro', 'electronics', 29.99, 'Premium widget for enterprise use'),
-    ('DataSync 3000', 'software', 149.99, 'Enterprise data synchronization tool'),
-    ('SecureVault', 'security', 99.99, 'Password management solution'),
-    ('CloudBridge', 'infrastructure', 299.99, 'Hybrid cloud connectivity platform'),
-    ('NetMonitor', 'monitoring', 79.99, 'Network monitoring and alerting');
+-- Patient referrals
+CREATE TABLE IF NOT EXISTS patient_referrals (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    patient_id INT,
+    referring_clinic VARCHAR(128),
+    specialist VARCHAR(128),
+    status VARCHAR(32) DEFAULT 'Pending',
+    diagnosis VARCHAR(256),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (patient_id) REFERENCES patients(id)
+);
 
--- Sessions table (active user sessions)
+-- Billing table
+CREATE TABLE IF NOT EXISTS billing (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    patient_id INT,
+    policy_number VARCHAR(32),
+    amount_due DECIMAL(10, 2),
+    status VARCHAR(32) DEFAULT 'Open',
+    last_updated DATE,
+    FOREIGN KEY (patient_id) REFERENCES patients(id)
+);
+
+-- Sessions table
 CREATE TABLE IF NOT EXISTS sessions (
     id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT,
     session_token VARCHAR(128),
-    active TINYINT DEFAULT 1,
-    last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_ip VARCHAR(45),
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
--- Access log table (application-level logging)
+-- Access log table
 CREATE TABLE IF NOT EXISTS access_log (
     id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT,
-    page VARCHAR(256),
-    ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+    action VARCHAR(128),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    ip VARCHAR(45),
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
--- Flags database (contains capture-the-flag values)
+-- Flags database
 CREATE DATABASE IF NOT EXISTS flags;
 USE flags;
 
@@ -74,20 +85,8 @@ CREATE TABLE IF NOT EXISTS secrets (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-{% for flag in flags %}
-{% if 'db:' in flag.path %}
-INSERT INTO secrets (flag_name, flag) VALUES ('{{ flag.id }}', '{{ flag.value }}');
-{% endif %}
-{% endfor %}
-
--- Grant privileges
-{% for user in users %}
-{% if user.get('db_grants') %}
-GRANT {{ user.db_grants }} ON *.* TO '{{ user.username }}'@'%' IDENTIFIED BY '{{ user.password }}';
-{% endif %}
-{% endfor %}
-
--- App user (web application backend)
-GRANT SELECT, INSERT, UPDATE ON app.* TO '{{ db_user | default("app_user") }}'@'%';
+-- Grant privileges to app_user
+GRANT SELECT, INSERT, UPDATE ON referral_db.* TO '{{ db_user | default("app_user") }}'@'%';
+GRANT SELECT ON flags.* TO '{{ db_user | default("app_user") }}'@'%';
 
 FLUSH PRIVILEGES;

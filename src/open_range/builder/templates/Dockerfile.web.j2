@@ -4,9 +4,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx \
-    php-fpm \
-    php-mysql \
-    php-json \
+    php8.1-fpm \
+    php8.1-mysql \
+    php8.1-ldap \
+    php8.1-json \
+    php8.1-xml \
+    php8.1-mbstring \
     openssh-server \
     curl \
     && rm -rf /var/lib/apt/lists/*
@@ -25,11 +28,8 @@ RUN useradd -m -s /bin/bash {{ user.username }} && \
 # Copy nginx config
 COPY nginx.conf /etc/nginx/sites-available/default
 
-# Copy web application
-RUN mkdir -p /var/www/html/api/users
-{% for file_path, content in app_files.items() %}
-COPY {{ file_path }} /var/www/html/{{ file_path }}
-{% endfor %}
+# Set up web root
+RUN mkdir -p /var/www/portal/admin /var/www/portal/api /var/www/portal/reports
 
 # Create flag files (if any are on this host)
 {% for flag in flags %}
@@ -44,8 +44,8 @@ RUN mkdir -p /var/log/app && \
     ln -sf /var/log/app/access.log /var/log/nginx/access.log && \
     ln -sf /var/log/app/error.log /var/log/nginx/error.log
 
-EXPOSE 80 22
+EXPOSE 80 443 22
 
 CMD service ssh start && \
-    service php*-fpm start && \
+    service php8.1-fpm start && \
     nginx -g 'daemon off;'

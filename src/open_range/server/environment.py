@@ -139,7 +139,13 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
             return None
 
     def _container_name(self, host: str) -> str:
-        """Resolve logical host name to Docker container name."""
+        """Resolve logical host name to Docker container name.
+
+        Tries multiple naming conventions:
+        1. Snapshot compose config (if available)
+        2. Docker Compose default: ``<project>-<service>-1``
+        3. Bare host name as fallback
+        """
         if self._snapshot and self._snapshot.compose:
             services = self._snapshot.compose.get("services", {})
             if host in services:
@@ -147,6 +153,18 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
                     "x-project-name", "openrange"
                 )
                 return f"{project}-{host}-1"
+
+        # Try to discover the container by listing running containers
+        client = self._get_docker()
+        if client is not None:
+            try:
+                for container in client.containers.list():
+                    name = container.name
+                    if name == host or name.endswith(f"-{host}-1"):
+                        return name
+            except Exception:
+                pass
+
         return host
 
     def _exec_in_container(
@@ -174,6 +192,83 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
             return stdout, stderr
         except Exception as exc:
             return "", f"Error executing command: {exc}"
+
+    # -----------------------------------------------------------------
+    # Snapshot applicator — deploys files, flags, and SQL to containers
+    # -----------------------------------------------------------------
+
+    def _apply_snapshot(self, snapshot: SnapshotSpec) -> None:
+        """Deploy snapshot artifacts (files, SQL, flags) to running containers.
+
+        Parses the ``files`` dict from the snapshot spec. Keys use the format
+        ``<container>:<path>`` for file deployments and ``db:sql`` for SQL
+        statements. Creates parent directories as needed.
+        """
+        client = self._get_docker()
+        if client is None:
+            logger.info("Docker unavailable — skipping snapshot application")
+            return
+
+        if not snapshot.files:
+            logger.info("No files in snapshot to deploy")
+            return
+
+        import base64
+
+        deployed = 0
+        for key, content in snapshot.files.items():
+            try:
+                if key == "db:sql":
+                    container_name = self._container_name("db")
+                    b64 = base64.b64encode(content.encode()).decode()
+                    self._exec_in_container(
+                        container_name,
+                        f"echo '{b64}' | base64 -d > /tmp/_snapshot.sql",
+                    )
+                    _, stderr = self._exec_in_container(
+                        container_name,
+                        "mysql -u root -pr00tP@ss! < /tmp/_snapshot.sql",
+                    )
+                    self._exec_in_container(
+                        container_name, "rm -f /tmp/_snapshot.sql"
+                    )
+                    if stderr and "ERROR" in stderr:
+                        logger.warning("SQL deployment error: %s", stderr)
+                    else:
+                        deployed += 1
+                        logger.info("Deployed SQL to db")
+                    continue
+
+                if ":" not in key:
+                    logger.warning("Skipping file with bad key format: %s", key)
+                    continue
+
+                container, path = key.split(":", 1)
+                container_name = self._container_name(container)
+
+                parent_dir = path.rsplit("/", 1)[0] if "/" in path else "/"
+                self._exec_in_container(
+                    container_name, f"mkdir -p '{parent_dir}'"
+                )
+
+                b64 = base64.b64encode(content.encode()).decode()
+                cmd = f"echo '{b64}' | base64 -d > '{path}'"
+                _, stderr = self._exec_in_container(container_name, cmd)
+                if stderr and "Error" in stderr:
+                    logger.warning(
+                        "File deployment error for %s: %s", key, stderr
+                    )
+                else:
+                    deployed += 1
+                    logger.info("Deployed file: %s:%s", container, path)
+
+            except Exception as exc:
+                logger.warning("Failed to deploy %s: %s", key, exc)
+
+        logger.info(
+            "Snapshot application complete: %d/%d artifacts deployed",
+            deployed, len(snapshot.files),
+        )
 
     # -----------------------------------------------------------------
     # Snapshot selection
@@ -495,6 +590,9 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         self._npc_traffic_log = []
         self._episode_start = time.time()
         self._episode_recorded = False
+
+        # Deploy snapshot artifacts to running containers
+        self._apply_snapshot(self._snapshot)
 
         # Build initial briefing
         task = self._snapshot.task
