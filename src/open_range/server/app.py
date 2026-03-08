@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 
@@ -49,6 +50,12 @@ def create_app() -> FastAPI:
     )
 
     fastapp.state.env = env_factory()
+    fastapp.state.openenv_server = SimpleNamespace(
+        _env_factory=env_factory,
+        _sessions={},
+        _session_info={},
+        active_sessions=0,
+    )
     if runtime is not None:
         fastapp.state.runtime = runtime
         fastapp.add_event_handler("startup", runtime.start)

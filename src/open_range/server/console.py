@@ -20,6 +20,7 @@ console_router = APIRouter(prefix="/console", tags=["console"])
 
 _action_history: list[dict[str, Any]] = []
 _MAX_HISTORY = 50  # keep more than 20 internally, but serve 20
+_published_episode: dict[str, Any] | None = None
 
 
 def record_action(action_record: dict[str, Any]) -> None:
@@ -39,6 +40,39 @@ def get_history(limit: int = 20) -> list[dict[str, Any]]:
     return list(reversed(_action_history[-limit:]))
 
 
+def publish_episode(snapshot: Any, state: Any) -> None:
+    """Publish the latest episode snapshot/state for console consumers."""
+    global _published_episode
+    topo = snapshot.topology if hasattr(snapshot, "topology") and isinstance(snapshot.topology, dict) else {}
+    vuln_count = 0
+    truth_graph = getattr(snapshot, "truth_graph", None)
+    if truth_graph is not None:
+        vuln_count = len(getattr(truth_graph, "vulns", []) or [])
+    _published_episode = {
+        "snapshot": {
+            "id": getattr(state, "episode_id", None),
+            "tier": topo.get("tier", 1),
+            "hosts": topo.get("hosts", []),
+            "zones": topo.get("zones", {}),
+            "vuln_count": vuln_count,
+        },
+        "state": {
+            "episode_id": getattr(state, "episode_id", None),
+            "step_count": getattr(state, "step_count", 0),
+            "flags_found": len(getattr(state, "flags_found", []) or []),
+            "mode": getattr(state, "mode", ""),
+            "services_status": getattr(state, "services_status", {}),
+            "tier": getattr(state, "tier", topo.get("tier", 1)),
+        },
+    }
+
+
+def clear_episode() -> None:
+    """Clear any published episode fallback."""
+    global _published_episode
+    _published_episode = None
+
+
 # ---------------------------------------------------------------------------
 # API routes
 # ---------------------------------------------------------------------------
@@ -47,10 +81,23 @@ def get_history(limit: int = 20) -> list[dict[str, Any]]:
 @console_router.get("/api/snapshot")
 async def api_snapshot(request: Request) -> JSONResponse:
     """Return current snapshot metadata (no truth graph or flags)."""
-    env = _get_env(request)
+    ctx = _get_env_context(request)
+    if ctx["env"] is None:
+        payload = dict(ctx["published_episode"]["snapshot"])
+        payload["state_scope"] = ctx["state_scope"]
+        return JSONResponse(payload)
+
+    env = ctx["env"]
     snapshot = env.snapshot
     if snapshot is None:
-        return JSONResponse({"id": None, "tier": None, "hosts": [], "zones": {}, "vuln_count": 0})
+        return JSONResponse({
+            "id": None,
+            "tier": None,
+            "hosts": [],
+            "zones": {},
+            "vuln_count": 0,
+            "state_scope": ctx["state_scope"],
+        })
 
     topo = snapshot.topology if isinstance(snapshot.topology, dict) else {}
     hosts = topo.get("hosts", [])
@@ -64,19 +111,27 @@ async def api_snapshot(request: Request) -> JSONResponse:
         "hosts": hosts,
         "zones": zones,
         "vuln_count": vuln_count,
+        "state_scope": ctx["state_scope"],
     })
 
 
 @console_router.get("/api/episode")
 async def api_episode(request: Request) -> JSONResponse:
     """Return current episode state."""
-    env = _get_env(request)
+    ctx = _get_env_context(request)
+    if ctx["env"] is None:
+        payload = dict(ctx["published_episode"]["state"])
+        payload["state_scope"] = ctx["state_scope"]
+        return JSONResponse(payload)
+
+    env = ctx["env"]
     state = env.state
     return JSONResponse({
         "step_count": state.step_count,
         "flags_found": len(state.flags_found),
         "mode": state.mode,
         "services_status": state.services_status,
+        "state_scope": ctx["state_scope"],
     })
 
 
@@ -109,6 +164,52 @@ def _get_env(request: Request) -> Any:
     if hasattr(app.state, "env"):
         return app.state.env
     raise HTTPException(status_code=503, detail="OpenRange environment is unavailable")
+
+
+def _get_env_context(request: Request) -> dict[str, Any]:
+    """Resolve the best available environment context for the console.
+
+    Priority:
+    1. Most recently active WebSocket session env
+    2. Most recently published episode snapshot/state
+    3. App-level fallback env
+    """
+    server = getattr(request.app.state, "openenv_server", None)
+    sessions = getattr(server, "_sessions", {}) if server is not None else {}
+    session_info = getattr(server, "_session_info", {}) if server is not None else {}
+    if isinstance(sessions, dict) and sessions:
+        ordered = sorted(
+            sessions.items(),
+            key=lambda item: getattr(session_info.get(item[0]), "last_activity_at", 0.0),
+            reverse=True,
+        )
+        session_id, env = ordered[0]
+        warning = None
+        if len(ordered) > 1:
+            warning = "Multiple active sessions detected; using the most recent one."
+        return {
+            "env": env,
+            "published_episode": _published_episode,
+            "state_scope": "websocket_session",
+            "session_id": session_id,
+            "warning": warning,
+        }
+    if _published_episode is not None:
+        return {
+            "env": None,
+            "published_episode": _published_episode,
+            "state_scope": "published_episode",
+            "session_id": None,
+            "warning": "Returning the most recent reset/step state from the published episode.",
+        }
+    env = _get_env(request)
+    return {
+        "env": env,
+        "published_episode": _published_episode,
+        "state_scope": "app_state_env",
+        "session_id": None,
+        "warning": "No active websocket session; using the app state environment.",
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -18,8 +18,9 @@ from open_range.server.app import create_app
 
 
 @pytest.fixture()
-def client():
+def client(monkeypatch):
     """Create a TestClient against a fresh app instance."""
+    monkeypatch.setenv("OPENRANGE_MOCK", "1")
     app = create_app()
     return TestClient(app)
 

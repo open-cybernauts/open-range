@@ -184,7 +184,13 @@ class NPCActionExecutor:
             "web",
             f'curl -s -o /dev/null -A "Mozilla/5.0 ({username})" "{url}"',
         )
-        return _log(persona, "click_link", f"Clicked: {url}", "web:access_log")
+        return _se_log(
+            persona,
+            "click_link",
+            f"Clicked: {url}",
+            "web:access_log",
+            result="success",
+        )
 
     async def _react_email(self, persona: NPCPersona, action: NPCAction) -> dict[str, Any]:
         username = _username_from_persona(persona)
@@ -196,7 +202,13 @@ class NPCActionExecutor:
             f"&& echo 'From: {username}@{self._domain}\\nSubject: Re\\n\\n{body}' "
             f"> /var/mail/{username}/sent_{ts_i}.eml",
         )
-        return _log(persona, action.action, "Replied to message", "mail:spool")
+        return _se_log(
+            persona,
+            action.action,
+            "Replied to message",
+            "mail:spool",
+            result="success",
+        )
 
     async def _react_share_creds(self, persona: NPCPersona, action: NPCAction) -> dict[str, Any]:
         username = _username_from_persona(persona)
@@ -216,7 +228,13 @@ class NPCActionExecutor:
             f'echo "[$(date)] CRED-LEAK: {persona.name} shared credentials" '
             f">> /var/log/siem/consolidated/all.log",
         )
-        return _log(persona, "share_credentials", f"{persona.name} leaked credentials", "web+siem")
+        return _se_log(
+            persona,
+            "share_credentials",
+            f"{persona.name} leaked credentials",
+            "web+siem",
+            result="success",
+        )
 
     async def _react_report(self, persona: NPCPersona, action: NPCAction) -> dict[str, Any]:
         detail = "; ".join(action.side_effects) if action.side_effects else "suspicious activity"
@@ -225,10 +243,10 @@ class NPCActionExecutor:
             f'echo "[$(date)] NPC-REPORT: {persona.name}: {detail}" '
             f">> /var/log/siem/consolidated/all.log",
         )
-        return _log(persona, "report_to_IT", detail, "siem:alert")
+        return _se_log(persona, "report_to_IT", detail, "siem:alert", result="blocked")
 
     async def _react_ignore(self, persona: NPCPersona, action: NPCAction) -> dict[str, Any]:
-        return _log(persona, "ignore", "Ignored stimulus", "none")
+        return _se_log(persona, "ignore", "Ignored stimulus", "none", result="blocked")
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +305,37 @@ def _extract_users(snapshot: SnapshotSpec) -> list[str]:
     return [u["username"] for u in users if isinstance(u, dict) and "username" in u]
 
 
+def _extract_db_credentials(snapshot: SnapshotSpec) -> tuple[str, str]:
+    """Extract a DB user/password pair from topology users."""
+    users = snapshot.topology.get("users", [])
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        hosts = user.get("hosts", [])
+        if isinstance(hosts, list) and "db" in hosts:
+            return str(user.get("username", "app_user")), str(user.get("password", "AppUs3r!2024"))
+    return "app_user", "AppUs3r!2024"
+
+
+def _extract_ssh_credentials(snapshot: SnapshotSpec) -> tuple[str, str]:
+    """Extract an admin-like SSH credential pair from topology users."""
+    users = snapshot.topology.get("users", [])
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        groups = user.get("groups", [])
+        role = str(user.get("role", "")).strip().lower()
+        if role == "admin" or (isinstance(groups, list) and "admins" in groups):
+            return str(user.get("username", "admin")), str(user.get("password", "Adm1n!2024"))
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        hosts = user.get("hosts", [])
+        if isinstance(hosts, list) and any(host != "db" for host in hosts):
+            return str(user.get("username", "admin")), str(user.get("password", "Adm1n!2024"))
+    return "admin", "Adm1n!2024"
+
+
 def _username_from_persona(persona: NPCPersona) -> str:
     email = persona.accounts.get("email", "")
     if "@" in email:
@@ -303,4 +352,27 @@ def _log(persona: NPCPersona, action: str, detail: str, source: str) -> dict[str
         "action": action,
         "detail": detail,
         "source": source,
+        "label": "benign",
+    }
+
+
+def _se_log(
+    persona: NPCPersona,
+    action: str,
+    detail: str,
+    source: str,
+    *,
+    result: str,
+) -> dict[str, Any]:
+    """Build a social-engineering event entry used by reward coupling."""
+    return {
+        "timestamp": time.time(),
+        "type": "social_engineering",
+        "persona": persona.name,
+        "department": persona.department,
+        "action": action,
+        "detail": detail,
+        "source": source,
+        "label": "reactive",
+        "result": result,
     }

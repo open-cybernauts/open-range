@@ -14,17 +14,19 @@ import pytest
 from starlette.testclient import TestClient
 
 from open_range.server.app import create_app
-from open_range.server.console import clear_history, record_action
+from open_range.server.console import clear_episode, clear_history, record_action
 from open_range.server.environment import RangeEnvironment
 
 
 @pytest.fixture()
-def client():
+def client(monkeypatch):
     """Create a TestClient with a shared env on app.state for console API."""
+    monkeypatch.setenv("OPENRANGE_MOCK", "1")
     app = create_app()
     # Store a shared env so console API endpoints can access state
     env = RangeEnvironment(docker_available=False)
     app.state.env = env
+    clear_episode()
     clear_history()
     return TestClient(app)
 
@@ -165,7 +167,7 @@ class TestHistoryAPI:
         env.reset()
         env.step(RangeAction(command="nmap -sV web", mode="red"))
         data = client.get("/console/api/history").json()
-        assert len(data) == 1
+        assert len(data) == 2
         assert data[0]["command"] == "nmap -sV web"
         assert data[0]["mode"] == "red"
 

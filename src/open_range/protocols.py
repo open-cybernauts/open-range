@@ -191,6 +191,44 @@ class TaskSpec(BaseModel):
     )  # [{type: "flag", value: "..."}, {type: "endpoint", url: "...", expect: "..."}]
 
 
+class ReadinessCheck(BaseModel):
+    """Health/readiness probe for a declared service."""
+
+    type: Literal["tcp", "http", "command"] = "tcp"
+    port: int = 0
+    url: str = ""
+    command: str = ""
+    timeout_s: float = 30
+    interval_s: float = 1.0
+
+
+class ServiceSpec(BaseModel):
+    """Concrete service lifecycle declaration for a host."""
+
+    host: str
+    daemon: str
+    packages: list[str] = Field(default_factory=list)
+    init_commands: list[str] = Field(default_factory=list)
+    start_command: str
+    readiness: ReadinessCheck = Field(default_factory=ReadinessCheck)
+    log_dir: str = ""
+    env_vars: dict[str, str] = Field(default_factory=dict)
+
+
+class ServiceInstance(BaseModel):
+    """Normalized service instance extracted from compose or topology."""
+
+    instance_id: str = ""
+    host: str
+    service_name: str = ""
+    archetype: str = ""
+    image: str = ""
+    ports: list[int] = Field(default_factory=list)
+    env_vars: dict[str, str] = Field(default_factory=dict)
+    startup_contract: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class SnapshotSpec(BaseModel):
     """Complete specification for a generated range snapshot."""
 
@@ -204,6 +242,8 @@ class SnapshotSpec(BaseModel):
     task: TaskSpec = Field(default_factory=TaskSpec)
     compose: dict[str, Any] = Field(default_factory=dict)  # rendered docker-compose
     files: dict[str, str] = Field(default_factory=dict)  # path -> content
+    services: list[ServiceSpec] = Field(default_factory=list)
+    service_instances: list[ServiceInstance] = Field(default_factory=list)
     lineage: LineageMetadata = Field(default_factory=LineageMetadata)
     mutation_plan: MutationPlan | None = None
 
