@@ -721,6 +721,37 @@ async def test_reward_grounding_rejects_invalid_db_identifier_path():
     assert containers.calls == []
 
 
+@pytest.mark.asyncio
+async def test_reward_grounding_quotes_mysql_password_from_snapshot():
+    """DB checks must not rely on unquoted shell expansion for credentials."""
+    import shlex
+
+    from open_range.validator.reward_grounding import RewardGroundingCheck
+
+    class RecordingContainers:
+        def __init__(self):
+            self.calls: list[tuple[str, str]] = []
+
+        async def exec(self, container: str, cmd: str, **kwargs) -> str:
+            self.calls.append((container, cmd))
+            return "FLAG{abc}"
+
+    containers = RecordingContainers()
+    password = "pa ss;$(id)"
+    spec = SnapshotSpec(
+        topology={"mysql_root_password": password},
+        flags=[FlagSpec(id="f1", value="FLAG{abc}", path="db:flags.secrets.flag", host="db")],
+    )
+    result = await RewardGroundingCheck().check(spec, containers)  # type: ignore[arg-type]
+    assert result.passed is True
+    assert containers.calls
+    cmd = containers.calls[0][1]
+    assert cmd.startswith(
+        f"MYSQL_PWD={shlex.quote(password)} mysql -u root -N -e "
+    )
+    assert "-p$MYSQL_ROOT_PASSWORD" not in cmd
+
+
 # ---------------------------------------------------------------------------
 # Check 6: Isolation
 # ---------------------------------------------------------------------------

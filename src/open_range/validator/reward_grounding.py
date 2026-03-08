@@ -30,6 +30,16 @@ def _parse_db_path(path: str) -> tuple[str, str, str] | None:
     return parts[0], parts[1], parts[2]
 
 
+def _mysql_root_password(snapshot: SnapshotSpec) -> str:
+    """Return the MySQL root password to use for validator DB checks."""
+    topology = snapshot.topology
+    if isinstance(topology, dict):
+        value = topology.get("mysql_root_password")
+        if isinstance(value, str) and value:
+            return value
+    return "root"
+
+
 class RewardGroundingCheck:
     """For every declared flag, verify its value exists at the expected
     location.  File-based flags are checked via ``cat``.  DB-stored flags
@@ -65,8 +75,10 @@ class RewardGroundingCheck:
 
                 database, table, column = db_ref
                 query = f"SELECT `{column}` FROM `{database}`.`{table}` LIMIT 1"
+                mysql_pwd = _mysql_root_password(snapshot)
                 mysql_cmd = (
-                    "mysql -u root -p$MYSQL_ROOT_PASSWORD -N "
+                    f"MYSQL_PWD={shlex.quote(mysql_pwd)} "
+                    "mysql -u root -N "
                     f"-e {shlex.quote(query)}"
                 )
                 try:
