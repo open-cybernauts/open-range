@@ -623,10 +623,18 @@ class ManagedSnapshotRuntime:
         if snapshot is None:
             return
 
+        from open_range.server.rewards import _is_grounded_finding
+
         total_flags = len(snapshot.flags)
         red_solved = total_flags > 0 and len(state.flags_found) >= total_flags
+        red_actions = [
+            record
+            for record in red_history
+            if record.get("type") not in ("hallucinated_flag", "evidence")
+        ]
         blue_detected = any(
-            record.get("type") == "finding" or record.get("cmd_name") == "submit_finding"
+            record.get("type") == "finding"
+            and _is_grounded_finding(record, red_actions)
             for record in blue_history
         )
         weak_areas = []

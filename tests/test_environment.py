@@ -156,6 +156,22 @@ class TestBlueStep:
         obs = env.step(RangeAction(command="submit_finding SQL injection detected", mode="blue"))
         assert "recorded" in obs.stdout.lower() or "submitted" in obs.stdout.lower()
 
+    def test_blue_submit_finding_marks_grounded_when_matching_red_activity(self):
+        env = RangeEnvironment(docker_available=False)
+        env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        env.step(RangeAction(command="nmap -sV web", mode="red"))
+        env.step(RangeAction(command="submit_finding nmap scan detected on web host", mode="blue"))
+        assert env.blue_history
+        assert env.blue_history[-1].get("grounded") is True
+
+    def test_blue_submit_finding_marks_ungrounded_for_generic_claim(self):
+        env = RangeEnvironment(docker_available=False)
+        env.reset(snapshot=_MINIMAL_SNAPSHOT)
+        env.step(RangeAction(command="nmap -sV web", mode="red"))
+        env.step(RangeAction(command="submit_finding attack found", mode="blue"))
+        assert env.blue_history
+        assert env.blue_history[-1].get("grounded") is False
+
     def test_blue_any_command_forwarded(self):
         """No artificial allowlist — commands route to the siem container."""
         env = RangeEnvironment(docker_available=False)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shlex
 import socket
 import subprocess as sp
@@ -57,6 +58,25 @@ def _extract_command_name(command: str) -> str:
             # Strip path prefix (e.g. /usr/bin/nmap -> nmap)
             return part.rsplit("/", 1)[-1]
     return parts[0] if parts else ""
+
+
+_FINDING_TOKEN_RE = re.compile(r"[a-z0-9_./:-]{3,}")
+_FINDING_STOPWORDS = {
+    "the", "and", "for", "with", "from", "that", "this", "then", "host",
+    "user", "users", "detected", "detection", "attempt", "activity", "attack",
+    "alert", "alerts", "found", "event", "events", "possible", "likely",
+    "against", "into", "onto", "over", "under", "was", "were", "has", "have",
+}
+_ATTACK_SIGNAL_KEYWORDS = (
+    "sqli", "sql injection", "xss", "path traversal", "command injection",
+    "ssrf", "bruteforce", "brute force", "scan", "nmap", "nikto", "sqlmap",
+    "hydra", "ldap injection", "smb enumeration", "phish", "phishing",
+)
+
+
+def _tokenize_finding_text(text: str) -> set[str]:
+    tokens = {m.group(0).lower() for m in _FINDING_TOKEN_RE.finditer(text.lower())}
+    return {token for token in tokens if token not in _FINDING_STOPWORDS}
 
 class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
     """OpenEnv Environment subclass for the cybersecurity range.
@@ -887,6 +907,47 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
     # Special command handling
     # -----------------------------------------------------------------
 
+    def _is_finding_grounded(self, finding: str) -> bool:
+        """Infer whether a Blue finding is grounded in observed Red activity."""
+        content = (finding or "").strip().lower()
+        if not content:
+            return False
+
+        red_actions = [
+            record
+            for record in self._red_history
+            if record.get("type") not in ("hallucinated_flag", "evidence")
+        ]
+        if not red_actions:
+            return False
+
+        cmd_names = {
+            str(record.get("cmd_name", "")).lower()
+            for record in red_actions
+            if record.get("cmd_name")
+        }
+        if any(cmd and cmd in content for cmd in cmd_names):
+            return True
+
+        finding_tokens = _tokenize_finding_text(content)
+        if not finding_tokens:
+            return False
+
+        red_tokens: set[str] = set()
+        for record in red_actions:
+            red_tokens.update(_tokenize_finding_text(str(record.get("command", ""))))
+            red_tokens.update(_tokenize_finding_text(str(record.get("target", ""))))
+            cmd_name = str(record.get("cmd_name", "")).lower()
+            if cmd_name:
+                red_tokens.add(cmd_name)
+
+        overlap = finding_tokens & red_tokens
+        if len(overlap) >= 2:
+            return True
+
+        has_attack_signal = any(keyword in content for keyword in _ATTACK_SIGNAL_KEYWORDS)
+        return has_attack_signal and len(overlap) >= 1
+
     def _handle_submit_flag(self, action: RangeAction) -> RangeObservation:
         """Process a submit_flag command from Red."""
         # Extract flag value from command: submit_flag FLAG{...}
@@ -947,10 +1008,12 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
         """Process a submit_finding command from Blue."""
         parts = action.command.strip().split(maxsplit=1)
         finding = parts[1] if len(parts) > 1 else ""
+        grounded = self._is_finding_grounded(finding)
         self._blue_history.append({
             "step": self._state.step_count,
             "type": "finding",
             "content": finding,
+            "grounded": grounded,
             "time": time.time(),
         })
         return RangeObservation(
