@@ -119,6 +119,19 @@ class SnapshotStore:
             snapshot=SnapshotSpec.model_validate(raw),
         )
 
+    async def list_entries(self) -> list[StoredSnapshot]:
+        """Return every stored snapshot plus its persisted ID."""
+        entries: list[StoredSnapshot] = []
+        for spec_path in sorted(self.store_dir.glob("*/spec.json")):
+            raw = json.loads(spec_path.read_text(encoding="utf-8"))
+            entries.append(
+                StoredSnapshot(
+                    snapshot_id=spec_path.parent.name,
+                    snapshot=SnapshotSpec.model_validate(raw),
+                )
+            )
+        return entries
+
     async def list_snapshots(self) -> list[dict[str, Any]]:
         """List all snapshots with their metadata.
 

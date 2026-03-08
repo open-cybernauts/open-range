@@ -20,14 +20,14 @@ A multi-agent cybersecurity gymnasium on [OpenEnv](https://github.com/meta-pytor
 
 ## How It Works
 
-A **manifest** declares a family of legal enterprise worlds — topology, services, identities, trust relationships, vulnerability classes, and mutation bounds. A shared **ManagedSnapshotRuntime** inside the shipped OpenEnv server process owns the admitted snapshot population. It compiles a root snapshot from the manifest, then derives child snapshots by applying explicit typed mutations to admitted parents. Each candidate child is structurally validated, rendered into a concrete artifact bundle under `snapshots/<id>/`, and, in managed-generation mode, can also be booted and live-validated before admission. `reset()` selects one frozen admitted snapshot. `step()` runs commands inside it.
+A **manifest** declares a family of legal enterprise worlds — topology, services, identities, trust relationships, vulnerability classes, and mutation bounds. A shared **ManagedSnapshotRuntime** inside the shipped OpenEnv server process owns the admitted snapshot population. It compiles a graph-friendly root snapshot from the manifest, normalizing trust-only principals into a canonical principal catalog, then derives child snapshots by applying explicit typed mutations to admitted parents. Parent selection is policy-driven over the admitted population rather than raw latest/random sampling. Each candidate child is validated in layers: manifest compliance, canonical graph checks, structural/task checks, and, in managed-generation mode, booted runtime checks before admission. `reset()` selects one frozen admitted snapshot. `step()` runs commands inside it.
 
 ```mermaid
 flowchart LR
     M[Manifest<br/>legal family +<br/>mutation envelope] --> B[Base snapshot compiler]
     B --> P[Admitted root snapshot]
     P --> R[ManagedSnapshotRuntime<br/>shared inside server process]
-    R --> U[Parent selector +<br/>typed mutator]
+    R --> U[Policy-guided parent selector +<br/>typed mutator]
     U --> V{Validator<br/>manifest + graph +<br/>runtime checks}
     V -->|fail| U
     V -->|pass| S[Admitted snapshot population]
@@ -85,13 +85,13 @@ uv run pytest tests/ -v --tb=short
 
 **Manifest** — YAML defining the legal world family and mutation envelope: hosts, zones, services, users, NPCs, data assets, credential policies, monitoring coverage, trust relationships, and which vulnerability classes the runtime may plant or extend. Three example manifests ship (healthcare, fintech, SaaS) at tiers 1-3.
 
-**ManagedSnapshotRuntime** — Shared singleton created at server startup. Owns the `SnapshotStore`, base builder, parent-snapshot mutator, validator gate, `SnapshotRenderer`, snapshot preload, optional background refill, and episode-result feedback. This is the hidden orchestrator behind the env; callers still only see `reset()`, `step()`, and `state()`.
+**ManagedSnapshotRuntime** — Shared singleton created at server startup. Owns the `SnapshotStore`, base builder, population-aware parent selector, parent-snapshot mutator, validator gate, `SnapshotRenderer`, snapshot preload, optional background refill, and episode-result feedback. This is the hidden orchestrator behind the env; callers still only see `reset()`, `step()`, and `state()`.
 
-**Builder / Mutator** — The base builder compiles an initial `SnapshotSpec` from a manifest. The mutator then derives child `SnapshotSpec`s from admitted parents using typed mutation plans plus curriculum context. Each snapshot carries lineage metadata (`snapshot_id`, `parent_snapshot_id`, `root_snapshot_id`, generation depth, mutation summary) and can emit constrained service/app payloads through `SnapshotSpec.files`. Three base builders ship: `LLMSnapshotBuilder` (production, via litellm), `TemplateOnlyBuilder` (deterministic shipped default), `FileBuilder` (load from disk).
+**Builder / Mutator** — The base builder compiles an initial `SnapshotSpec` from a manifest. Root hydration then expands that into canonical topology state: host details, dependency edges, trust edges, and a principal catalog that can represent trust-only people without inventing login accounts. The mutator derives child `SnapshotSpec`s from admitted parents using typed mutation plans plus an explicit mutation-policy layer that scores parents and candidate edits with curriculum, replay, novelty, and lineage signals. Each snapshot carries lineage metadata (`snapshot_id`, `parent_snapshot_id`, `root_snapshot_id`, generation depth, mutation summary) and can emit constrained service/app payloads through `SnapshotSpec.files`. Three base builders ship: `LLMSnapshotBuilder` (production, via litellm), `TemplateOnlyBuilder` (deterministic shipped default), `FileBuilder` (load from disk).
 
 The deployed package exposes the standard OpenEnv `reset()`, `step()`, and `state()` contract through `server.app:app`, which is the entrypoint referenced by `openenv.yaml`.
 
-**Validator** — Admission gate for candidate snapshots. The shipped runtime enforces manifest compliance and graph consistency before structural/task checks. When `OPENRANGE_ENABLE_LIVE_ADMISSION=1`, the runtime also boots the rendered child bundle, applies rendered payload files, constructs a real `ContainerSet`, and runs live build/exploit/evidence/reward checks before admission. Public/HF mode can still rely on a prebuilt admitted pool with live admission disabled.
+**Validator** — Admission gate for candidate snapshots. The shipped runtime first enforces manifest compliance plus graph-native checks such as graph consistency, path solvability, evidence sufficiency, and reward grounding before structural/task checks. When `OPENRANGE_ENABLE_LIVE_ADMISSION=1`, the runtime also boots the rendered child bundle, applies rendered payload files, constructs a real `ContainerSet`, and runs live build/exploit/evidence/reward checks before admission. Public/HF mode can still rely on a prebuilt admitted pool with live admission disabled.
 
 **Environment** — `RangeEnvironment(Environment)` following the OpenEnv contract. `reset()` asks the shared runtime for a frozen admitted snapshot. `step(action)` routes commands to the appropriate container — Red runs on the attacker box, Blue runs on the SIEM. No artificial command allowlists; the container's installed tools are the constraint.
 

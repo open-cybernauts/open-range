@@ -21,6 +21,11 @@ class TestManagedSnapshotRuntime:
         )
         names = [type(check).__name__ for check in runtime.validator.checks]
         assert names == [
+            "ManifestComplianceCheck",
+            "GraphConsistencyCheck",
+            "PathSolvabilityCheck",
+            "GraphEvidenceSufficiencyCheck",
+            "GraphRewardGroundingCheck",
             "StructuralSnapshotCheck",
             "TaskFeasibilityCheck",
         ]
@@ -33,6 +38,13 @@ class TestManagedSnapshotRuntime:
             refill_enabled=False,
         )
         names = [type(check).__name__ for check in runtime.validator.checks]
+        assert names[:5] == [
+            "ManifestComplianceCheck",
+            "GraphConsistencyCheck",
+            "PathSolvabilityCheck",
+            "GraphEvidenceSufficiencyCheck",
+            "GraphRewardGroundingCheck",
+        ]
         assert "BuildBootCheck" in names
         assert "ExploitabilityCheck" in names
         assert "PatchabilityCheck" in names
@@ -117,6 +129,7 @@ class TestManagedSnapshotRuntime:
             store_dir=tmp_path / "snapshots",
             pool_size=2,
             selection_strategy="latest",
+            parent_selection_strategy="policy",
             refill_enabled=False,
         )
 
@@ -130,6 +143,17 @@ class TestManagedSnapshotRuntime:
             assert any(item["parent_snapshot_id"] for item in listing)
         finally:
             runtime.stop()
+
+    def test_status_reports_parent_selection_strategy(self, tier1_manifest, tmp_path):
+        runtime = ManagedSnapshotRuntime(
+            manifest=tier1_manifest,
+            store_dir=tmp_path / "snapshots",
+            pool_size=1,
+            parent_selection_strategy="policy",
+            refill_enabled=False,
+        )
+        status = runtime.status()
+        assert status["parent_selection_strategy"] == "policy"
 
     def test_acquire_snapshot_exposes_lineage_metadata(self, tier1_manifest, tmp_path):
         runtime = ManagedSnapshotRuntime(

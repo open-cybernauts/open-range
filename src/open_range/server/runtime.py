@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import shlex
 import shutil
 import subprocess as sp
@@ -25,6 +26,7 @@ from typing import Any
 import yaml
 
 from open_range.builder.builder import LLMSnapshotBuilder, TemplateOnlyBuilder
+from open_range.builder.mutation_policy import PopulationMutationPolicy
 from open_range.builder.mutator import Mutator
 from open_range.builder.renderer import PAYLOAD_MANIFEST_NAME, SnapshotRenderer
 from open_range.builder.snapshot_store import SnapshotStore
@@ -41,9 +43,14 @@ from open_range.validator.build_boot import BuildBootCheck
 from open_range.validator.difficulty import DifficultyCheck
 from open_range.validator.evidence import EvidenceCheck
 from open_range.validator.exploitability import ExploitabilityCheck
+from open_range.validator.graph_consistency import GraphConsistencyCheck
+from open_range.validator.graph_evidence import GraphEvidenceSufficiencyCheck
+from open_range.validator.graph_reward_grounding import GraphRewardGroundingCheck
 from open_range.validator.isolation import IsolationCheck
+from open_range.validator.manifest_compliance import ManifestComplianceCheck
 from open_range.validator.npc_consistency import NPCConsistencyCheck
 from open_range.validator.patchability import PatchabilityCheck
+from open_range.validator.path_solvability import PathSolvabilityCheck
 from open_range.validator.realism_review import RealismReviewCheck
 from open_range.validator.reward_grounding import RewardGroundingCheck
 from open_range.validator.task_feasibility import TaskFeasibilityCheck
@@ -207,6 +214,43 @@ class CurriculumTracker:
         with self._lock:
             return list(self._history)
 
+    def snapshot_stats(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            history = list(self._history)
+
+        now = time.time()
+        stats: dict[str, dict[str, Any]] = {}
+        for outcome in history:
+            if not outcome.snapshot_id:
+                continue
+            stat = stats.setdefault(
+                outcome.snapshot_id,
+                {
+                    "plays": 0,
+                    "completed": 0,
+                    "red_solved": 0,
+                    "blue_detected": 0,
+                    "plays_recent": 0,
+                    "last_seen_at": 0.0,
+                },
+            )
+            stat["plays"] += 1
+            if outcome.completed:
+                stat["completed"] += 1
+            if outcome.red_solved:
+                stat["red_solved"] += 1
+            if outcome.blue_detected:
+                stat["blue_detected"] += 1
+            if now - outcome.recorded_at <= 300:
+                stat["plays_recent"] += 1
+            stat["last_seen_at"] = max(float(stat["last_seen_at"]), outcome.recorded_at)
+
+        for stat in stats.values():
+            plays = max(int(stat["plays"]), 1)
+            stat["red_solve_rate"] = stat["red_solved"] / plays
+            stat["blue_detect_rate"] = stat["blue_detected"] / plays
+        return stats
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeSnapshot:
@@ -274,25 +318,38 @@ def _normalize_validator_profile(profile: str | None) -> str:
     return normalized
 
 
-def _build_validator(profile: str) -> ValidatorGate:
+def _graph_checks(manifest: dict[str, Any]) -> list[Any]:
+    return [
+        ManifestComplianceCheck(manifest),
+        GraphConsistencyCheck(),
+        PathSolvabilityCheck(),
+        GraphEvidenceSufficiencyCheck(),
+        GraphRewardGroundingCheck(),
+    ]
+
+
+def _build_validator(profile: str, manifest: dict[str, Any]) -> ValidatorGate:
     normalized = _normalize_validator_profile(profile)
     if normalized == "offline":
         return ValidatorGate(
-            [
+            _graph_checks(manifest)
+            + [
                 StructuralSnapshotCheck(),
                 TaskFeasibilityCheck(),
             ]
         )
 
     return ValidatorGate(
-        [
+        _graph_checks(manifest)
+        + [
+            StructuralSnapshotCheck(),
+            TaskFeasibilityCheck(),
             BuildBootCheck(),
             ExploitabilityCheck(),
             PatchabilityCheck(),
             EvidenceCheck(),
             RewardGroundingCheck(),
             IsolationCheck(),
-            TaskFeasibilityCheck(),
             DifficultyCheck(),
             NPCConsistencyCheck(),
             RealismReviewCheck(),
@@ -326,6 +383,7 @@ class ManagedSnapshotRuntime:
         validator_profile: str | None = None,
         pool_size: int = 3,
         selection_strategy: str = "random",
+        parent_selection_strategy: str = "policy",
         refill_enabled: bool = False,
         refill_interval_s: float = 2.0,
         generation_retries: int = 3,
@@ -334,6 +392,7 @@ class ManagedSnapshotRuntime:
         compose_runner: ComposeProjectRunner | None = None,
         live_validator: ValidatorGate | None = None,
         enable_patch_validation: bool = False,
+        mutation_policy: PopulationMutationPolicy | None = None,
     ) -> None:
         self.manifest_path = (
             Path(manifest_path).resolve()
@@ -344,15 +403,17 @@ class ManagedSnapshotRuntime:
         self.store_dir = _resolve_store_dir(store_dir)
         self.store = SnapshotStore(str(self.store_dir))
         self.builder = builder or _default_builder()
-        self.mutator = Mutator(self.builder)
+        self.mutation_policy = mutation_policy or PopulationMutationPolicy()
+        self.mutator = Mutator(self.builder, policy=self.mutation_policy)
         self.validator_profile = _normalize_validator_profile(
             validator_profile or os.getenv("OPENRANGE_RUNTIME_VALIDATOR_PROFILE", "offline")
         )
-        self.validator = validator or _build_validator(self.validator_profile)
+        self.validator = validator or _build_validator(self.validator_profile, self.manifest)
         self.renderer = SnapshotRenderer()
         self.curriculum = CurriculumTracker()
         self.pool_size = max(1, pool_size)
         self.selection_strategy = selection_strategy
+        self.parent_selection_strategy = parent_selection_strategy
         self.refill_enabled = refill_enabled
         self.refill_interval_s = max(0.25, refill_interval_s)
         self.generation_retries = max(1, generation_retries)
@@ -381,6 +442,7 @@ class ManagedSnapshotRuntime:
             validator_profile=os.getenv("OPENRANGE_RUNTIME_VALIDATOR_PROFILE", "offline"),
             pool_size=_env_int("OPENRANGE_SNAPSHOT_POOL_SIZE", 3),
             selection_strategy=os.getenv("OPENRANGE_SNAPSHOT_SELECTION", "random"),
+            parent_selection_strategy=os.getenv("OPENRANGE_PARENT_SELECTION", "policy"),
             refill_enabled=_env_flag("OPENRANGE_ENABLE_MANAGED_REFILL", default=False),
             refill_interval_s=float(os.getenv("OPENRANGE_REFILL_INTERVAL_S", "2.0")),
             generation_retries=_env_int("OPENRANGE_GENERATION_RETRIES", 3),
@@ -541,6 +603,7 @@ class ManagedSnapshotRuntime:
             "store_dir": str(self.store_dir),
             "pool_size": self.pool_size,
             "selection_strategy": self.selection_strategy,
+            "parent_selection_strategy": self.parent_selection_strategy,
             "validator_profile": self.validator_profile,
             "refill_enabled": self.refill_enabled,
             "live_admission_enabled": self.live_admission_enabled,
@@ -623,7 +686,7 @@ class ManagedSnapshotRuntime:
 
         for attempt in range(1, self.generation_retries + 1):
             context = self._build_context()
-            parent_entry = self._select_parent_entry()
+            parent_entry = self._select_parent_entry(context)
             snapshot = _run_coro_sync(
                 self.mutator.mutate(
                     self.manifest,
@@ -930,10 +993,29 @@ class ManagedSnapshotRuntime:
         prefix = "snap_" + "_".join(vuln_types[:3]) if vuln_types else "snap_generated"
         return f"{prefix}_{int(time.time() * 1000)}"
 
-    def _select_parent_entry(self):
+    def _select_parent_entry(self, context: BuildContext):
         if self.snapshot_count() == 0:
             return None
-        return _run_coro_sync(self.store.select_entry(strategy=self.selection_strategy))
+        if self.parent_selection_strategy in {"latest", "random"}:
+            return _run_coro_sync(self.store.select_entry(strategy=self.parent_selection_strategy))
+        entries = _run_coro_sync(self.store.list_entries())
+        if not entries:
+            return None
+        rng = random.Random(context.seed if context.seed is not None else self._generation_counter)
+        selected, score = self.mutation_policy.select_parent(
+            entries,
+            context=context,
+            snapshot_stats=self.curriculum.snapshot_stats(),
+            rng=rng,
+        )
+        logger.info(
+            "ManagedSnapshotRuntime selected parent %s via %s (score=%.3f components=%s)",
+            selected.snapshot_id,
+            self.mutation_policy.name,
+            score.total,
+            score.components,
+        )
+        return selected
 
     def _snapshot_dir(self, snapshot_id: str) -> Path:
         return self.store_dir / snapshot_id

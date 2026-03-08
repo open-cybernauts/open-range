@@ -18,8 +18,8 @@ class GraphConsistencyCheck:
                 issues.append(f"dependency edge '{source}->{target}' references unknown host")
 
         for source, target, _edge_type in compiled.trust_edges:
-            if source not in compiled.users or target not in compiled.users:
-                issues.append(f"trust edge '{source}->{target}' references unknown user")
+            if source not in compiled.principals or target not in compiled.principals:
+                issues.append(f"trust edge '{source}->{target}' references unknown principal")
 
         lineage = snapshot.lineage
         if lineage.generation_depth == 0 and lineage.parent_snapshot_id:
@@ -50,13 +50,13 @@ class GraphConsistencyCheck:
                 if op.op_type == "add_trust_edge":
                     source = op.target_selector.get("source", "")
                     target = op.target_selector.get("target", "")
-                    if source and source not in compiled.users:
+                    if source and source not in compiled.principals:
                         issues.append(
-                            f"mutation '{op.mutation_id}' source user '{source}' missing"
+                            f"mutation '{op.mutation_id}' source principal '{source}' missing"
                         )
-                    if target and target not in compiled.users:
+                    if target and target not in compiled.principals:
                         issues.append(
-                            f"mutation '{op.mutation_id}' target user '{target}' missing"
+                            f"mutation '{op.mutation_id}' target principal '{target}' missing"
                         )
 
         passed = len(issues) == 0
@@ -66,6 +66,7 @@ class GraphConsistencyCheck:
             details={
                 "hosts": len(compiled.hosts),
                 "users": len(compiled.users),
+                "principals": len(compiled.principals),
                 "dependency_edges": len(compiled.dependency_edges),
                 "trust_edges": len(compiled.trust_edges),
             },
