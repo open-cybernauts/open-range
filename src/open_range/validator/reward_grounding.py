@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import re
+import shlex
+
 from open_range.protocols import CheckResult, ContainerSet, SnapshotSpec
+
+_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 def _parse_db_path(path: str) -> tuple[str, str, str] | None:
     """Parse a DB flag path like ``db:database.table.column``.
 
     Returns ``(database, table, column)`` or *None* if the path is not a
-    valid DB reference.
+    valid DB reference or contains unsafe identifier characters.
     """
     prefix = path.split(":", 1)
     if len(prefix) != 2:
@@ -20,6 +25,9 @@ def _parse_db_path(path: str) -> tuple[str, str, str] | None:
     parts = rest.split(".")
     if len(parts) != 3:
         return None
+    for part in parts:
+        if not _SAFE_IDENTIFIER_RE.match(part):
+            return None
     return parts[0], parts[1], parts[2]
 
 
@@ -54,7 +62,7 @@ class RewardGroundingCheck:
                 database, table, column = db_ref
                 mysql_cmd = (
                     f'mysql -u root -p$MYSQL_ROOT_PASSWORD -N '
-                    f'-e "SELECT {column} FROM {database}.{table} LIMIT 1"'
+                    f'-e "SELECT `{column}` FROM `{database}`.`{table}` LIMIT 1"'
                 )
                 try:
                     output = await containers.exec(host, mysql_cmd)
@@ -81,7 +89,7 @@ class RewardGroundingCheck:
                 continue
 
             try:
-                output = await containers.exec(host, f"cat {path}")
+                output = await containers.exec(host, f"cat {shlex.quote(path)}")
                 output = output.strip()
             except Exception as exc:  # noqa: BLE001
                 bad.append({"flag": flag.id, "error": str(exc)})

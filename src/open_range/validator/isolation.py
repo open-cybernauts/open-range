@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import re
+
 from open_range.protocols import CheckResult, ContainerSet, SnapshotSpec
+
+_SAFE_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # Common service ports to probe for zone isolation violations.
 _PROBE_PORTS = (22, 80, 443, 3306, 445, 389, 636, 8080)
@@ -30,6 +34,9 @@ class IsolationCheck:
                 continue
             for target in hosts:
                 target_name = target if isinstance(target, str) else target.get("name", "")
+                if not target_name or not _SAFE_HOSTNAME_RE.match(target_name):
+                    issues.append(f"invalid hostname in topology: {target_name!r}")
+                    continue
                 open_ports: list[int] = []
                 for port in _PROBE_PORTS:
                     try:
