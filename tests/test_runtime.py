@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,7 @@ from open_range.protocols import (
 )
 from open_range.server.compose_runner import BootedSnapshotProject
 from open_range.server.environment import RangeEnvironment
+from open_range.server.models import RangeAction
 from open_range.server.runtime import ManagedSnapshotRuntime
 from open_range.validator.validator import ValidationResult
 
@@ -90,8 +92,8 @@ class TestManagedSnapshotRuntime:
         try:
             admitted = runtime.acquire_snapshot()
             artifacts_dir = tmp_path / "snapshots" / admitted.snapshot_id / "artifacts"
-            assert (artifacts_dir / "docker-compose.yml").exists()
-            assert (artifacts_dir / "Dockerfile.web").exists()
+            assert (artifacts_dir / "kind-config.yaml").exists()
+            assert (artifacts_dir / "openrange" / "values.yaml").exists()
             assert admitted.snapshot.compose
             assert "services" in admitted.snapshot.compose
         finally:
@@ -368,6 +370,23 @@ class TestManagedSnapshotRuntime:
 
 
 class TestEnvironmentRuntimeIntegration:
+    @staticmethod
+    def _fake_booted_project():
+        class _Containers:
+            def __init__(self) -> None:
+                self.container_ids = {
+                    "attacker": "or-snap-external/attacker-abc123",
+                    "siem": "or-snap-management/siem-def456",
+                }
+
+            async def exec(self, container: str, cmd: str, timeout: float = 30.0) -> str:
+                return ""
+
+        return SimpleNamespace(
+            project_name="project-test",
+            containers=_Containers(),
+        )
+
     def test_reset_uses_managed_runtime_snapshot(self, tier1_manifest, tmp_path):
         runtime = ManagedSnapshotRuntime(
             manifest=tier1_manifest,
@@ -376,8 +395,10 @@ class TestEnvironmentRuntimeIntegration:
             refill_enabled=False,
         )
         runtime.start()
+        runtime.activate_snapshot_project = lambda **kwargs: self._fake_booted_project()  # type: ignore[method-assign]
 
         env = RangeEnvironment(runtime=runtime, docker_available=False)
+        env._start_npcs = lambda snapshot: None  # type: ignore[method-assign]
         try:
             obs = env.reset()
             assert "Range ready" in obs.stdout
@@ -395,8 +416,10 @@ class TestEnvironmentRuntimeIntegration:
             refill_enabled=False,
         )
         runtime.start()
+        runtime.activate_snapshot_project = lambda **kwargs: self._fake_booted_project()  # type: ignore[method-assign]
 
         env = RangeEnvironment(runtime=runtime, docker_available=False)
+        env._start_npcs = lambda snapshot: None  # type: ignore[method-assign]
         try:
             admitted = runtime.acquire_snapshot()
             env.reset(snapshot_id=admitted.snapshot_id)
@@ -494,3 +517,62 @@ class TestEnvironmentRuntimeIntegration:
             env.close()
 
         assert runtime.teardown_calls == ["project-ep-1", "project-ep-2"]
+
+    def test_runtime_backed_step_executes_via_active_project_container_set(self):
+        class FakeContainers:
+            def __init__(self) -> None:
+                self.container_ids = {
+                    "attacker": "or-snap-external/attacker-abc123",
+                    "siem": "or-snap-management/siem-def456",
+                }
+                self.calls: list[tuple[str, str, float]] = []
+
+            async def exec(self, container: str, cmd: str, timeout: float = 30.0) -> str:
+                self.calls.append((container, cmd, timeout))
+                return f"executed on {container}: {cmd}"
+
+        class FakeRuntime:
+            def __init__(self, snapshot: SnapshotSpec) -> None:
+                self.snapshot = snapshot
+                self.containers = FakeContainers()
+
+            def acquire_snapshot(self):
+                return type(
+                    "Admitted",
+                    (),
+                    {"snapshot_id": "snap-step", "snapshot": self.snapshot},
+                )()
+
+            def activate_snapshot_project(self, *, snapshot_id, snapshot, episode_id=None):
+                return SimpleNamespace(
+                    project_name=f"project-{episode_id}",
+                    containers=self.containers,
+                )
+
+            def teardown_snapshot_project(self, project):
+                return None
+
+            def record_episode_result(self, **kwargs):
+                return None
+
+        snapshot = SnapshotSpec(
+            topology={
+                "hosts": [
+                    {"name": "attacker", "zone": "external"},
+                    {"name": "siem", "zone": "management"},
+                ],
+            },
+            task={"red_briefing": "Go.", "blue_briefing": "Watch."},
+        )
+        runtime = FakeRuntime(snapshot)
+        env = RangeEnvironment(runtime=runtime, docker_available=False)
+        env._start_npcs = lambda snapshot: None  # type: ignore[method-assign]
+
+        try:
+            env.reset(episode_id="ep-step")
+            obs = env.step(RangeAction(command="whoami", mode="red"))
+        finally:
+            env.close()
+
+        assert runtime.containers.calls == [("attacker", "whoami", env._exec_timeout)]
+        assert "executed on attacker: whoami" in obs.stdout

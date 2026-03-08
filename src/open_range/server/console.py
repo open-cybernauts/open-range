@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 console_router = APIRouter(prefix="/console", tags=["console"])
@@ -102,16 +102,13 @@ def _get_env(request: Request) -> Any:
     """Retrieve the RangeEnvironment from the app's state.
 
     The app.py startup stores the environment instance as ``app.state.env``.
-    If that attribute is missing we fall back to importing a fresh one.
+    Missing environment state is a server misconfiguration, not something
+    the console should paper over with an ephemeral mock environment.
     """
     app = request.app
     if hasattr(app.state, "env"):
         return app.state.env
-    # Fallback: create an ephemeral environment (tests, etc.)
-    from open_range.server.environment import RangeEnvironment
-    if not hasattr(app.state, "_fallback_env"):
-        app.state._fallback_env = RangeEnvironment(docker_available=False)
-    return app.state._fallback_env
+    raise HTTPException(status_code=503, detail="OpenRange environment is unavailable")
 
 
 # ---------------------------------------------------------------------------

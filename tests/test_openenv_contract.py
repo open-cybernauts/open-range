@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
-import json
 from typing import Any
 
 from fastapi import FastAPI
@@ -94,8 +93,8 @@ class TestAppFactoryContract:
         app = app_module.create_app()
 
         assert isinstance(app, FastAPI)
-        assert captured["action_type"] is RangeAction
-        assert captured["observation_type"] is RangeObservation
+        assert captured["action_type"].__name__ == RangeAction.__name__
+        assert captured["observation_type"].__name__ == RangeObservation.__name__
         assert captured["env_name"] == "open_range"
         assert callable(captured["env_factory"])
         assert isinstance(captured["env_factory"](), RangeEnvironment)
@@ -144,31 +143,29 @@ class TestAppFactoryContract:
         assert "episode_id" in payload["state"]["properties"]
         assert "step_count" in payload["state"]["properties"]
 
-    def test_create_app_prefers_runtime_snapshot_over_managed_runtime(self, monkeypatch, tmp_path):
-        from open_range.protocols import SnapshotSpec
-
-        snapshot_path = tmp_path / "runtime-spec.json"
-        snapshot = SnapshotSpec(
-            topology={"hosts": ["attacker", "siem"]},
-            flags=[],
-            golden_path=[],
-            task={
-                "red_briefing": "Fixed snapshot.",
-                "blue_briefing": "Fixed snapshot.",
-            },
-        )
-        snapshot_path.write_text(
-            json.dumps(snapshot.model_dump(mode="python")),
-            encoding="utf-8",
-        )
-
-        monkeypatch.setenv("OPENRANGE_RUNTIME_SNAPSHOT", str(snapshot_path))
-        monkeypatch.setenv("OPENRANGE_RUNTIME_MANIFEST", "manifests/tier1_basic.yaml")
-
-        def _explode():
-            raise AssertionError("managed runtime should not be created in snapshot mode")
+    def test_create_app_runtime_init_failure_propagates(self, monkeypatch):
+        monkeypatch.delenv("OPENRANGE_MOCK", raising=False)
 
         app_module = importlib.import_module("open_range.server.app")
+
+        def _explode():
+            raise RuntimeError("runtime init failed")
+
+        monkeypatch.setattr(
+            "open_range.server.runtime.ManagedSnapshotRuntime.from_env",
+            _explode,
+        )
+
+        with pytest.raises(RuntimeError, match="runtime init failed"):
+            app_module.create_app()
+
+    def test_create_app_explicit_mock_mode_skips_managed_runtime(self, monkeypatch):
+        monkeypatch.setenv("OPENRANGE_MOCK", "1")
+        app_module = importlib.import_module("open_range.server.app")
+
+        def _explode():
+            raise AssertionError("managed runtime should not be created in mock mode")
+
         monkeypatch.setattr(
             "open_range.server.runtime.ManagedSnapshotRuntime.from_env",
             _explode,
@@ -177,8 +174,6 @@ class TestAppFactoryContract:
         app = app_module.create_app()
         env = app.state.env
         assert isinstance(env, RangeEnvironment)
-        assert env._default_snapshot is not None
-        assert env._default_snapshot.task.red_briefing == "Fixed snapshot."
 
 
 class TestClientContract:

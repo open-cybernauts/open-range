@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import shlex
+import asyncio
 import subprocess as sp
 import time
 from typing import TYPE_CHECKING, Any
@@ -54,6 +55,36 @@ DEFAULT_MAX_STEPS = 100
 
 # Timeout for individual docker exec calls (seconds)
 EXEC_TIMEOUT = 30.0
+
+
+def _env_flag(name: str) -> bool:
+    raw = os.getenv(name, "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _run_coro_sync(coro: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result: dict[str, Any] = {}
+    error: list[BaseException] = []
+
+    def _runner() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:  # noqa: BLE001
+            error.append(exc)
+
+    import threading
+
+    thread = threading.Thread(target=_runner, name="openrange-env-coro-bridge")
+    thread.start()
+    thread.join()
+    if error:
+        raise error[0]
+    return result.get("value")
 
 
 def _extract_command_name(command: str) -> str:
@@ -125,6 +156,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         self._runtime = runtime
         self._episode_recorded = False
         self._active_project: "BootedSnapshotProject | None" = None
+        self._mock_mode = _env_flag("OPENRANGE_MOCK") or docker_available is False
 
         # Execution mode: "auto", "docker", or "subprocess"
         self._execution_mode = execution_mode
@@ -132,15 +164,21 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
             env_mode = os.environ.get("OPENRANGE_EXECUTION_MODE", "")
             if env_mode:
                 self._execution_mode = env_mode
-            elif docker_available is False:
-                # Explicit docker_available=False (unit tests) → mock mode,
-                # NOT subprocess. Keep execution_mode as "auto" so
-                # _exec_in_container falls through to mock.
+            elif self._mock_mode:
+                self._execution_mode = "docker"
+            elif self._runtime is not None:
                 self._execution_mode = "docker"
             elif self._get_docker() is not None:
                 self._execution_mode = "docker"
             else:
-                self._execution_mode = "subprocess"
+                raise RuntimeError(
+                    "Docker is unavailable and no explicit mock mode was requested. "
+                    "Set OPENRANGE_MOCK=1 for mock mode or start Docker for live execution."
+                )
+        if self._execution_mode not in {"docker", "subprocess"}:
+            raise ValueError(
+                f"Unsupported execution mode {self._execution_mode!r}; expected 'docker' or 'subprocess'"
+            )
 
     # -----------------------------------------------------------------
     # Docker helpers
@@ -160,7 +198,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
             return self._docker_client
         except Exception:
             self._docker_available = False
-            logger.warning("Docker SDK unavailable -- running in mock mode")
+            logger.warning("Docker SDK unavailable")
             return None
 
     def _container_name(self, host: str) -> str:
@@ -203,8 +241,8 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         if self._execution_mode == "subprocess":
             return host
 
-        # In unit-test mock mode, return the bare hostname for compatibility
-        if self._docker_available is False and self._execution_mode == "docker":
+        # In explicit mock mode, return the bare hostname for compatibility
+        if self._mock_mode and self._execution_mode == "docker":
             return host
 
         raise RuntimeError(
@@ -258,7 +296,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         # set to False AND execution_mode resolved to "docker" (the auto path
         # for tests), return synthetic output so tests can assert on container
         # routing without real Docker.
-        if self._docker_available is False:
+        if self._mock_mode and self._docker_available is False:
             if self._execution_mode == "docker":
                 return (
                     f"[mock] executed on {container_name}: {command}",
@@ -295,6 +333,32 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
             return stdout, stderr
         except Exception as exc:
             return "", f"Error executing command: {exc}"
+
+    def _exec_on_host(
+        self,
+        host: str,
+        command: str,
+        timeout_s: float | None = None,
+    ) -> tuple[str, str]:
+        """Execute a command against a logical host name."""
+        if (
+            self._active_project is not None
+            and host in self._active_project.containers.container_ids
+        ):
+            try:
+                stdout = _run_coro_sync(
+                    self._active_project.containers.exec(
+                        host,
+                        command,
+                        timeout=timeout_s if timeout_s is not None else self._exec_timeout,
+                    )
+                )
+                return str(stdout), ""
+            except Exception as exc:
+                return "", f"Error executing command on runtime host {host!r}: {exc}"
+
+        container_name = self._container_name(host)
+        return self._exec_in_container(container_name, command, timeout_s=timeout_s)
 
     # -----------------------------------------------------------------
     # Database credential helpers
@@ -544,8 +608,6 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
             return False
         if self._execution_mode != "docker":
             return False
-        if self._get_docker() is None:
-            return False
 
         project = self._runtime.activate_snapshot_project(
             snapshot_id=self._snapshot_id,
@@ -589,8 +651,10 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
             self._snapshot_id = admitted.snapshot_id
             snap = admitted.snapshot
         else:
-            # Backward-compatible minimal stub for tests, demos, and local
-            # mock-mode usage when a managed runtime is not configured.
+            if not self._mock_mode and self._execution_mode != "subprocess":
+                raise RuntimeError(
+                    "No managed runtime is configured and no explicit snapshot was supplied."
+                )
             self._snapshot_id = None
             snap = SnapshotSpec(
                 topology={"hosts": ["attacker", "siem"]},
@@ -837,7 +901,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
     # -----------------------------------------------------------------
 
     def _resolve_target(self, action: RangeAction) -> str:
-        """Determine which container to route the command to.
+        """Determine which logical host should execute the command.
 
         Reads from the snapshot topology to find the appropriate host:
         - Red: host with ``role: "attacker"`` or ``zone: "external"``.
@@ -858,29 +922,29 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
                     if isinstance(h, dict):
                         if h.get("role") == "attacker" or h.get("zone") == "external":
                             host_name = h.get("name", h.get("hostname", red_default))
-                            return self._container_name(host_name)
+                            return str(host_name)
                 # Fallback: check if "attacker" is in the hosts list (string entries)
                 for h in hosts:
                     if isinstance(h, str) and h == "attacker":
-                        return self._container_name("attacker")
+                        return "attacker"
                 # Last resort
-                return self._container_name(red_default)
+                return red_default
             else:
                 # Look for a host with role "siem" or zone "management"
                 for h in hosts:
                     if isinstance(h, dict):
                         if h.get("role") == "siem" or h.get("zone") == "management":
                             host_name = h.get("name", h.get("hostname", blue_default))
-                            return self._container_name(host_name)
+                            return str(host_name)
                 # Fallback: check if "siem" is in the hosts list (string entries)
                 for h in hosts:
                     if isinstance(h, str) and h == "siem":
-                        return self._container_name("siem")
+                        return "siem"
                 # Last resort
-                return self._container_name(blue_default)
+                return blue_default
 
         # No snapshot loaded — use hardcoded defaults as last resort
-        return self._container_name(red_default if action.mode == "red" else blue_default)
+        return red_default if action.mode == "red" else blue_default
 
     # -----------------------------------------------------------------
     # Core API
@@ -1041,7 +1105,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         # Route to container
         target = self._resolve_target(action)
         timeout = timeout_s or self._exec_timeout
-        stdout, stderr = self._exec_in_container(
+        stdout, stderr = self._exec_on_host(
             target,
             action.command,
             timeout_s=timeout,
@@ -1197,7 +1261,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         indicators. Returns up to 20 recent matching lines.
         """
         siem_target = self._resolve_target(RangeAction(command="", mode="blue"))
-        stdout, _ = self._exec_in_container(
+        stdout, _ = self._exec_on_host(
             siem_target,
             "grep -i 'error\\|warning\\|suspicious\\|denied\\|attack\\|scan' "
             "/var/log/siem/consolidated/*.log 2>/dev/null | tail -20",
@@ -1216,7 +1280,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         return nothing or in unit-test mock mode.
         """
         # Try real SIEM query in non-mock modes
-        if self._docker_available is not False or self._execution_mode == "subprocess":
+        if (not self._mock_mode and self._docker_available is not False) or self._execution_mode == "subprocess":
             siem_alerts = self._query_siem_alerts()
             if siem_alerts:
                 return siem_alerts
