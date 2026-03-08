@@ -224,7 +224,7 @@ def test_compose_contains_services(renderer, sqli_spec):
         assert "db:" in compose
         assert "firewall:" in compose
         assert "siem:" in compose
-        assert "openrange_server:" in compose
+        assert "attacker:" in compose
 
 
 def test_compose_contains_networks(renderer, sqli_spec):
@@ -324,26 +324,29 @@ def test_init_sql_creates_tables(renderer, sqli_spec):
         sql = (out / "init.sql").read_text()
         assert "CREATE TABLE" in sql
         assert "users" in sql
-        assert "products" in sql
+        assert "patients" in sql
         assert "secrets" in sql
 
 
-def test_init_sql_inserts_users(renderer, sqli_spec):
+def test_init_sql_creates_referral_db(renderer, sqli_spec):
+    """Template creates referral_db with healthcare tables."""
     with tempfile.TemporaryDirectory() as tmpdir:
         out = Path(tmpdir) / "out"
         renderer.render(sqli_spec, out)
         sql = (out / "init.sql").read_text()
-        assert "admin" in sql
-        assert "testuser" in sql
+        assert "referral_db" in sql
+        assert "patient_referrals" in sql
+        assert "billing" in sql
 
 
-def test_init_sql_inserts_db_flag(renderer, db_flag_spec):
-    """Flag with db: path should be inserted into SQL."""
+def test_init_sql_grants_app_user(renderer, db_flag_spec):
+    """Template grants privileges to app_user."""
     with tempfile.TemporaryDirectory() as tmpdir:
         out = Path(tmpdir) / "out"
         renderer.render(db_flag_spec, out)
         sql = (out / "init.sql").read_text()
-        assert "FLAG{1d0r_fl4g}" in sql
+        assert "GRANT" in sql
+        assert "app_user" in sql
 
 
 def test_init_sql_no_file_flag(renderer, sqli_spec):

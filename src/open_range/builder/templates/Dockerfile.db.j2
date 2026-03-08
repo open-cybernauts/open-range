@@ -1,7 +1,7 @@
 FROM mysql:8.0
 
 ENV MYSQL_ROOT_PASSWORD={{ mysql_root_password | default('r00tP@ss!') }}
-ENV MYSQL_DATABASE=app
+ENV MYSQL_DATABASE=referral_db
 ENV MYSQL_USER={{ db_user | default('app_user') }}
 ENV MYSQL_PASSWORD={{ db_pass | default('AppUs3r!2024') }}
 
@@ -13,12 +13,5 @@ RUN echo "[mysqld]" >> /etc/mysql/conf.d/logging.cnf && \
     echo "general_log = 1" >> /etc/mysql/conf.d/logging.cnf && \
     echo "general_log_file = /var/log/mysql/query.log" >> /etc/mysql/conf.d/logging.cnf && \
     echo "log_output = FILE" >> /etc/mysql/conf.d/logging.cnf
-
-# Create additional users with specific privileges
-{% for user in users %}
-{% if user.host == 'db' or 'db' in user.get('hosts', []) %}
-# User: {{ user.username }}
-{% endif %}
-{% endfor %}
 
 EXPOSE 3306
