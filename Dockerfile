@@ -37,55 +37,32 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi
 
 # ---------------------------------------------------------------------------
-# Stage 2: Runtime — Ubuntu 22.04 with all range services
+# Stage 2: Runtime — same base image (Python 3.11) + range services
 # ---------------------------------------------------------------------------
-FROM ubuntu:22.04
+FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install ALL service packages in one RUN layer
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # Web
     nginx \
-    php8.1-fpm \
-    php8.1-mysql \
-    php8.1-ldap \
-    php8.1-xml \
-    php8.1-mbstring \
-    # Database
-    mysql-server \
-    # LDAP
-    slapd \
-    ldap-utils \
-    # Logging
+    php-fpm php-mysql php-ldap php-xml php-mbstring \
+    default-mysql-server \
+    slapd ldap-utils \
     rsyslog \
-    # File sharing
     samba \
-    # Mail
     postfix \
-    # SSH
     openssh-server \
-    # Security tools
-    nmap \
-    sqlmap \
-    hydra \
-    nikto \
-    netcat-openbsd \
-    dnsutils \
-    tcpdump \
-    curl \
-    wget \
-    sshpass \
-    iputils-ping \
-    whois \
-    # Python
-    python3 \
-    python3-pip \
-    # Utilities
-    jq \
-    procps \
-    iproute2 \
+    nmap sqlmap hydra nikto \
+    netcat-openbsd dnsutils tcpdump curl wget sshpass \
+    iputils-ping whois \
+    jq procps iproute2 \
     && rm -rf /var/lib/apt/lists/*
+
+# Create directories and fix permissions for services
+RUN mkdir -p /var/log/siem/consolidated /run/sshd /run/php /var/run/mysqld /var/log/mysql \
+    && (chown mysql:mysql /var/log/siem /var/run/mysqld /var/log/mysql 2>/dev/null || true) \
+    && chmod 755 /var/log/siem
 
 WORKDIR /app
 

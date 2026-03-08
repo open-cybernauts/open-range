@@ -8,7 +8,7 @@
 #   3. exec uvicorn as PID 1
 # =============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
 LOGDIR="/var/log/siem"
 CONSOLIDATED="${LOGDIR}/consolidated"
@@ -32,6 +32,7 @@ echo "[start.sh] Creating required directories..."
 mkdir -p "${CONSOLIDATED}"
 mkdir -p /run/php
 mkdir -p /var/run/mysqld && chown mysql:mysql /var/run/mysqld
+chown mysql:mysql "${LOGDIR}" /var/log/mysql 2>/dev/null || true
 mkdir -p /var/run/sshd
 mkdir -p /var/run/slapd
 mkdir -p /var/lib/samba/private
@@ -66,24 +67,30 @@ done
 # ── 3. PHP-FPM ──────────────────────────────────────────────────────────────
 
 echo "[start.sh] Starting PHP-FPM..."
-php-fpm8.1 --nodaemonize --force-stderr \
-    > "${LOGDIR}/php-fpm.log" 2>&1 &
-PIDS+=($!)
+# Find the correct php-fpm binary (varies by distro)
+PHP_FPM=$(command -v php-fpm8.2 || command -v php-fpm8.1 || command -v php-fpm || echo "")
+if [ -n "$PHP_FPM" ]; then
+    $PHP_FPM --nodaemonize --force-stderr \
+        > "${LOGDIR}/php-fpm.log" 2>&1 &
+    PIDS+=($!)
 
-# Poll for PHP-FPM socket
-echo -n "[start.sh]   Waiting for PHP-FPM readiness"
-for i in $(seq 1 15); do
-    if [ -S /run/php/php8.1-fpm.sock ]; then
-        echo " ready (${i}s)"
-        break
-    fi
-    echo -n "."
-    sleep 1
-    if [ "$i" -eq 15 ]; then
-        echo " TIMEOUT"
-        echo "[start.sh]   WARNING: PHP-FPM socket not found after 15s"
-    fi
-done
+    # Poll for PHP-FPM socket (path varies)
+    echo -n "[start.sh]   Waiting for PHP-FPM readiness"
+    for i in $(seq 1 15); do
+        if ls /run/php/php*-fpm.sock >/dev/null 2>&1; then
+            echo " ready (${i}s)"
+            break
+        fi
+        echo -n "."
+        sleep 1
+        if [ "$i" -eq 15 ]; then
+            echo " TIMEOUT"
+            echo "[start.sh]   WARNING: PHP-FPM socket not found after 15s"
+        fi
+    done
+else
+    echo "[start.sh]   PHP-FPM not installed, skipping"
+fi
 
 # ── 4. Nginx ────────────────────────────────────────────────────────────────
 
@@ -197,4 +204,4 @@ echo "============================================================"
 # ── 10. exec uvicorn as PID 1 ──────────────────────────────────────────────
 
 cd /app/env
-exec uvicorn server.app:app --host 0.0.0.0 --port 8000
+exec python3 -m uvicorn server.app:app --host 0.0.0.0 --port 8000
