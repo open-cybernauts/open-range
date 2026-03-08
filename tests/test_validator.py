@@ -432,7 +432,7 @@ async def test_patchability_passes_when_patch_breaks_exploit(mock_containers):
         ],
     )
 
-    # Remediation exec succeeds (returns empty)
+    # Remediation exec succeeds (exit 0 by default)
     mock_containers.exec_results[("web", "sed")] = ""
     # After patch, golden path step returns DIFFERENT output (no SECRET_DATA)
     mock_containers.exec_results[("attacker", "curl http://web/search?q=exploit")] = "no results"
@@ -516,6 +516,7 @@ async def test_patchability_fails_when_remediation_command_exits_nonzero(mock_co
     first = result.details["vuln_results"][0]
     assert first["passed"] is False
     assert "remediation command failed" in first["reason"]
+    assert mock_containers.restarted == ["web"]
 
 
 @pytest.mark.asyncio
@@ -555,6 +556,53 @@ async def test_patchability_fails_when_retest_command_is_inconclusive(mock_conta
     vuln_result = result.details["vuln_results"][0]
     assert vuln_result["passed"] is False
     assert vuln_result["reason"] == "retest inconclusive after remediation"
+    assert "retest command failed (exit_code=7)" in vuln_result["details"][0]["reason"]
+    assert mock_containers.restarted == ["web"]
+
+
+@pytest.mark.asyncio
+async def test_patchability_fails_when_retest_execution_is_inconclusive(mock_containers):
+    from open_range.protocols import ExecResult, ExploitStep
+    from open_range.validator.patchability import PatchabilityCheck
+
+    spec = SnapshotSpec(
+        truth_graph=TruthGraph(
+            vulns=[
+                Vulnerability(
+                    id="v1",
+                    type="sqli",
+                    host="web",
+                    remediation="sed -i 's/unsafe/safe/' /var/www/app.php",
+                ),
+            ],
+            exploit_chain=[
+                ExploitStep(vuln_id="v1", command="curl http://web/search?q=exploit"),
+            ],
+        ),
+        golden_path=[
+            GoldenPathStep(
+                step=1,
+                command="curl http://web/search?q=exploit",
+                expect_in_stdout="SECRET_DATA",
+            ),
+        ],
+    )
+
+    async def exec_run_side_effect(container: str, cmd: str, **kwargs):
+        if container == "web" and "sed -i 's/unsafe/safe/' /var/www/app.php" in cmd:
+            return ExecResult(stdout="", exit_code=0)
+        if container == "attacker" and "curl http://web/search?q=exploit" in cmd:
+            raise RuntimeError("timeout")
+        return ExecResult(stdout="", exit_code=0)
+
+    mock_containers.exec_run = exec_run_side_effect
+    result = await PatchabilityCheck().check(spec, mock_containers)
+    assert result.passed is False
+    vuln_result = result.details["vuln_results"][0]
+    assert vuln_result["passed"] is False
+    assert vuln_result["reason"] == "retest inconclusive after remediation"
+    assert vuln_result["details"][0]["reason"] == "retest execution raised: timeout"
+    assert mock_containers.restarted == ["web"]
 
 
 @pytest.mark.asyncio

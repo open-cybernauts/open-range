@@ -155,7 +155,6 @@ class PatchabilityCheck:
 
             # --- Re-run linked golden-path step — must now fail --------------------
             step_still_works = False
-            step_inconclusive = False
             inconclusive_details: list[dict[str, object]] = []
             matched_any = False
             for chain_step in linked_steps:
@@ -164,7 +163,6 @@ class PatchabilityCheck:
                     continue
                 matched_any = True
                 if not gp_step.expect_in_stdout:
-                    step_inconclusive = True
                     inconclusive_details.append({
                         "step": gp_step.step,
                         "reason": "missing expect_in_stdout for retest step",
@@ -178,14 +176,12 @@ class PatchabilityCheck:
                         host=getattr(gp_step, "host", None) or "attacker",
                     )
                 except Exception as exc:  # noqa: BLE001
-                    step_inconclusive = True
                     inconclusive_details.append({
                         "step": gp_step.step,
                         "reason": f"retest execution raised: {exc}",
                     })
                     continue
                 if result.exit_code != 0:
-                    step_inconclusive = True
                     inconclusive_details.append({
                         "step": gp_step.step,
                         "reason": f"retest command failed (exit_code={result.exit_code})",
@@ -209,7 +205,7 @@ class PatchabilityCheck:
 
             tested_count += 1
 
-            if step_inconclusive:
+            if inconclusive_details:
                 results.append({
                     "vuln": vuln.id,
                     "passed": False,
