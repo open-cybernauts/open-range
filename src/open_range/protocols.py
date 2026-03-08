@@ -66,6 +66,9 @@ class MutationPlan(BaseModel):
     predicted_complexity_delta: int = 0
     predicted_chain_delta: int = 0
     predicted_novelty: float = 0.0
+    policy_name: str = ""
+    policy_score: float = 0.0
+    score_breakdown: dict[str, float] = Field(default_factory=dict)
 
 
 class LineageMetadata(BaseModel):

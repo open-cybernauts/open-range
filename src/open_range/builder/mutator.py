@@ -14,6 +14,8 @@ from copy import deepcopy
 from typing import Any
 
 from open_range.builder.builder import render_template_payloads
+from open_range.builder.manifest_graph import compile_manifest_topology
+from open_range.builder.mutation_policy import PopulationMutationPolicy
 from open_range.protocols import (
     BuildContext,
     EvidenceItem,
@@ -49,6 +51,7 @@ class Mutator:
         self,
         builder: SnapshotBuilder,
         max_retries: int = 3,
+        policy: PopulationMutationPolicy | None = None,
     ) -> None:
         """Initialize the mutator with a builder and retry limit.
 
@@ -58,6 +61,7 @@ class Mutator:
         """
         self.builder = builder
         self.max_retries = max_retries
+        self.policy = policy or PopulationMutationPolicy()
         self._history: list[str] = []  # recent vuln classes
         self._attack_surfaces: list[str] = []  # recent injection points
         self._episode_count: int = 0
@@ -230,23 +234,19 @@ class Mutator:
         manifest: dict[str, Any],
     ) -> SnapshotSpec:
         root = snapshot.model_copy(deep=True)
-        topology = dict(root.topology)
-        company = manifest.get("company", {}) if isinstance(manifest.get("company"), dict) else {}
-        topology.setdefault("domain", company.get("domain", "acmecorp.local"))
-        topology.setdefault("org_name", company.get("name", "AcmeCorp"))
-        topology.setdefault("manifest_name", manifest.get("name", ""))
-        topology.setdefault("difficulty", deepcopy(manifest.get("difficulty", {})))
-        topology.setdefault("host_catalog", _build_host_catalog(manifest))
-        topology.setdefault("host_details", {})
-        topology.setdefault("dependency_edges", [])
-        topology.setdefault("trust_edges", [])
-        root.topology = topology
+        root.topology = compile_manifest_topology(manifest, root.topology)
         root.lineage = LineageMetadata(
             manifest_id=str(manifest.get("name", "")),
             generation_depth=0,
             mutation_summary=["compile_base_snapshot"],
         )
         root.mutation_plan = None
+        normalization = root.topology.get("manifest_normalization", {})
+        if isinstance(normalization, dict):
+            notes = normalization.get("notes", [])
+            if isinstance(notes, list):
+                for note in notes:
+                    logger.info("Mutator: manifest normalization applied: %s", note)
         return root
 
     def _mutate_parent_snapshot(
@@ -293,7 +293,6 @@ class Mutator:
         rng: random.Random,
     ) -> MutationPlan:
         ops: list[MutationOp] = []
-        used_ids: set[str] = set()
 
         structural_candidates = []
         op = self._candidate_add_service(manifest, snapshot, rng)
@@ -309,11 +308,6 @@ class Mutator:
         if op is not None:
             structural_candidates.append(op)
 
-        if structural_candidates:
-            chosen = rng.choice(structural_candidates)
-            ops.append(chosen)
-            used_ids.add(chosen.mutation_id)
-
         security_candidates = []
         op = self._candidate_seed_vuln(manifest, snapshot, context, rng)
         if op is not None:
@@ -322,10 +316,13 @@ class Mutator:
         if op is not None:
             security_candidates.append(op)
 
-        if security_candidates:
-            chosen = rng.choice(security_candidates)
-            if chosen.mutation_id not in used_ids:
-                ops.append(chosen)
+        ops, policy_score, score_breakdown = self.policy.choose_mutations(
+            structural_candidates=structural_candidates,
+            security_candidates=security_candidates,
+            snapshot=snapshot,
+            context=context,
+            rng=rng,
+        )
 
         if not ops:
             fallback = self._candidate_add_benign_noise(snapshot, rng)
@@ -338,6 +335,9 @@ class Mutator:
             predicted_complexity_delta=len(ops),
             predicted_chain_delta=sum(1 for op in ops if op.op_type == "seed_vuln"),
             predicted_novelty=round(0.2 * len({op.op_type for op in ops}), 2),
+            policy_name=self.policy.name,
+            policy_score=policy_score,
+            score_breakdown=score_breakdown,
         )
 
     def _candidate_add_service(
@@ -559,6 +559,7 @@ class Mutator:
         host_details = topology.setdefault("host_details", {})
         dependency_edges = topology.setdefault("dependency_edges", [])
         trust_edges = topology.setdefault("trust_edges", [])
+        principal_catalog = topology.setdefault("principal_catalog", {})
         users = topology.setdefault("users", [])
 
         if not isinstance(host_details, dict):
@@ -570,6 +571,9 @@ class Mutator:
         if not isinstance(trust_edges, list):
             trust_edges = []
             topology["trust_edges"] = trust_edges
+        if not isinstance(principal_catalog, dict):
+            principal_catalog = {}
+            topology["principal_catalog"] = principal_catalog
         if not isinstance(users, list):
             users = []
             topology["users"] = users
@@ -587,18 +591,28 @@ class Mutator:
                     services.append(service)
 
             elif op.op_type == "add_user":
-                users.append(
-                    {
-                        "username": str(op.params.get("username", "")),
-                        "password": str(op.params.get("password", "")),
-                        "groups": deepcopy(op.params.get("groups", [])),
-                        "hosts": deepcopy(op.params.get("hosts", [])),
-                        "email": str(op.params.get("email", "")),
-                        "full_name": str(op.params.get("full_name", "")),
-                        "department": str(op.params.get("department", "")),
-                        "role": str(op.params.get("role", "")),
-                    }
-                )
+                username = str(op.params.get("username", ""))
+                user_record = {
+                    "username": username,
+                    "password": str(op.params.get("password", "")),
+                    "groups": deepcopy(op.params.get("groups", [])),
+                    "hosts": deepcopy(op.params.get("hosts", [])),
+                    "email": str(op.params.get("email", "")),
+                    "full_name": str(op.params.get("full_name", "")),
+                    "department": str(op.params.get("department", "")),
+                    "role": str(op.params.get("role", "")),
+                }
+                users.append(user_record)
+                principal_catalog[username] = {
+                    "username": username,
+                    "kind": "user",
+                    "is_login_account": True,
+                    "hosts": deepcopy(op.params.get("hosts", [])),
+                    "department": str(op.params.get("department", "")),
+                    "role": str(op.params.get("role", "")),
+                    "email": str(op.params.get("email", "")),
+                    "full_name": str(op.params.get("full_name", "")),
+                }
 
             elif op.op_type == "add_dependency_edge":
                 dependency_edges.append(
@@ -666,34 +680,11 @@ class Mutator:
         snapshot.topology = topology
 
 
-def _build_host_catalog(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    catalog: dict[str, dict[str, Any]] = {}
-    for raw in manifest.get("topology", {}).get("hosts", []):
-        if not isinstance(raw, dict):
-            continue
-        name = str(raw.get("name", "")).strip()
-        if not name:
-            continue
-        catalog[name] = {
-            "zone": str(raw.get("zone", "")),
-            "services": deepcopy(raw.get("services", [])),
-            "connects_to": deepcopy(raw.get("connects_to", [])),
-        }
-    return catalog
-
-
 def _ensure_mutable_topology(
     topology: dict[str, Any],
     manifest: dict[str, Any],
 ) -> dict[str, Any]:
-    updated = dict(topology)
-    updated.setdefault("manifest_name", manifest.get("name", ""))
-    updated.setdefault("difficulty", deepcopy(manifest.get("difficulty", {})))
-    updated.setdefault("host_catalog", _build_host_catalog(manifest))
-    updated.setdefault("host_details", {})
-    updated.setdefault("dependency_edges", [])
-    updated.setdefault("trust_edges", [])
-    return updated
+    return compile_manifest_topology(manifest, topology)
 
 
 def _existing_hosts(snapshot: SnapshotSpec) -> set[str]:

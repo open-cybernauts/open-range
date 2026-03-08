@@ -73,6 +73,134 @@ async def test_graph_consistency_rejects_missing_parent_lineage(sample_snapshot_
     assert "missing parent_snapshot_id" in result.error
 
 
+@pytest.mark.asyncio
+async def test_path_solvability_passes_for_reachable_flag_host(mock_containers):
+    from open_range.protocols import EvidenceItem, TruthGraph, Vulnerability
+    from open_range.validator.path_solvability import PathSolvabilityCheck
+
+    spec = SnapshotSpec(
+        topology={
+            "hosts": ["attacker", "web", "db"],
+            "zones": {"external": ["attacker"], "dmz": ["web"], "internal": ["db"]},
+            "dependency_edges": [
+                {"source": "attacker", "target": "web"},
+                {"source": "web", "target": "db"},
+            ],
+            "host_details": {
+                "attacker": {"services": ["nmap"]},
+                "web": {"services": ["nginx"]},
+                "db": {"services": ["mysql"]},
+            },
+        },
+        truth_graph=TruthGraph(
+            vulns=[Vulnerability(id="v1", type="sqli", host="web", service="nginx")],
+        ),
+        flags=[FlagSpec(id="f1", value="FLAG{ok}", path="/var/flags/flag1.txt", host="db")],
+        evidence_spec=[EvidenceItem(type="log_entry", location="siem:/var/log/siem/all.log")],
+        golden_path=[GoldenPathStep(step=1, command="nmap web", expect_in_stdout="80/tcp")],
+        task=TaskSpec(red_briefing="go", blue_briefing="watch"),
+    )
+
+    result = await PathSolvabilityCheck().check(spec, mock_containers)
+    assert result.passed is True
+
+
+@pytest.mark.asyncio
+async def test_graph_evidence_sufficiency_fails_without_supporting_hosts(mock_containers):
+    from open_range.protocols import TruthGraph, Vulnerability
+    from open_range.validator.graph_evidence import GraphEvidenceSufficiencyCheck
+
+    spec = SnapshotSpec(
+        topology={
+            "hosts": ["attacker", "web", "db"],
+            "zones": {"external": ["attacker"], "dmz": ["web"], "internal": ["db"]},
+            "dependency_edges": [{"source": "attacker", "target": "web"}],
+            "host_details": {
+                "attacker": {"services": ["nmap"]},
+                "web": {"services": ["nginx"]},
+                "db": {"services": ["mysql"]},
+            },
+        },
+        truth_graph=TruthGraph(
+            vulns=[Vulnerability(id="v1", type="sqli", host="db", service="mysql")],
+        ),
+        flags=[FlagSpec(id="f1", value="FLAG{db}", path="/var/flags/flag1.txt", host="db")],
+        evidence_spec=[EvidenceItem(type="log_entry", location="web:/var/log/access.log")],
+        golden_path=[GoldenPathStep(step=1, command="scan", expect_in_stdout="ok")],
+        task=TaskSpec(red_briefing="go", blue_briefing="watch"),
+    )
+
+    result = await GraphEvidenceSufficiencyCheck().check(spec, mock_containers)
+    assert result.passed is False
+    assert "no supporting evidence host" in result.error
+
+
+@pytest.mark.asyncio
+async def test_graph_reward_grounding_fails_when_flag_host_unreachable(mock_containers):
+    from open_range.protocols import TruthGraph, Vulnerability
+    from open_range.validator.graph_reward_grounding import GraphRewardGroundingCheck
+
+    spec = SnapshotSpec(
+        topology={
+            "hosts": ["attacker", "web", "db"],
+            "zones": {"external": ["attacker"], "dmz": ["web"], "internal": ["db"]},
+            "dependency_edges": [{"source": "attacker", "target": "web"}],
+            "host_details": {
+                "attacker": {"services": ["nmap"]},
+                "web": {"services": ["nginx"]},
+                "db": {"services": ["mysql"]},
+            },
+        },
+        truth_graph=TruthGraph(
+            vulns=[Vulnerability(id="v1", type="sqli", host="web", service="nginx")],
+        ),
+        flags=[FlagSpec(id="f1", value="FLAG{db}", path="/var/flags/flag1.txt", host="db")],
+        evidence_spec=[EvidenceItem(type="log_entry", location="siem:/var/log/siem/all.log")],
+        golden_path=[GoldenPathStep(step=1, command="scan", expect_in_stdout="ok")],
+        task=TaskSpec(red_briefing="go", blue_briefing="watch"),
+    )
+
+    result = await GraphRewardGroundingCheck().check(spec, mock_containers)
+    assert result.passed is False
+    assert "not reachable from any vuln host" in result.error
+
+
+@pytest.mark.asyncio
+async def test_graph_checks_allow_trust_based_host_pivots(mock_containers):
+    from open_range.validator.graph_reward_grounding import GraphRewardGroundingCheck
+    from open_range.validator.path_solvability import PathSolvabilityCheck
+
+    spec = SnapshotSpec(
+        topology={
+            "hosts": ["attacker", "web", "db"],
+            "zones": {"external": ["attacker"], "dmz": ["web"], "internal": ["db"]},
+            "dependency_edges": [{"source": "attacker", "target": "web"}],
+            "trust_edges": [{"source": "websvc", "target": "dbsvc", "type": "credential_reuse"}],
+            "host_details": {
+                "attacker": {"services": ["nmap"]},
+                "web": {"services": ["nginx"]},
+                "db": {"services": ["mysql"]},
+            },
+            "principal_catalog": {
+                "websvc": {"username": "websvc", "hosts": ["web"], "is_login_account": False},
+                "dbsvc": {"username": "dbsvc", "hosts": ["db"], "is_login_account": False},
+            },
+        },
+        truth_graph=TruthGraph(
+            vulns=[Vulnerability(id="v1", type="credential_reuse", host="web", service="nginx")],
+        ),
+        flags=[FlagSpec(id="f1", value="FLAG{db}", path="/var/flags/flag1.txt", host="db")],
+        evidence_spec=[EvidenceItem(type="log_entry", location="db:/var/log/mysql.log")],
+        golden_path=[GoldenPathStep(step=1, command="scan", expect_in_stdout="ok")],
+        task=TaskSpec(red_briefing="go", blue_briefing="watch"),
+    )
+
+    path_result = await PathSolvabilityCheck().check(spec, mock_containers)
+    reward_result = await GraphRewardGroundingCheck().check(spec, mock_containers)
+    assert path_result.passed is True
+    assert reward_result.passed is True
+
+
 # ---------------------------------------------------------------------------
 # Check 1: BuildBoot
 # ---------------------------------------------------------------------------

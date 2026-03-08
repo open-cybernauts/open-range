@@ -18,6 +18,8 @@ class CompiledGraphs:
 
     hosts: frozenset[str]
     users: frozenset[str]
+    principals: frozenset[str]
+    zones_by_host: dict[str, str]
     services_by_host: dict[str, frozenset[str]]
     dependency_edges: frozenset[tuple[str, str]]
     trust_edges: frozenset[tuple[str, str, str]]
@@ -31,6 +33,8 @@ def compile_snapshot_graphs(snapshot: SnapshotSpec) -> CompiledGraphs:
     topology = snapshot.topology or {}
     hosts = _compile_hosts(topology)
     users = _compile_users(topology)
+    principals = _compile_principals(topology, users)
+    zones_by_host = _compile_zones(topology, hosts)
     services_by_host = _compile_services(topology, hosts)
     dependency_edges = _compile_dependency_edges(topology)
     trust_edges = _compile_trust_edges(topology)
@@ -40,6 +44,8 @@ def compile_snapshot_graphs(snapshot: SnapshotSpec) -> CompiledGraphs:
     return CompiledGraphs(
         hosts=hosts,
         users=users,
+        principals=principals,
+        zones_by_host=zones_by_host,
         services_by_host=services_by_host,
         dependency_edges=dependency_edges,
         trust_edges=trust_edges,
@@ -80,6 +86,7 @@ def _compile_services(
     hosts: frozenset[str],
 ) -> dict[str, frozenset[str]]:
     host_details = topology.get("host_details", {})
+    host_catalog = topology.get("host_catalog", {})
     compiled: dict[str, frozenset[str]] = {}
     for host in hosts:
         detail = {}
@@ -87,6 +94,10 @@ def _compile_services(
             raw_detail = host_details.get(host, {})
             if isinstance(raw_detail, dict):
                 detail = raw_detail
+        if not detail and isinstance(host_catalog, dict):
+            raw_catalog = host_catalog.get(host, {})
+            if isinstance(raw_catalog, dict):
+                detail = raw_catalog
         services = detail.get("services", [])
         if not isinstance(services, list):
             services = []
@@ -104,6 +115,21 @@ def _compile_dependency_edges(topology: dict[str, object]) -> frozenset[tuple[st
         target = str(raw.get("target", "")).strip()
         if source and target:
             edges.add((source, target))
+    if edges:
+        return frozenset(edges)
+
+    host_details = topology.get("host_details", {})
+    if isinstance(host_details, dict):
+        for source, raw_detail in host_details.items():
+            if not isinstance(raw_detail, dict):
+                continue
+            raw_targets = raw_detail.get("connects_to", [])
+            if not isinstance(raw_targets, list):
+                continue
+            for raw_target in raw_targets:
+                target = str(raw_target).strip()
+                if source and target:
+                    edges.add((str(source).strip(), target))
     return frozenset(edges)
 
 
@@ -119,3 +145,45 @@ def _compile_trust_edges(topology: dict[str, object]) -> frozenset[tuple[str, st
         if source and target:
             edges.add((source, target, edge_type))
     return frozenset(edges)
+
+
+def _compile_principals(
+    topology: dict[str, object],
+    users: frozenset[str],
+) -> frozenset[str]:
+    principals = set(users)
+    raw_catalog = topology.get("principal_catalog", {})
+    if isinstance(raw_catalog, dict):
+        for raw_name in raw_catalog:
+            name = str(raw_name).strip()
+            if name:
+                principals.add(name)
+    return frozenset(principals)
+
+
+def _compile_zones(
+    topology: dict[str, object],
+    hosts: frozenset[str],
+) -> dict[str, str]:
+    zones_by_host: dict[str, str] = {}
+    raw_zones = topology.get("zones", {})
+    if isinstance(raw_zones, dict):
+        for raw_zone, raw_hosts in raw_zones.items():
+            zone = str(raw_zone).strip()
+            if not zone or not isinstance(raw_hosts, list):
+                continue
+            for raw_host in raw_hosts:
+                host = str(raw_host).strip()
+                if host:
+                    zones_by_host[host] = zone
+
+    host_details = topology.get("host_details", {})
+    if isinstance(host_details, dict):
+        for raw_host, raw_detail in host_details.items():
+            host = str(raw_host).strip()
+            if not host or host not in hosts or not isinstance(raw_detail, dict):
+                continue
+            zone = str(raw_detail.get("zone", "")).strip()
+            if zone and host not in zones_by_host:
+                zones_by_host[host] = zone
+    return zones_by_host

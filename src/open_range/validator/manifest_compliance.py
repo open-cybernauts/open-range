@@ -32,6 +32,7 @@ class ManifestComplianceCheck:
         manifest_hosts = _manifest_hosts(self.manifest)
         allowed_bug_families = set(str(v) for v in self.manifest.get("bug_families", []))
         allowed_users = set(_manifest_users(self.manifest))
+        allowed_principals = set(_manifest_principals(self.manifest))
         allowed_services = _manifest_services(self.manifest)
         allowed_dependency_edges = _manifest_dependency_edges(self.manifest)
         allowed_trust_edges = _manifest_trust_edges(self.manifest)
@@ -54,6 +55,20 @@ class ManifestComplianceCheck:
                 issues.append(
                     f"host '{host}' has services outside manifest family: {sorted(illegal)}"
                 )
+
+        illegal_dependency_edges = sorted(
+            edge for edge in compiled.dependency_edges if edge not in allowed_dependency_edges
+        )
+        if illegal_dependency_edges:
+            issues.append(
+                f"dependency edges outside manifest family: {illegal_dependency_edges}"
+            )
+
+        illegal_trust_edges = sorted(
+            edge for edge in compiled.trust_edges if edge not in allowed_trust_edges
+        )
+        if illegal_trust_edges:
+            issues.append(f"trust edges outside manifest family: {illegal_trust_edges}")
 
         for vuln in snapshot.truth_graph.vulns:
             if vuln.type and allowed_bug_families and vuln.type not in allowed_bug_families:
@@ -93,6 +108,14 @@ class ManifestComplianceCheck:
                     source = op.target_selector.get("source", "")
                     target = op.target_selector.get("target", "")
                     edge_type = str(op.params.get("type", "")).strip()
+                    if source and source not in allowed_principals:
+                        issues.append(
+                            f"add_trust_edge introduces unknown principal '{source}'"
+                        )
+                    if target and target not in allowed_principals:
+                        issues.append(
+                            f"add_trust_edge introduces unknown principal '{target}'"
+                        )
                     if (source, target, edge_type) not in allowed_trust_edges:
                         issues.append(
                             f"add_trust_edge introduces illegal trust edge "
@@ -137,6 +160,20 @@ def _manifest_users(manifest: dict[str, Any]) -> set[str]:
             if username:
                 users.add(username)
     return users
+
+
+def _manifest_principals(manifest: dict[str, Any]) -> set[str]:
+    principals = set(_manifest_users(manifest))
+    for raw in manifest.get("trust_relationships", []):
+        if not isinstance(raw, dict):
+            continue
+        source = str(raw.get("source") or raw.get("from") or "").strip()
+        target = str(raw.get("target") or raw.get("to") or "").strip()
+        if source:
+            principals.add(source)
+        if target:
+            principals.add(target)
+    return principals
 
 
 def _manifest_services(manifest: dict[str, Any]) -> dict[str, frozenset[str]]:

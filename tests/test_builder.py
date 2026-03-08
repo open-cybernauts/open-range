@@ -175,6 +175,25 @@ async def test_mutator_builds_child_snapshot_with_lineage(tier1_manifest):
 
 
 @pytest.mark.asyncio
+async def test_mutator_compiles_root_snapshot_from_manifest_graph(tier1_manifest):
+    from open_range.builder.builder import TemplateOnlyBuilder
+    from open_range.builder.mutator import Mutator
+
+    root = await Mutator(TemplateOnlyBuilder()).mutate(
+        tier1_manifest,
+        context=BuildContext(seed=1, tier=1),
+    )
+    topology = root.topology
+    assert topology["host_details"]["web"]["services"]
+    assert topology["dependency_edges"]
+    assert topology["trust_edges"]
+    assert "principal_catalog" in topology
+    assert "schen" in topology["principal_catalog"]
+    assert "schen" not in {user["username"] for user in topology["users"]}
+    assert topology["manifest_normalization"]["trust_only_principals"]
+
+
+@pytest.mark.asyncio
 async def test_mutator_rebuilds_child_files_from_mutated_snapshot(tier1_manifest):
     from open_range.builder.builder import TemplateOnlyBuilder
     from open_range.builder.mutator import Mutator
