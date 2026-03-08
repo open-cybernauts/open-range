@@ -1,9 +1,36 @@
-"""Typed OpenEnv client for OpenRange."""
+"""Typed OpenEnv client for OpenRange.
+
+Falls back to lightweight stubs if openenv is not installed.
+"""
 
 from __future__ import annotations
 
-from openenv.core.client_types import StepResult
-from openenv.core.env_client import EnvClient
+from typing import Any, Generic, TypeVar
+
+try:
+    from openenv.core.client_types import StepResult
+    from openenv.core.env_client import EnvClient
+except ImportError:
+    from dataclasses import dataclass, field
+
+    _A = TypeVar("_A")
+    _O = TypeVar("_O")
+    _S = TypeVar("_S")
+
+    @dataclass
+    class StepResult(Generic[_O]):  # type: ignore[no-redef]
+        """Minimal stub matching openenv.core.client_types.StepResult."""
+
+        observation: Any = None
+        reward: float | int | None = None
+        done: bool = False
+        metadata: dict[str, Any] = field(default_factory=dict)
+
+    class EnvClient(Generic[_A, _O, _S]):  # type: ignore[no-redef]
+        """Minimal stub matching openenv.core.env_client.EnvClient."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
 
 from open_range.server.models import RangeAction, RangeObservation, RangeState
 

@@ -14,7 +14,7 @@ Usage with GRPOTrainer::
 
 from __future__ import annotations
 
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 
 class AgentCallable(Protocol):
@@ -23,7 +23,7 @@ class AgentCallable(Protocol):
     def __call__(self, observation: Any) -> Any: ...
 
 
-async def rollout_func(
+def rollout_func(
     env: Any,
     agent: AgentCallable,
     num_steps: int = 100,
@@ -82,10 +82,8 @@ def rollout_func_sync(
     num_steps: int = 100,
     mode: str = "red",
 ) -> dict[str, Any]:
-    """Synchronous wrapper around the async rollout function.
+    """Synchronous wrapper — now just delegates to rollout_func directly.
 
-    For use with training loops that don't support async.
+    Kept for backward compatibility with callers that import this name.
     """
-    import asyncio
-
-    return asyncio.run(rollout_func(env, agent, num_steps, mode))
+    return rollout_func(env, agent, num_steps, mode)

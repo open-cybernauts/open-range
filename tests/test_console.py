@@ -1,7 +1,11 @@
 """Tests for the operator debugging console (issue #28).
 
-Uses Starlette's TestClient against the standalone FastAPI app.
+Uses Starlette's TestClient against the OpenEnv app with console router.
 No Docker dependency.
+
+Note: OpenEnv HTTP endpoints are stateless (each creates a new env instance).
+Console API uses a fallback env stored on app.state.  History is recorded
+via the module-level record_action() / clear_history() helpers.
 """
 
 from __future__ import annotations
@@ -10,15 +14,25 @@ import pytest
 from starlette.testclient import TestClient
 
 from open_range.server.app import create_app
+from open_range.server.console import clear_history, record_action
+from open_range.server.environment import RangeEnvironment
 
 
 @pytest.fixture()
-def client(monkeypatch):
-    """Create a TestClient against the standalone FastAPI app (not OpenEnv)."""
-    # Force standalone path so we test our own endpoints and console integration
-    monkeypatch.setattr("open_range.server.app._try_openenv_app", lambda: None)
+def client():
+    """Create a TestClient with a shared env on app.state for console API."""
     app = create_app()
+    # Store a shared env so console API endpoints can access state
+    env = RangeEnvironment(docker_available=False)
+    app.state.env = env
+    clear_history()
     return TestClient(app)
+
+
+@pytest.fixture()
+def env(client: TestClient) -> RangeEnvironment:
+    """Return the shared env stored on app.state."""
+    return client.app.state.env
 
 
 # ===================================================================
@@ -59,8 +73,8 @@ class TestSnapshotAPI:
         data = client.get("/console/api/snapshot").json()
         assert data["id"] is None
 
-    def test_snapshot_after_reset(self, client: TestClient):
-        client.post("/reset", json={"episode_id": "snap_test_1"})
+    def test_snapshot_after_reset(self, client: TestClient, env: RangeEnvironment):
+        env.reset(episode_id="snap_test_1")
         data = client.get("/console/api/snapshot").json()
         assert data["id"] == "snap_test_1"
         assert "hosts" in data
@@ -68,9 +82,9 @@ class TestSnapshotAPI:
         assert "vuln_count" in data
         assert "tier" in data
 
-    def test_snapshot_no_truth_graph_or_flags(self, client: TestClient):
+    def test_snapshot_no_truth_graph_or_flags(self, client: TestClient, env: RangeEnvironment):
         """Snapshot API must NOT leak truth_graph or flag values."""
-        client.post("/reset", json={})
+        env.reset()
         data = client.get("/console/api/snapshot").json()
         assert "truth_graph" not in data
         assert "flags" not in data
@@ -89,20 +103,22 @@ class TestEpisodeAPI:
         data = resp.json()
         assert isinstance(data, dict)
 
-    def test_episode_fields(self, client: TestClient):
-        client.post("/reset", json={})
+    def test_episode_fields(self, client: TestClient, env: RangeEnvironment):
+        env.reset()
         data = client.get("/console/api/episode").json()
         assert "step_count" in data
         assert "flags_found" in data
         assert "mode" in data
         assert "services_status" in data
 
-    def test_episode_step_count_updates(self, client: TestClient):
-        client.post("/reset", json={})
+    def test_episode_step_count_updates(self, client: TestClient, env: RangeEnvironment):
+        from open_range.server.models import RangeAction
+
+        env.reset()
         data = client.get("/console/api/episode").json()
         assert data["step_count"] == 0
 
-        client.post("/step", json={"command": "nmap web", "mode": "red"})
+        env.step(RangeAction(command="nmap web", mode="red"))
         data = client.get("/console/api/episode").json()
         assert data["step_count"] == 1
 
@@ -120,15 +136,14 @@ class TestHistoryAPI:
         assert isinstance(data, list)
 
     def test_history_empty_initially(self, client: TestClient):
-        # Reset clears history
-        client.post("/reset", json={})
         data = client.get("/console/api/history").json()
         assert data == []
 
     def test_history_records_actions(self, client: TestClient):
-        client.post("/reset", json={})
-        client.post("/step", json={"command": "nmap -sV web", "mode": "red"})
-        client.post("/step", json={"command": "tail -f /var/log/syslog", "mode": "blue"})
+        import time
+
+        record_action({"step": 1, "command": "nmap -sV web", "mode": "red", "time": time.time()})
+        record_action({"step": 2, "command": "tail -f /var/log/syslog", "mode": "blue", "time": time.time()})
         data = client.get("/console/api/history").json()
         assert len(data) == 2
         # Newest first
@@ -136,8 +151,9 @@ class TestHistoryAPI:
         assert data[1]["mode"] == "red"
 
     def test_history_has_timestamps(self, client: TestClient):
-        client.post("/reset", json={})
-        client.post("/step", json={"command": "nmap web", "mode": "red"})
+        import time
+
+        record_action({"step": 1, "command": "nmap web", "mode": "red", "time": time.time()})
         data = client.get("/console/api/history").json()
         assert len(data) == 1
         assert "time" in data[0]
@@ -145,11 +161,9 @@ class TestHistoryAPI:
 
     def test_history_max_20(self, client: TestClient):
         """History API should return at most 20 entries."""
-        client.post("/reset", json={})
+        import time
+
         for i in range(25):
-            client.post(
-                "/step",
-                json={"command": f"cmd_{i}", "mode": "red"},
-            )
+            record_action({"step": i, "command": f"cmd_{i}", "mode": "red", "time": time.time()})
         data = client.get("/console/api/history").json()
         assert len(data) == 20

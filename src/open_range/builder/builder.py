@@ -3,6 +3,9 @@
 - LLMSnapshotBuilder: production -- uses litellm to generate snapshot specs
 - TemplateOnlyBuilder: testing -- deterministic, no LLM calls
 - FileBuilder: demos -- loads a pre-built snapshot from a JSON file
+
+Each builder implements the SnapshotBuilder protocol and returns a validated
+SnapshotSpec that can be rendered into Docker artifacts by the SnapshotRenderer.
 """
 
 from __future__ import annotations
@@ -12,7 +15,9 @@ import logging
 import os
 import random
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
+
+from pydantic import BaseModel, Field
 
 try:
     import litellm
@@ -39,6 +44,106 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# LLM raw output model -- matches the LLM's JSON schema exactly
+# ---------------------------------------------------------------------------
+
+
+class _LLMVulnerability(BaseModel):
+    """Raw vulnerability as returned by the LLM."""
+
+    id: str = ""
+    type: str = ""
+    host: str = ""
+    service: str = ""
+    injection_point: str = ""
+    vulnerable_code: str | dict[str, str] = ""
+    root_cause: str = ""
+    blast_radius: str = ""
+    remediation: str = ""
+
+
+class _LLMExploitStep(BaseModel):
+    """Raw exploit step -- LLM uses 'vuln'/'action'/'yields' field names."""
+
+    vuln: str = ""
+    vuln_id: str = ""
+    action: str = ""
+    command: str = ""
+    yields: str = ""
+    description: str = ""
+
+
+class _LLMGoldenPathStep(BaseModel):
+    """Raw golden path step -- LLM uses 'cmd' and 'expect_stdout'."""
+
+    step: int = 0
+    cmd: str = ""
+    command: str = ""
+    expect_stdout: str = ""
+    expect_in_stdout: str = ""
+    description: str = ""
+    host: str = "attacker"
+
+
+class _LLMFlag(BaseModel):
+    """Raw flag definition from LLM output."""
+
+    id: str = ""
+    value: str = ""
+    path: str = ""
+    host: str = ""
+
+
+class _LLMNPCPersona(BaseModel):
+    """Raw NPC persona from LLM output."""
+
+    name: str = ""
+    role: str = ""
+    department: str = ""
+    reports_to: str = ""
+    communication_style: str = ""
+    security_awareness: float = 0.5
+    susceptibility: dict[str, Any] = Field(default_factory=dict)
+    routine: dict[str, Any] = Field(default_factory=dict)
+    accounts: dict[str, Any] = Field(default_factory=dict)
+
+
+class _LLMTruthGraph(BaseModel):
+    """Raw truth graph from LLM output."""
+
+    vulns: list[_LLMVulnerability] = Field(default_factory=list)
+    exploit_chain: list[_LLMExploitStep] = Field(default_factory=list)
+
+
+class _LLMTask(BaseModel):
+    """Raw task specification from LLM output."""
+
+    red_briefing: str = ""
+    blue_briefing: str = ""
+
+
+class LLMSnapshotOutput(BaseModel):
+    """Intermediate model matching the LLM's raw JSON schema.
+
+    This captures the exact field names the LLM produces, including
+    known mismatches like 'vuln' vs 'vuln_id', 'cmd' vs 'command',
+    and 'expect_stdout' vs 'expect_in_stdout'. Parsing into this model
+    first makes schema mismatches explicit and testable before mapping
+    to the canonical SnapshotSpec.
+    """
+
+    topology: dict[str, Any] = Field(default_factory=dict)
+    truth_graph: _LLMTruthGraph = Field(default_factory=_LLMTruthGraph)
+    golden_path: list[_LLMGoldenPathStep] = Field(default_factory=list)
+    flags: list[_LLMFlag] = Field(default_factory=list)
+    evidence_spec: dict[str, Any] | list[dict[str, Any]] = Field(default_factory=dict)
+    npc_personas: list[_LLMNPCPersona] = Field(default_factory=list)
+    npc_traffic: dict[str, Any] = Field(default_factory=dict)
+    task: _LLMTask = Field(default_factory=_LLMTask)
+    files: dict[str, str] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
 # LLM-based builder (production)
 # ---------------------------------------------------------------------------
 
@@ -57,7 +162,18 @@ class LLMSnapshotBuilder:
         temperature: float = 0.7,
         max_retries: int = 3,
         max_tokens: int = 32768,
+        timeout: float = 120.0,
     ) -> None:
+        """Initialize the LLM-based snapshot builder.
+
+        Args:
+            model: LiteLLM model identifier (e.g. 'azure/gpt-5.2').
+            prompt_template: System prompt override.
+            temperature: Sampling temperature for LLM calls.
+            max_retries: Maximum number of LLM call + parse attempts.
+            max_tokens: Maximum tokens in LLM response.
+            timeout: Timeout in seconds for each LLM call.
+        """
         self.model = model or os.environ.get(
             "OPENRANGE_BUILDER_MODEL", "anthropic/claude-sonnet-4-20250514"
         )
@@ -65,13 +181,18 @@ class LLMSnapshotBuilder:
         self.temperature = temperature
         self.max_retries = max_retries
         self.max_tokens = max_tokens
+        self.timeout = timeout
 
     async def build(
         self,
         manifest: dict,
         context: BuildContext,
     ) -> SnapshotSpec:
-        """Call LLM to generate a candidate snapshot spec."""
+        """Call LLM to generate a candidate snapshot spec.
+
+        Retries on LLM or parse failures, appending error context to each
+        subsequent attempt so the LLM can self-correct.
+        """
         if litellm is None:
             raise RuntimeError(
                 "LLMSnapshotBuilder requires the optional builder extra. "
@@ -89,23 +210,29 @@ class LLMSnapshotBuilder:
             )
         )
 
+        logger.info(
+            "LLMSnapshotBuilder: starting build (model=%s, tier=%d)",
+            self.model,
+            context.tier,
+        )
+
         last_error: Exception | None = None
+        last_error_msg: str = ""
         for attempt in range(1, self.max_retries + 1):
             try:
                 messages: list[dict[str, str]] = [
                     {"role": "system", "content": self.prompt_template},
                     {"role": "user", "content": user_payload},
                 ]
-                # If retrying after a validation error, append error context
-                error = getattr(context, "error", None)
-                if error and attempt > 1:
+                # If retrying after a failure, append error context so LLM can fix
+                if attempt > 1 and last_error_msg:
                     messages.append(
                         {
                             "role": "user",
                             "content": (
-                                "Previous attempt failed validation. "
-                                f"Error: {json.dumps(error)}\n"
-                                "Please fix and regenerate."
+                                "Previous attempt failed. "
+                                f"Error: {last_error_msg}\n"
+                                "Please fix and regenerate the complete JSON."
                             ),
                         }
                     )
@@ -114,6 +241,7 @@ class LLMSnapshotBuilder:
                     "model": self.model,
                     "messages": messages,
                     "max_tokens": self.max_tokens,
+                    "timeout": self.timeout,
                 }
                 # Codex models don't support temperature
                 if self.temperature is not None:
@@ -121,24 +249,56 @@ class LLMSnapshotBuilder:
                 # Request JSON output; some models need the word "json"
                 # in messages to use json_object format
                 kwargs["response_format"] = {"type": "json_object"}
+
+                logger.debug(
+                    "LLMSnapshotBuilder: sending request (attempt %d/%d, timeout=%.0fs)",
+                    attempt,
+                    self.max_retries,
+                    self.timeout,
+                )
                 response = await litellm.acompletion(**kwargs)
 
                 raw = response.choices[0].message.content
+                logger.debug(
+                    "LLMSnapshotBuilder: received response (%d chars)",
+                    len(raw) if raw else 0,
+                )
                 spec = _parse_llm_response(raw)
                 logger.info(
-                    "LLMSnapshotBuilder: generated snapshot %s (attempt %d)",
-                    spec.topology.get("hosts", [])[:3],
+                    "LLMSnapshotBuilder: build completed (attempt %d/%d, %d vulns, %d golden path steps)",
                     attempt,
+                    self.max_retries,
+                    len(spec.truth_graph.vulns),
+                    len(spec.golden_path),
                 )
                 return spec
 
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                last_error_msg = f"JSON parse error at position {exc.pos}: {exc.msg}"
+                logger.warning(
+                    "LLMSnapshotBuilder attempt %d/%d: JSON parse failed: %s",
+                    attempt,
+                    self.max_retries,
+                    last_error_msg,
+                )
+            except SnapshotParseError as exc:
+                last_error = exc
+                last_error_msg = str(exc)
+                logger.warning(
+                    "LLMSnapshotBuilder attempt %d/%d: snapshot parse failed: %s",
+                    attempt,
+                    self.max_retries,
+                    last_error_msg,
+                )
             except Exception as exc:
                 last_error = exc
-                logger.warning(
+                last_error_msg = f"{type(exc).__name__}: {exc}"
+                logger.error(
                     "LLMSnapshotBuilder attempt %d/%d failed: %s",
                     attempt,
                     self.max_retries,
-                    exc,
+                    last_error_msg,
                 )
 
         raise RuntimeError(
@@ -147,76 +307,182 @@ class LLMSnapshotBuilder:
         )
 
 
+# ---------------------------------------------------------------------------
+# Parse error with context
+# ---------------------------------------------------------------------------
+
+
+class SnapshotParseError(Exception):
+    """Raised when LLM output cannot be parsed into a valid SnapshotSpec.
+
+    Includes the field that failed, received value, expected format,
+    and a truncated snippet of the raw JSON for debugging.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        field: str = "",
+        received: Any = None,
+        expected: str = "",
+        raw_json_snippet: str = "",
+    ) -> None:
+        self.field = field
+        self.received = received
+        self.expected = expected
+        self.raw_json_snippet = raw_json_snippet
+        parts = [message]
+        if field:
+            parts.append(f"field={field!r}")
+        if received is not None:
+            recv_str = repr(received)
+            if len(recv_str) > 200:
+                recv_str = recv_str[:200] + "..."
+            parts.append(f"received={recv_str}")
+        if expected:
+            parts.append(f"expected={expected}")
+        if raw_json_snippet:
+            parts.append(f"raw_json_start={raw_json_snippet!r}")
+        super().__init__(" | ".join(parts))
+
+
+# ---------------------------------------------------------------------------
+# LLM response parser
+# ---------------------------------------------------------------------------
+
+
 def _parse_llm_response(raw_json: str) -> SnapshotSpec:
     """Parse raw JSON from LLM into a validated SnapshotSpec.
 
-    Handles the fact that the LLM output schema (from docs/builder-validator.md)
-    differs slightly from the SnapshotSpec Pydantic model in protocols.py.
+    First parses into LLMSnapshotOutput (which matches the LLM's field names),
+    then maps to the canonical SnapshotSpec models. Handles known field-name
+    mismatches between the LLM prompt schema and Pydantic models.
     """
-    data = json.loads(raw_json)
+    raw_snippet = raw_json[:500] if raw_json else ""
+
+    try:
+        data = json.loads(raw_json)
+    except json.JSONDecodeError:
+        raise
+
+    logger.debug("_parse_llm_response: parsing %d-char JSON response", len(raw_json))
+
+    # Parse into intermediate model first for early validation
+    try:
+        llm_output = LLMSnapshotOutput.model_validate(data)
+    except Exception as exc:
+        raise SnapshotParseError(
+            "Failed to parse LLM output into LLMSnapshotOutput",
+            field="root",
+            received=type(exc).__name__,
+            expected="valid LLMSnapshotOutput JSON",
+            raw_json_snippet=raw_snippet,
+        ) from exc
 
     # Map truth_graph vulns
     vulns = []
-    for v in data.get("truth_graph", {}).get("vulns", []):
-        vulns.append(
-            Vulnerability(
-                id=v.get("id", ""),
-                type=v.get("type", ""),
-                host=v.get("host", ""),
-                service=v.get("service", ""),
-                injection_point=v.get("injection_point", ""),
-                vulnerable_code=v.get("vulnerable_code", ""),
-                root_cause=v.get("root_cause", ""),
-                blast_radius=v.get("blast_radius", ""),
-                remediation=v.get("remediation", ""),
+    for i, v in enumerate(llm_output.truth_graph.vulns):
+        try:
+            vulns.append(
+                Vulnerability(
+                    id=v.id,
+                    type=v.type,
+                    host=v.host,
+                    service=v.service,
+                    injection_point=v.injection_point,
+                    vulnerable_code=v.vulnerable_code,
+                    root_cause=v.root_cause,
+                    blast_radius=v.blast_radius,
+                    remediation=v.remediation,
+                )
             )
-        )
+        except Exception as exc:
+            raise SnapshotParseError(
+                f"Failed to map vulnerability at index {i}",
+                field=f"truth_graph.vulns[{i}]",
+                received=v.model_dump(),
+                expected="valid Vulnerability fields",
+                raw_json_snippet=raw_snippet,
+            ) from exc
 
     # Map exploit_chain -- LLM uses "vuln"/"action", protocol uses "vuln_id"/"command"
     exploit_chain = []
-    for ec in data.get("truth_graph", {}).get("exploit_chain", []):
-        exploit_chain.append(
-            ExploitStep(
-                vuln_id=ec.get("vuln_id", ec.get("vuln", "")),
-                command=ec.get("command", ec.get("action", "")),
-                description=ec.get("description", ec.get("yields", "")),
+    for i, ec in enumerate(llm_output.truth_graph.exploit_chain):
+        vuln_id = ec.vuln_id or ec.vuln
+        command = ec.command or ec.action
+        description = ec.description or ec.yields
+        if vuln_id or command:
+            used_fallback = (not ec.vuln_id and ec.vuln) or (not ec.command and ec.action)
+            if used_fallback:
+                logger.warning(
+                    "exploit_chain[%d]: used fallback field names (vuln=%r -> vuln_id, action=%r -> command)",
+                    i,
+                    ec.vuln,
+                    ec.action,
+                )
+            exploit_chain.append(
+                ExploitStep(
+                    vuln_id=vuln_id,
+                    command=command,
+                    description=description,
+                )
             )
-        )
 
     truth_graph = TruthGraph(
         vulns=vulns,
         exploit_chain=exploit_chain,
     )
 
-    # Map golden_path -- LLM uses "expect_stdout", protocol uses "expect_in_stdout"
+    # Map golden_path -- LLM uses "cmd"/"expect_stdout", protocol uses "command"/"expect_in_stdout"
     golden_path = []
-    for step in data.get("golden_path", []):
+    for i, step in enumerate(llm_output.golden_path):
+        command = step.command or step.cmd
+        expect = step.expect_in_stdout or step.expect_stdout
+        if not command and step.cmd:
+            logger.warning(
+                "golden_path[%d]: used 'cmd' fallback for 'command'",
+                i,
+            )
+        if not step.expect_in_stdout and step.expect_stdout:
+            logger.warning(
+                "golden_path[%d]: used 'expect_stdout' fallback for 'expect_in_stdout'",
+                i,
+            )
         golden_path.append(
             GoldenPathStep(
-                step=step.get("step", 0),
-                command=step.get("cmd", step.get("command", "")),
-                expect_in_stdout=step.get(
-                    "expect_stdout", step.get("expect_in_stdout", "")
-                ),
-                description=step.get("description", ""),
+                step=step.step,
+                command=command,
+                expect_in_stdout=expect,
+                description=step.description,
             )
         )
 
     # Map flags
-    flags = [
-        FlagSpec(
-            id=f.get("id", ""),
-            value=f.get("value", ""),
-            path=f.get("path", ""),
-            host=f.get("host", ""),
-        )
-        for f in data.get("flags", [])
-    ]
+    flags = []
+    for i, f in enumerate(llm_output.flags):
+        try:
+            flags.append(
+                FlagSpec(
+                    id=f.id,
+                    value=f.value,
+                    path=f.path,
+                    host=f.host,
+                )
+            )
+        except Exception as exc:
+            raise SnapshotParseError(
+                f"Failed to map flag at index {i}",
+                field=f"flags[{i}]",
+                received=f.model_dump(),
+                expected="valid FlagSpec (id, value, path, host)",
+                raw_json_snippet=raw_snippet,
+            ) from exc
 
-    # Map evidence_spec -- LLM returns dict, protocol expects list[EvidenceItem]
-    evidence_raw = data.get("evidence_spec", {})
+    # Map evidence_spec -- LLM returns dict or list, protocol expects list[EvidenceItem]
     evidence_spec: list[EvidenceItem] = []
+    evidence_raw = llm_output.evidence_spec
     if isinstance(evidence_raw, dict):
+        logger.debug("evidence_spec: converting dict format to list[EvidenceItem]")
         for key, val in evidence_raw.items():
             if isinstance(val, list):
                 for item in val:
@@ -234,23 +500,31 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
 
     # Map NPC personas
     npc_personas = []
-    for p in data.get("npc_personas", []):
-        npc_personas.append(
-            NPCPersona(
-                name=p.get("name", ""),
-                role=p.get("role", ""),
-                department=p.get("department", ""),
-                reports_to=p.get("reports_to", ""),
-                communication_style=p.get("communication_style", ""),
-                security_awareness=p.get("security_awareness", 0.5),
-                susceptibility=p.get("susceptibility", {}),
-                routine=p.get("routine", {}),
-                accounts=p.get("accounts", {}),
+    for i, p in enumerate(llm_output.npc_personas):
+        try:
+            npc_personas.append(
+                NPCPersona(
+                    name=p.name,
+                    role=p.role,
+                    department=p.department,
+                    reports_to=p.reports_to,
+                    communication_style=p.communication_style,
+                    security_awareness=p.security_awareness,
+                    susceptibility=p.susceptibility,
+                    routine=p.routine,
+                    accounts=p.accounts,
+                )
             )
-        )
+        except Exception as exc:
+            logger.warning(
+                "npc_personas[%d]: failed to map persona %r: %s",
+                i,
+                p.name,
+                exc,
+            )
 
     # Map NPC traffic
-    npc_raw = data.get("npc_traffic", {})
+    npc_raw = llm_output.npc_traffic
     npc_traffic = NPCTrafficSpec(
         level=0,
         rate_lambda=npc_raw.get("http_rate", 10),
@@ -258,19 +532,17 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
     )
 
     # Map task
-    task_raw = data.get("task", {})
     task = TaskSpec(
-        red_briefing=task_raw.get("red_briefing", ""),
-        blue_briefing=task_raw.get("blue_briefing", ""),
+        red_briefing=llm_output.task.red_briefing,
+        blue_briefing=llm_output.task.blue_briefing,
     )
 
     # Map files -- explicit files from LLM + extract from vulnerable_code
     files: dict[str, str] = {}
 
     # 1. Explicit files field from LLM output
-    files_raw = data.get("files", {})
-    if isinstance(files_raw, dict):
-        for key, content in files_raw.items():
+    if isinstance(llm_output.files, dict):
+        for key, content in llm_output.files.items():
             if isinstance(content, str):
                 files[key] = content
 
@@ -289,8 +561,16 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
                 if container_key not in files:
                     files[container_key] = vc
 
+    logger.debug(
+        "_parse_llm_response: mapped %d vulns, %d golden path steps, %d flags, %d files",
+        len(vulns),
+        len(golden_path),
+        len(flags),
+        len(files),
+    )
+
     return SnapshotSpec(
-        topology=data.get("topology", {}),
+        topology=llm_output.topology,
         truth_graph=truth_graph,
         golden_path=golden_path,
         flags=flags,
@@ -629,6 +909,7 @@ class TemplateOnlyBuilder:
     """
 
     def __init__(self, vuln_pool: list[dict[str, Any]] | None = None) -> None:
+        """Initialize with an optional custom vulnerability pool."""
         self.vuln_pool = vuln_pool or _DEFAULT_VULN_POOL
 
     async def build(
@@ -765,6 +1046,12 @@ class TemplateOnlyBuilder:
             scripts=["http_traffic.sh", "db_traffic.sh"],
         )
 
+        logger.info(
+            "TemplateOnlyBuilder: built snapshot with %d vulns (seed=%s)",
+            len(vulns),
+            context.seed,
+        )
+
         return SnapshotSpec(
             topology=topology,
             truth_graph=truth_graph,
@@ -790,6 +1077,7 @@ class FileBuilder:
     """
 
     def __init__(self, snapshot_dir: str = "snapshots") -> None:
+        """Initialize with the directory containing snapshot JSON files."""
         self.snapshot_dir = Path(snapshot_dir)
 
     async def build(
@@ -797,7 +1085,7 @@ class FileBuilder:
         manifest: dict,
         context: BuildContext,
     ) -> SnapshotSpec:
-        """Load the snapshot JSON, optionally picking by seed."""
+        """Load a snapshot JSON file, optionally picking by seed."""
         if not self.snapshot_dir.exists():
             raise FileNotFoundError(
                 f"Snapshot directory not found: {self.snapshot_dir}"
@@ -817,5 +1105,6 @@ class FileBuilder:
         else:
             chosen = files[0]
 
+        logger.info("FileBuilder: loading snapshot from %s", chosen)
         raw = json.loads(chosen.read_text())
         return _parse_llm_response(json.dumps(raw))

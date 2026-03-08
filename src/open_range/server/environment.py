@@ -16,6 +16,7 @@ Design:
 from __future__ import annotations
 
 import logging
+import shlex
 import time
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -248,11 +249,11 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
 
                 parent_dir = path.rsplit("/", 1)[0] if "/" in path else "/"
                 self._exec_in_container(
-                    container_name, f"mkdir -p '{parent_dir}'"
+                    container_name, f"mkdir -p {shlex.quote(parent_dir)}"
                 )
 
                 b64 = base64.b64encode(content.encode()).decode()
-                cmd = f"echo '{b64}' | base64 -d > '{path}'"
+                cmd = f"echo '{b64}' | base64 -d > {shlex.quote(path)}"
                 _, stderr = self._exec_in_container(container_name, cmd)
                 if stderr and "Error" in stderr:
                     logger.warning(
@@ -284,32 +285,41 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         """
         if "snapshot" in kwargs and isinstance(kwargs["snapshot"], SnapshotSpec):
             self._snapshot_id = kwargs.get("snapshot_id")
-            return kwargs["snapshot"]
-
-        if self._runtime is not None:
+            snap = kwargs["snapshot"]
+        elif self._runtime is not None:
             if "snapshot_id" in kwargs and kwargs["snapshot_id"]:
                 admitted = self._runtime.get_snapshot(str(kwargs["snapshot_id"]))
             else:
                 admitted = self._runtime.acquire_snapshot()
             self._snapshot_id = admitted.snapshot_id
-            return admitted.snapshot
+            snap = admitted.snapshot
+        else:
+            self._snapshot_id = None
+            snap = SnapshotSpec(
+                topology={"hosts": []},
+                flags=[],
+                golden_path=[],
+                task={
+                    "red_briefing": (
+                        "Target network detected. Begin reconnaissance and "
+                        "identify vulnerabilities. Capture all flags."
+                    ),
+                    "blue_briefing": (
+                        "Monitor SIEM for suspicious activity. Investigate "
+                        "alerts, patch vulnerabilities, and report findings."
+                    ),
+                },
+            )
 
-        self._snapshot_id = None
-        return SnapshotSpec(
-            topology={"hosts": []},
-            flags=[],
-            golden_path=[],
-            task={
-                "red_briefing": (
-                    "Target network detected. Begin reconnaissance and "
-                    "identify vulnerabilities. Capture all flags."
-                ),
-                "blue_briefing": (
-                    "Monitor SIEM for suspicious activity. Investigate "
-                    "alerts, patch vulnerabilities, and report findings."
-                ),
-            },
-        )
+        # Defensive: ensure required fields are not None
+        if snap.flags is None:
+            snap.flags = []
+        if snap.topology is None:
+            snap.topology = {}
+        if snap.task is None:
+            snap.task = {}
+
+        return snap
 
     # -----------------------------------------------------------------
     # Special command handling
@@ -328,13 +338,13 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
                 done=True,
             )
 
-        valid_flags = {f.value for f in self._snapshot.flags}
+        valid_flags = {f.value for f in self._snapshot.flags} if self._snapshot.flags else set()
         already_found = set(self._state.flags_found)
 
         if submitted in valid_flags and submitted not in already_found:
             self._state.flags_found.append(submitted)
             # Check if all flags captured
-            all_captured = set(self._state.flags_found) == valid_flags
+            all_captured = valid_flags and set(self._state.flags_found) == valid_flags
             return RangeObservation(
                 stdout=f"Correct! Flag accepted: {submitted}",
                 flags_captured=[submitted],
@@ -395,7 +405,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         Checks credentials against the topology user list in the snapshot.
         Successful auth is recorded in ``state.active_sessions``.
         """
-        parts = action.command.strip().split()
+        parts = action.command.strip().split(maxsplit=3)
         if len(parts) < 4:
             return RangeObservation(
                 stdout="",
@@ -615,8 +625,8 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
             "Episode %s reset: tier=%d, flags=%d, golden_path_steps=%d",
             eid,
             self._state.tier,
-            len(self._snapshot.flags),
-            len(self._snapshot.golden_path),
+            len(self._snapshot.flags or []),
+            len(self._snapshot.golden_path or []),
         )
 
         return RangeObservation(stdout=briefing)
@@ -774,7 +784,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
                     action, obs, self._state, self._snapshot, reward_ctx
                 )
         except Exception as exc:
-            logger.warning("Reward computation failed: %s", exc)
+            logger.error("Reward computation failed: %s", exc, exc_info=True)
             obs.reward = 0.0
 
         return obs

@@ -1,17 +1,22 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "open-range"
+name = "openenv-open-range"
 version = "0.1.0"
 description = "Multi-agent cybersecurity gymnasium built on OpenEnv"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
     "openenv-core[core]>=0.2.1",
-    "fastapi>=0.115",
-    "pydantic>=2.0",
+    "click>=8.1",
+    "fastapi>=0.115.0",
+    "pydantic>=2.0.0",
     "pyyaml>=6.0",
     "docker>=7.0",
     "jinja2>=3.1",
-    "uvicorn>=0.27",
+    "uvicorn>=0.24.0",
 ]
 
 [project.optional-dependencies]
@@ -19,15 +24,24 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx>=0.27"]
 training = ["trl>=0.8", "unsloth"]
 builder = ["litellm>=1.30"]
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/open_range"]
-
 [project.scripts]
+openrange = "open_range.cli:cli"
 server = "open_range.server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = [
+    "open_range",
+    "open_range.agents",
+    "open_range.builder",
+    "open_range.builder.npc",
+    "open_range.client",
+    "open_range.server",
+    "open_range.training",
+    "open_range.validator",
+]
+package-dir = { "" = "src" }
+package-data = { "open_range" = ["**/*.yaml", "**/*.yml"] }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
