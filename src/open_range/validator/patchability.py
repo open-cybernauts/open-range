@@ -21,6 +21,7 @@ _CMD_PREFIXES = (
     "patch", "iptables", "mysql", "docker",
 )
 _CMD_OPERATORS_RE = re.compile(r"[|>&]|&&")
+_EXIT_STATUS_SENTINEL = "__OPENRANGE_EXIT_STATUS__="
 
 
 def _looks_executable(remediation: str) -> bool:
@@ -80,6 +81,39 @@ def _longest_common_substring(a: str, b: str) -> int:
     return max_len
 
 
+def _wrap_with_exit_status(command: str) -> str:
+    """Wrap *command* so stdout includes an explicit exit status sentinel."""
+    return (
+        f"set +e; {command}; "
+        "__openrange_rc=$?; "
+        f"printf '\\n{_EXIT_STATUS_SENTINEL}%s\\n' \"$__openrange_rc\""
+    )
+
+
+def _split_output_and_exit_status(output: str) -> tuple[str, int | None]:
+    """Return ``(stdout_without_sentinel, exit_code_or_none)``."""
+    marker = output.rfind(_EXIT_STATUS_SENTINEL)
+    if marker == -1:
+        return output, None
+
+    body = output[:marker].rstrip()
+    raw_code = output[marker + len(_EXIT_STATUS_SENTINEL):].strip().splitlines()[0]
+    try:
+        return body, int(raw_code)
+    except ValueError:
+        return body, None
+
+
+async def _exec_with_exit_status(
+    containers: ContainerSet,
+    host: str,
+    command: str,
+) -> tuple[str, int | None]:
+    """Execute *command* and parse explicit status from command output."""
+    raw_output = await containers.exec(host, _wrap_with_exit_status(command))
+    return _split_output_and_exit_status(raw_output)
+
+
 class PatchabilityCheck:
     """Inverse mutation: patching a vuln must break the corresponding golden-path step."""
 
@@ -126,7 +160,11 @@ class PatchabilityCheck:
 
             # --- Apply remediation -------------------------------------------------
             try:
-                await containers.exec(host, vuln.remediation)
+                remediation_output, remediation_code = await _exec_with_exit_status(
+                    containers,
+                    host,
+                    vuln.remediation,
+                )
             except Exception as exc:  # noqa: BLE001
                 results.append({"vuln": vuln.id, "error": f"remediation failed: {exc}"})
                 all_ok = False
@@ -137,25 +175,85 @@ class PatchabilityCheck:
                     pass
                 continue
 
+            if remediation_code is None:
+                results.append({
+                    "vuln": vuln.id,
+                    "passed": False,
+                    "reason": "remediation inconclusive (missing exit status signal)",
+                    "got_snippet": remediation_output[:200],
+                })
+                all_ok = False
+                try:
+                    await containers.restart(host)
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+
+            if remediation_code != 0:
+                results.append({
+                    "vuln": vuln.id,
+                    "passed": False,
+                    "reason": f"remediation failed (exit {remediation_code})",
+                    "got_snippet": remediation_output[:200],
+                })
+                all_ok = False
+                try:
+                    await containers.restart(host)
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+
             # --- Re-run linked golden-path step — must now fail --------------------
             step_still_works = False
             matched_any = False
+            inconclusive_retests: list[dict[str, str]] = []
             for chain_step in linked_steps:
                 gp_step = _find_golden_step(snapshot, chain_step)
                 if gp_step is None:
                     continue
                 matched_any = True
+                if not gp_step.expect_in_stdout:
+                    inconclusive_retests.append({
+                        "step": str(gp_step.step),
+                        "reason": "missing expect_in_stdout",
+                    })
+                    continue
                 try:
-                    output = await execute_step(
-                        snapshot,
-                        containers,
-                        gp_step.command,
-                        host=getattr(gp_step, "host", None) or "attacker",
-                    )
-                except Exception:  # noqa: BLE001
-                    continue  # exec failure counts as "step failed" — good
+                    cmd_name = gp_step.command.strip().split()[0] if gp_step.command.strip() else ""
+                    if cmd_name in {"submit_flag", "submit_evidence", "submit_finding", "auth", "logout"}:
+                        output = await execute_step(
+                            snapshot,
+                            containers,
+                            gp_step.command,
+                            host=getattr(gp_step, "host", None) or "attacker",
+                        )
+                        retest_code = 0
+                    else:
+                        output, retest_code = await _exec_with_exit_status(
+                            containers,
+                            getattr(gp_step, "host", None) or "attacker",
+                            gp_step.command,
+                        )
+                        if retest_code is None:
+                            inconclusive_retests.append({
+                                "step": str(gp_step.step),
+                                "reason": "missing exit status signal",
+                            })
+                            continue
+                        if retest_code != 0:
+                            inconclusive_retests.append({
+                                "step": str(gp_step.step),
+                                "reason": f"non-zero exit ({retest_code})",
+                            })
+                            continue
+                except Exception as exc:  # noqa: BLE001
+                    inconclusive_retests.append({
+                        "step": str(gp_step.step),
+                        "reason": f"execution error: {exc}",
+                    })
+                    continue
 
-                if gp_step.expect_in_stdout and gp_step.expect_in_stdout in output:
+                if gp_step.expect_in_stdout in output:
                     step_still_works = True
 
             if not matched_any:
@@ -172,7 +270,15 @@ class PatchabilityCheck:
 
             tested_count += 1
 
-            if step_still_works:
+            if inconclusive_retests:
+                results.append({
+                    "vuln": vuln.id,
+                    "passed": False,
+                    "reason": "retest inconclusive",
+                    "retest_issues": inconclusive_retests,
+                })
+                all_ok = False
+            elif step_still_works:
                 results.append({
                     "vuln": vuln.id,
                     "passed": False,
