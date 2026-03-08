@@ -11,7 +11,7 @@ import logging
 import re
 
 from open_range.protocols import CheckResult, ContainerSet, ExploitStep, SnapshotSpec
-from open_range.validator._golden_path import execute_step
+from open_range.validator._golden_path import execute_step_result
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,6 @@ _CMD_PREFIXES = (
     "patch", "iptables", "mysql", "docker",
 )
 _CMD_OPERATORS_RE = re.compile(r"[|>&]|&&")
-_EXIT_STATUS_SENTINEL = "__OPENRANGE_EXIT_STATUS__="
 
 
 def _looks_executable(remediation: str) -> bool:
@@ -81,39 +80,6 @@ def _longest_common_substring(a: str, b: str) -> int:
     return max_len
 
 
-def _wrap_with_exit_status(command: str) -> str:
-    """Wrap *command* so stdout includes an explicit exit status sentinel."""
-    return (
-        f"set +e; {command}; "
-        "__openrange_rc=$?; "
-        f"printf '\\n{_EXIT_STATUS_SENTINEL}%s\\n' \"$__openrange_rc\""
-    )
-
-
-def _split_output_and_exit_status(output: str) -> tuple[str, int | None]:
-    """Return ``(stdout_without_sentinel, exit_code_or_none)``."""
-    marker = output.rfind(_EXIT_STATUS_SENTINEL)
-    if marker == -1:
-        return output, None
-
-    body = output[:marker].rstrip()
-    raw_code = output[marker + len(_EXIT_STATUS_SENTINEL):].strip().splitlines()[0]
-    try:
-        return body, int(raw_code)
-    except ValueError:
-        return body, None
-
-
-async def _exec_with_exit_status(
-    containers: ContainerSet,
-    host: str,
-    command: str,
-) -> tuple[str, int | None]:
-    """Execute *command* and parse explicit status from command output."""
-    raw_output = await containers.exec(host, _wrap_with_exit_status(command))
-    return _split_output_and_exit_status(raw_output)
-
-
 class PatchabilityCheck:
     """Inverse mutation: patching a vuln must break the corresponding golden-path step."""
 
@@ -160,11 +126,7 @@ class PatchabilityCheck:
 
             # --- Apply remediation -------------------------------------------------
             try:
-                remediation_output, remediation_code = await _exec_with_exit_status(
-                    containers,
-                    host,
-                    vuln.remediation,
-                )
+                remediation_result = await containers.exec_run(host, vuln.remediation)
             except Exception as exc:  # noqa: BLE001
                 results.append({"vuln": vuln.id, "error": f"remediation failed: {exc}"})
                 all_ok = False
@@ -174,27 +136,15 @@ class PatchabilityCheck:
                 except Exception:  # noqa: BLE001
                     pass
                 continue
-
-            if remediation_code is None:
+            if remediation_result.exit_code != 0:
                 results.append({
                     "vuln": vuln.id,
                     "passed": False,
-                    "reason": "remediation inconclusive (missing exit status signal)",
-                    "got_snippet": remediation_output[:200],
-                })
-                all_ok = False
-                try:
-                    await containers.restart(host)
-                except Exception:  # noqa: BLE001
-                    pass
-                continue
-
-            if remediation_code != 0:
-                results.append({
-                    "vuln": vuln.id,
-                    "passed": False,
-                    "reason": f"remediation failed (exit {remediation_code})",
-                    "got_snippet": remediation_output[:200],
+                    "reason": (
+                        "remediation command failed "
+                        f"(exit_code={remediation_result.exit_code})"
+                    ),
+                    "output_snippet": remediation_result.combined_output[:300],
                 })
                 all_ok = False
                 try:
@@ -205,55 +155,40 @@ class PatchabilityCheck:
 
             # --- Re-run linked golden-path step — must now fail --------------------
             step_still_works = False
+            inconclusive_details: list[dict[str, object]] = []
             matched_any = False
-            inconclusive_retests: list[dict[str, str]] = []
             for chain_step in linked_steps:
                 gp_step = _find_golden_step(snapshot, chain_step)
                 if gp_step is None:
                     continue
                 matched_any = True
                 if not gp_step.expect_in_stdout:
-                    inconclusive_retests.append({
-                        "step": str(gp_step.step),
-                        "reason": "missing expect_in_stdout",
+                    inconclusive_details.append({
+                        "step": gp_step.step,
+                        "reason": "missing expect_in_stdout for retest step",
                     })
                     continue
                 try:
-                    cmd_name = gp_step.command.strip().split()[0] if gp_step.command.strip() else ""
-                    if cmd_name in {"submit_flag", "submit_evidence", "submit_finding", "auth", "logout"}:
-                        output = await execute_step(
-                            snapshot,
-                            containers,
-                            gp_step.command,
-                            host=getattr(gp_step, "host", None) or "attacker",
-                        )
-                        retest_code = 0
-                    else:
-                        output, retest_code = await _exec_with_exit_status(
-                            containers,
-                            getattr(gp_step, "host", None) or "attacker",
-                            gp_step.command,
-                        )
-                        if retest_code is None:
-                            inconclusive_retests.append({
-                                "step": str(gp_step.step),
-                                "reason": "missing exit status signal",
-                            })
-                            continue
-                        if retest_code != 0:
-                            inconclusive_retests.append({
-                                "step": str(gp_step.step),
-                                "reason": f"non-zero exit ({retest_code})",
-                            })
-                            continue
+                    result = await execute_step_result(
+                        snapshot,
+                        containers,
+                        gp_step.command,
+                        host=getattr(gp_step, "host", None) or "attacker",
+                    )
                 except Exception as exc:  # noqa: BLE001
-                    inconclusive_retests.append({
-                        "step": str(gp_step.step),
-                        "reason": f"execution error: {exc}",
+                    inconclusive_details.append({
+                        "step": gp_step.step,
+                        "reason": f"retest execution raised: {exc}",
                     })
                     continue
-
-                if gp_step.expect_in_stdout in output:
+                if result.exit_code != 0:
+                    inconclusive_details.append({
+                        "step": gp_step.step,
+                        "reason": f"retest command failed (exit_code={result.exit_code})",
+                        "output_snippet": result.combined_output[:300],
+                    })
+                    continue
+                if gp_step.expect_in_stdout in result.combined_output:
                     step_still_works = True
 
             if not matched_any:
@@ -270,12 +205,12 @@ class PatchabilityCheck:
 
             tested_count += 1
 
-            if inconclusive_retests:
+            if inconclusive_details:
                 results.append({
                     "vuln": vuln.id,
                     "passed": False,
-                    "reason": "retest inconclusive",
-                    "retest_issues": inconclusive_retests,
+                    "reason": "retest inconclusive after remediation",
+                    "details": inconclusive_details,
                 })
                 all_ok = False
             elif step_still_works:

@@ -336,6 +336,7 @@ async def test_exploitability_skips_meta_commands(mock_containers):
     assert result.details["skipped_steps"] == [2]
 
 
+@pytest.mark.asyncio
 async def test_exploitability_fails_when_expectation_missing_in_strict_mode(mock_containers):
     from open_range.validator.exploitability import ExploitabilityCheck
 
@@ -371,14 +372,26 @@ async def test_exploitability_allows_missing_expectation_in_lenient_mode(mock_co
     assert result.details["unvalidated_steps"] == [1]
 
 
+@pytest.mark.asyncio
+async def test_exploitability_fails_on_nonzero_exit_even_with_expected_output(mock_containers):
+    from open_range.validator.exploitability import ExploitabilityCheck
+
+    spec = SnapshotSpec(
+        golden_path=[
+            GoldenPathStep(step=1, command="curl http://web/", expect_in_stdout="Welcome"),
+        ],
+    )
+    mock_containers.exec_results[("attacker", "curl http://web/")] = "Welcome"
+    mock_containers.exec_status[("attacker", "curl http://web/")] = 7
+
+    result = await ExploitabilityCheck().check(spec, mock_containers)
+    assert result.passed is False
+    assert result.details["failed_steps"][0]["error"] == "command failed with exit_code=7"
+
+
 # ---------------------------------------------------------------------------
 # Check 3: Patchability
 # ---------------------------------------------------------------------------
-
-
-def _with_exit_status(stdout: str = "", code: int = 0) -> str:
-    """Mock wrapped command output returned by PatchabilityCheck shell wrapper."""
-    return f"{stdout}\n__OPENRANGE_EXIT_STATUS__={code}\n"
 
 
 @pytest.mark.asyncio
@@ -419,10 +432,10 @@ async def test_patchability_passes_when_patch_breaks_exploit(mock_containers):
         ],
     )
 
-    # Remediation exec succeeds (returns empty, exit 0)
-    mock_containers.exec_results[("web", "sed")] = _with_exit_status("")
+    # Remediation exec succeeds (exit 0 by default)
+    mock_containers.exec_results[("web", "sed")] = ""
     # After patch, golden path step returns DIFFERENT output (no SECRET_DATA)
-    mock_containers.exec_results[("attacker", "curl http://web/search?q=exploit")] = _with_exit_status("no results")
+    mock_containers.exec_results[("attacker", "curl http://web/search?q=exploit")] = "no results"
 
     result = await PatchabilityCheck().check(spec, mock_containers)
     assert result.passed is True
@@ -459,9 +472,9 @@ async def test_patchability_fails_when_exploit_still_works(mock_containers):
     )
 
     # Remediation exec succeeds
-    mock_containers.exec_results[("web", "sed")] = _with_exit_status("")
+    mock_containers.exec_results[("web", "sed")] = ""
     # After patch, golden path step STILL returns the expected output (patch didn't work)
-    mock_containers.exec_results[("attacker", "curl http://web/search?q=exploit")] = _with_exit_status("SECRET_DATA")
+    mock_containers.exec_results[("attacker", "curl http://web/search?q=exploit")] = "SECRET_DATA"
 
     result = await PatchabilityCheck().check(spec, mock_containers)
     assert result.passed is False
@@ -469,8 +482,45 @@ async def test_patchability_fails_when_exploit_still_works(mock_containers):
 
 
 @pytest.mark.asyncio
-async def test_patchability_fails_when_remediation_exits_nonzero(mock_containers):
-    """Non-zero remediation exit must fail instead of counting as patched."""
+async def test_patchability_fails_when_remediation_command_exits_nonzero(mock_containers):
+    from open_range.protocols import ExploitStep
+    from open_range.validator.patchability import PatchabilityCheck
+
+    spec = SnapshotSpec(
+        truth_graph=TruthGraph(
+            vulns=[
+                Vulnerability(
+                    id="v1",
+                    type="sqli",
+                    host="web",
+                    remediation="sed -i 's/unsafe/safe/' /var/www/app.php",
+                ),
+            ],
+            exploit_chain=[
+                ExploitStep(vuln_id="v1", command="curl http://web/search?q=exploit"),
+            ],
+        ),
+        golden_path=[
+            GoldenPathStep(
+                step=1,
+                command="curl http://web/search?q=exploit",
+                expect_in_stdout="SECRET_DATA",
+            ),
+        ],
+    )
+    mock_containers.exec_results[("web", "sed")] = "sed: cannot read /var/www/app.php"
+    mock_containers.exec_status[("web", "sed")] = 2
+
+    result = await PatchabilityCheck().check(spec, mock_containers)
+    assert result.passed is False
+    first = result.details["vuln_results"][0]
+    assert first["passed"] is False
+    assert "remediation command failed" in first["reason"]
+    assert mock_containers.restarted == ["web"]
+
+
+@pytest.mark.asyncio
+async def test_patchability_fails_when_retest_command_is_inconclusive(mock_containers):
     from open_range.protocols import ExploitStep
     from open_range.validator.patchability import PatchabilityCheck
 
@@ -497,20 +547,22 @@ async def test_patchability_fails_when_remediation_exits_nonzero(mock_containers
         ],
     )
 
-    mock_containers.exec_results[("web", "sed")] = _with_exit_status("sed: no such file", 1)
+    mock_containers.exec_results[("web", "sed")] = ""
+    mock_containers.exec_results[("attacker", "curl http://web/search?q=exploit")] = "curl: (7) failed to connect"
+    mock_containers.exec_status[("attacker", "curl http://web/search?q=exploit")] = 7
 
     result = await PatchabilityCheck().check(spec, mock_containers)
     assert result.passed is False
     vuln_result = result.details["vuln_results"][0]
     assert vuln_result["passed"] is False
-    assert "remediation failed (exit 1)" in vuln_result["reason"]
+    assert vuln_result["reason"] == "retest inconclusive after remediation"
+    assert "retest command failed (exit_code=7)" in vuln_result["details"][0]["reason"]
     assert mock_containers.restarted == ["web"]
 
 
 @pytest.mark.asyncio
 async def test_patchability_fails_when_retest_execution_is_inconclusive(mock_containers):
-    """Retest execution errors are inconclusive and must fail the check."""
-    from open_range.protocols import ExploitStep
+    from open_range.protocols import ExecResult, ExploitStep
     from open_range.validator.patchability import PatchabilityCheck
 
     spec = SnapshotSpec(
@@ -536,20 +588,20 @@ async def test_patchability_fails_when_retest_execution_is_inconclusive(mock_con
         ],
     )
 
-    async def exec_side_effect(container: str, cmd: str, **kwargs) -> str:
+    async def exec_run_side_effect(container: str, cmd: str, **kwargs):
         if container == "web" and "sed -i 's/unsafe/safe/' /var/www/app.php" in cmd:
-            return _with_exit_status("")
+            return ExecResult(stdout="", exit_code=0)
         if container == "attacker" and "curl http://web/search?q=exploit" in cmd:
             raise RuntimeError("timeout")
-        return ""
+        return ExecResult(stdout="", exit_code=0)
 
-    mock_containers.exec = exec_side_effect
+    mock_containers.exec_run = exec_run_side_effect
     result = await PatchabilityCheck().check(spec, mock_containers)
     assert result.passed is False
     vuln_result = result.details["vuln_results"][0]
     assert vuln_result["passed"] is False
-    assert vuln_result["reason"] == "retest inconclusive"
-    assert vuln_result["retest_issues"][0]["reason"] == "execution error: timeout"
+    assert vuln_result["reason"] == "retest inconclusive after remediation"
+    assert vuln_result["details"][0]["reason"] == "retest execution raised: timeout"
     assert mock_containers.restarted == ["web"]
 
 
@@ -671,11 +723,11 @@ async def test_patchability_restarts_container_after_patch(mock_containers):
     )
 
     # Remediation succeeds for both
-    mock_containers.exec_results[("web", "sed")] = _with_exit_status("")
-    mock_containers.exec_results[("web", "rm")] = _with_exit_status("")
+    mock_containers.exec_results[("web", "sed")] = ""
+    mock_containers.exec_results[("web", "rm")] = ""
     # After patch, exploits fail (return empty)
-    mock_containers.exec_results[("attacker", "curl http://web/search")] = _with_exit_status("blocked")
-    mock_containers.exec_results[("attacker", "curl http://web/read")] = _with_exit_status("forbidden")
+    mock_containers.exec_results[("attacker", "curl http://web/search")] = "blocked"
+    mock_containers.exec_results[("attacker", "curl http://web/read")] = "forbidden"
 
     result = await PatchabilityCheck().check(spec, mock_containers)
     assert result.passed is True
@@ -722,13 +774,14 @@ async def test_evidence_fails_when_grep_returns_error_text(mock_containers):
         ]
     )
     mock_containers.exec_results[("siem", "grep")] = "grep: /var/log/missing.log: No such file or directory"
+    mock_containers.exec_status[("siem", "grep")] = 2
     result = await EvidenceCheck().check(spec, mock_containers)
     assert result.passed is False
     assert "No such file or directory" in result.details["missing"][0]["error"]
 
 
 @pytest.mark.asyncio
-async def test_evidence_fails_on_nonzero_exit_marker_even_when_output_present(mock_containers):
+async def test_evidence_fails_on_nonzero_exit_even_when_output_present(mock_containers):
     from open_range.validator.evidence import EvidenceCheck
 
     spec = SnapshotSpec(
@@ -736,7 +789,7 @@ async def test_evidence_fails_on_nonzero_exit_marker_even_when_output_present(mo
             EvidenceItem(type="artifact", location="siem:/var/log/test.log"),
         ]
     )
-    mock_containers.exec_results[("siem", "test -f")] = "exists\n__OPENRANGE_RC__:1"
+    mock_containers.exec_status[("siem", "test -f")] = 1
     result = await EvidenceCheck().check(spec, mock_containers)
     assert result.passed is False
     assert result.details["missing"][0]["location"] == "siem:/var/log/test.log"
@@ -832,9 +885,14 @@ async def test_reward_grounding_quotes_filesystem_path():
         def __init__(self):
             self.calls: list[tuple[str, str]] = []
 
-        async def exec(self, container: str, cmd: str, **kwargs) -> str:
+        async def exec_run(self, container: str, cmd: str, **kwargs):
+            from open_range.protocols import ExecResult
+
             self.calls.append((container, cmd))
-            return "FLAG{abc}"
+            return ExecResult(stdout="FLAG{abc}", exit_code=0)
+
+        async def exec(self, container: str, cmd: str, **kwargs) -> str:
+            return (await self.exec_run(container, cmd, **kwargs)).combined_output
 
     containers = RecordingContainers()
     spec = SnapshotSpec(
@@ -855,9 +913,14 @@ async def test_reward_grounding_rejects_invalid_db_identifier_path():
         def __init__(self):
             self.calls: list[tuple[str, str]] = []
 
-        async def exec(self, container: str, cmd: str, **kwargs) -> str:
+        async def exec_run(self, container: str, cmd: str, **kwargs):
+            from open_range.protocols import ExecResult
+
             self.calls.append((container, cmd))
-            return "FLAG{abc}"
+            return ExecResult(stdout="FLAG{abc}", exit_code=0)
+
+        async def exec(self, container: str, cmd: str, **kwargs) -> str:
+            return (await self.exec_run(container, cmd, **kwargs)).combined_output
 
     containers = RecordingContainers()
     spec = SnapshotSpec(
@@ -887,9 +950,14 @@ async def test_reward_grounding_quotes_mysql_password_from_snapshot():
         def __init__(self):
             self.calls: list[tuple[str, str]] = []
 
-        async def exec(self, container: str, cmd: str, **kwargs) -> str:
+        async def exec_run(self, container: str, cmd: str, **kwargs):
+            from open_range.protocols import ExecResult
+
             self.calls.append((container, cmd))
-            return "FLAG{abc}"
+            return ExecResult(stdout="FLAG{abc}", exit_code=0)
+
+        async def exec(self, container: str, cmd: str, **kwargs) -> str:
+            return (await self.exec_run(container, cmd, **kwargs)).combined_output
 
     containers = RecordingContainers()
     password = "pa ss;$(id)"
