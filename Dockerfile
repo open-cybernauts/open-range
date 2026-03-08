@@ -59,8 +59,8 @@ WORKDIR /app
 COPY . /app/env
 WORKDIR /app/env
 
+ENV UV_PROJECT_ENVIRONMENT=/app/.venv
 RUN uv venv --python python3.11 /app/.venv \
-    && . /app/.venv/bin/activate \
     && if [ -f uv.lock ]; then \
         uv sync --frozen --no-editable; \
     else \
