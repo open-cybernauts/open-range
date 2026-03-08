@@ -500,25 +500,33 @@ Respond with a single shell command to execute. No explanation needed.
 
 ### SFT Data Generation (Implemented)
 
-Run episodes with frontier models to generate expert trajectories. The `TrajectoryLogger` (in `src/open_range/training/trajectory.py`) records turns and exports JSONL in OpenAI chat format.
+For synthetic warm-start data, prefer `SyntheticTraceGenerator` in `src/open_range/training/synthetic.py`. It keeps the data path aligned with OpenRange snapshots and rewards, but replaces Docker execution with a fast simulator so you can cheaply collect teacher trajectories.
 
 ```python
-from open_range.training.trajectory import TrajectoryLogger
+from open_range.training import SyntheticTraceGenerator, build_teacher_agents
 
-red = LLMRangeAgent(model="anthropic/claude-sonnet-4-20250514")
-blue = LLMRangeAgent(model="openai/gpt-4o")
+red, blue = build_teacher_agents(
+    teacher_model="azure/gpt-5.2-codex",
+    roles=("red",),
+)
 
-logger = TrajectoryLogger()
-for i in range(100):
-    logger.start_episode(f"ep-{i:03d}", snapshot_id="snap-001", tier=1)
-    result = run_episode(env, red, blue)
-    # log_turn() for each step, then:
-    logger.end_episode(outcome=result.outcome, metrics={"steps": result.steps})
+generator = SyntheticTraceGenerator.from_manifest(
+    manifest=tier1_manifest,
+    red_agent=red,
+    blue_agent=blue,
+    template_only=True,
+    max_steps=8,
+)
 
-# Export as SFT JSONL -- each role is a separate training example
-# Only episodes above reward_threshold are included
-lines = logger.export_jsonl("sft_data.jsonl", reward_threshold=0.5)
+logger, lines = generator.export_jsonl(
+    "sft_data.jsonl",
+    num_traces=100,
+    reward_threshold=0.0,
+    roles=("red",),
+)
 ```
+
+For live Docker episodes or custom rollout loops, `TrajectoryLogger` still remains the low-level recorder and JSONL exporter.
 
 ### Asymmetric GRPO (Planned)
 

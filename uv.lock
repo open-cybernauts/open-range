@@ -1950,6 +1950,9 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
+synthetic = [
+    { name = "litellm" },
+]
 training = [
     { name = "trl" },
     { name = "unsloth" },
@@ -1963,6 +1966,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "jinja2", specifier = ">=3.1" },
     { name = "litellm", marker = "extra == 'builder'", specifier = ">=1.30" },
+    { name = "litellm", marker = "extra == 'synthetic'", specifier = ">=1.30" },
     { name = "openenv-core", extras = ["core"], specifier = ">=0.2.1" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
@@ -1972,7 +1976,7 @@ requires-dist = [
     { name = "unsloth", marker = "extra == 'training'" },
     { name = "uvicorn", specifier = ">=0.24.0" },
 ]
-provides-extras = ["dev", "training", "builder"]
+provides-extras = ["dev", "training", "builder", "synthetic"]
 
 [[package]]
 name = "opentelemetry-api"

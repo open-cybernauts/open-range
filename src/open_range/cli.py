@@ -105,6 +105,23 @@ def _write_snapshot(spec: "SnapshotSpec", output_dir: Path) -> Path:
     return dest
 
 
+def _parse_roles(raw: str) -> tuple[str, ...]:
+    """Parse a comma-separated role list."""
+    roles = tuple(dict.fromkeys(part.strip().lower() for part in raw.split(",") if part.strip()))
+    valid = {"red", "blue"}
+    invalid = [role for role in roles if role not in valid]
+    if invalid:
+        click.echo(
+            f"Error: invalid roles: {', '.join(invalid)}. Expected comma-separated values from: red, blue.",
+            err=True,
+        )
+        sys.exit(1)
+    if not roles:
+        click.echo("Error: at least one role must be selected.", err=True)
+        sys.exit(1)
+    return roles
+
+
 # ---------------------------------------------------------------------------
 # CLI group
 # ---------------------------------------------------------------------------
@@ -183,6 +200,127 @@ def build(
     click.echo(f"  Golden path steps: {n_steps}")
     click.echo(f"  Flags: {n_flags}")
     click.echo(f"  Elapsed: {elapsed:.1f}s")
+
+
+# ---------------------------------------------------------------------------
+# synthetic-data
+# ---------------------------------------------------------------------------
+
+
+@cli.command("synthetic-data")
+@click.option("-o", "--output", required=True, type=click.Path(), help="Output JSONL path for synthetic trajectories.")
+@click.option("-m", "--manifest", default=None, type=click.Path(exists=True), help="Path to manifest YAML.")
+@click.option("-s", "--snapshot", default=None, type=click.Path(exists=True), help="Path to snapshot JSON.")
+@click.option("--num-traces", default=10, type=click.IntRange(1), help="Number of synthetic episodes to generate.")
+@click.option("--seed", default=None, type=int, help="Base random seed for reproducibility.")
+@click.option("--tier", default=1, type=click.IntRange(1, 5), help="Tier level 1-5 when building from a manifest.")
+@click.option("--max-steps", default=12, type=click.IntRange(1), help="Maximum red/blue turns per episode.")
+@click.option("--roles", default="red", help="Comma-separated teacher/export roles: red, blue.")
+@click.option("--reward-threshold", default=0.0, type=float, help="Minimum total role reward required for export.")
+@click.option("--teacher-model", default=None, help="LiteLLM teacher model. If omitted, selected roles use scripted agents.")
+@click.option("--red-model", default=None, help="Override model for Red teacher.")
+@click.option("--blue-model", default=None, help="Override model for Blue teacher.")
+@click.option("--temperature", default=0.2, type=float, help="Teacher sampling temperature.")
+@click.option("--max-tokens", default=512, type=int, help="Maximum completion tokens per teacher action.")
+@click.option("--template-only/--llm-builder", default=True, help="When using --manifest, build snapshots deterministically instead of via LLM.")
+@click.option("--builder-model", default=None, help="LLM builder model when using --llm-builder.")
+@click.option("--randomize-flags/--static-flags", default=True, help="Randomize flag values per synthetic episode.")
+def synthetic_data(
+    output: str,
+    manifest: str | None,
+    snapshot: str | None,
+    num_traces: int,
+    seed: int | None,
+    tier: int,
+    max_steps: int,
+    roles: str,
+    reward_threshold: float,
+    teacher_model: str | None,
+    red_model: str | None,
+    blue_model: str | None,
+    temperature: float,
+    max_tokens: int,
+    template_only: bool,
+    builder_model: str | None,
+    randomize_flags: bool,
+) -> None:
+    """Generate snapshot-grounded synthetic SFT trajectories."""
+    from open_range.training.synthetic import (
+        SyntheticTraceGenerator,
+        build_teacher_agents,
+    )
+
+    if bool(manifest) == bool(snapshot):
+        click.echo("Error: provide exactly one of --manifest or --snapshot.", err=True)
+        sys.exit(1)
+
+    selected_roles = _parse_roles(roles)
+    resolved_teacher_model = (
+        teacher_model
+        or os.environ.get("OPENRANGE_SYNTH_MODEL")
+    )
+    red_agent, blue_agent = build_teacher_agents(
+        teacher_model=resolved_teacher_model,
+        roles=selected_roles,
+        red_model=red_model,
+        blue_model=blue_model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+    if snapshot:
+        source_label = f"snapshot={snapshot}"
+        generator = SyntheticTraceGenerator(
+            snapshot=_load_snapshot(snapshot),
+            red_agent=red_agent,
+            blue_agent=blue_agent,
+            tier=tier,
+            max_steps=max_steps,
+            randomize_flags=randomize_flags,
+        )
+    else:
+        source_label = f"manifest={manifest}"
+        generator = SyntheticTraceGenerator.from_manifest(
+            _load_manifest(str(manifest)),
+            red_agent=red_agent,
+            blue_agent=blue_agent,
+            template_only=template_only,
+            builder_model=builder_model,
+            tier=tier,
+            max_steps=max_steps,
+            randomize_flags=randomize_flags,
+        )
+
+    teacher_roles = []
+    if selected_roles:
+        if red_model or resolved_teacher_model:
+            if "red" in selected_roles:
+                teacher_roles.append("red")
+        if blue_model or resolved_teacher_model:
+            if "blue" in selected_roles:
+                teacher_roles.append("blue")
+
+    click.echo(f"Generating synthetic traces from {source_label} ...")
+    click.echo(f"  Roles: {', '.join(selected_roles)}")
+    click.echo(
+        "  Teacher roles: "
+        + (", ".join(teacher_roles) if teacher_roles else "none (scripted fallbacks)")
+    )
+    try:
+        logger, count = generator.export_jsonl(
+            output,
+            num_traces=num_traces,
+            seed=seed,
+            reward_threshold=reward_threshold,
+            roles=selected_roles,
+        )
+    except Exception as exc:
+        click.echo(f"Error: synthetic data generation failed: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Wrote {count} JSONL records to {output}")
+    click.echo(f"  Episodes: {len(logger.episodes)}")
+    click.echo(f"  Randomized flags: {'yes' if randomize_flags else 'no'}")
 
 
 # ---------------------------------------------------------------------------

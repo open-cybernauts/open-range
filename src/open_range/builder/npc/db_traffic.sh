@@ -15,16 +15,18 @@ RATE_LAMBDA="${RATE_LAMBDA:-20}"
 
 INTERVAL=$(awk "BEGIN {printf \"%.1f\", 60.0 / $RATE_LAMBDA}")
 
+DB_NAME="referral_db"
+
 # Application-level queries that a normal app would run
 QUERIES=(
-    "SELECT id, username FROM app.users LIMIT 5"
-    "SELECT name, price FROM app.products ORDER BY RAND() LIMIT 3"
-    "SELECT COUNT(*) FROM app.sessions WHERE active=1"
-    "INSERT INTO app.access_log (user_id, page, ts) VALUES (1, '/dashboard', NOW())"
-    "SELECT * FROM app.products WHERE category='electronics'"
-    "UPDATE app.sessions SET last_seen=NOW() WHERE user_id=1"
-    "SELECT username, last_login FROM app.users WHERE last_login > DATE_SUB(NOW(), INTERVAL 1 HOUR)"
-    "SELECT page, COUNT(*) AS hits FROM app.access_log GROUP BY page ORDER BY hits DESC LIMIT 5"
+    "SELECT id, first_name, last_name FROM ${DB_NAME}.patients LIMIT 5"
+    "SELECT id, status, specialist FROM ${DB_NAME}.patient_referrals ORDER BY created_at DESC LIMIT 3"
+    "SELECT COUNT(*) FROM ${DB_NAME}.patient_referrals WHERE status='Pending'"
+    "SELECT id, amount_due, status FROM ${DB_NAME}.billing WHERE status='Open'"
+    "SELECT username, role, department FROM ${DB_NAME}.users LIMIT 10"
+    "UPDATE ${DB_NAME}.billing SET last_updated=CURDATE() WHERE id=5001"
+    "SELECT p.first_name, p.last_name, r.status FROM ${DB_NAME}.patients p JOIN ${DB_NAME}.patient_referrals r ON p.id=r.patient_id LIMIT 5"
+    "INSERT INTO ${DB_NAME}.access_log (user_id, action, ip) VALUES (3, 'view_referrals', '10.0.1.10')"
 )
 
 # App database credentials (non-privileged)

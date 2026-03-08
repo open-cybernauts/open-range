@@ -50,12 +50,21 @@ uv sync
 # Optional: enable the LiteLLM-backed builder pipeline
 uv sync --extra builder
 
+# Optional: enable LiteLLM-backed synthetic teacher agents
+uv sync --extra synthetic
+
 # Optional: enable background refill inside the server
 export OPENRANGE_ENABLE_MANAGED_REFILL=1
 export OPENRANGE_RUNTIME_BUILDER=llm
 
 # End-to-end demo (no Docker, no LLM)
 uv run python examples/demo.py
+
+# Generate synthetic SFT traces from a snapshot or manifest
+uv run openrange synthetic-data \
+  --manifest manifests/tier1_basic.yaml \
+  --output data/sft_red.jsonl \
+  --roles red
 
 # Run the OpenEnv client against a running server
 uv run python examples/remote_client_demo.py --base-url http://localhost:8000
@@ -97,6 +106,8 @@ The deployed package exposes the standard OpenEnv `reset()`, `step()`, and `stat
 
 **Agents** — Structural protocol: any object with `reset(briefing, role)` and `act(observation) -> command` works. Ships with `LLMRangeAgent` (litellm, any provider), `ScriptedAgent`, and `HumanAgent`.
 
+**Synthetic Data** — `open_range.training.synthetic` provides snapshot-grounded trajectory generation for SFT warm-start. It uses a fast simulated `RangeEnvironment`, optional LiteLLM teacher agents, per-episode flag randomization, and exports JSONL through `TrajectoryLogger`.
+
 ```python
 from open_range.agents.episode import run_episode
 from open_range.agents.llm_agent import LLMRangeAgent
@@ -136,6 +147,7 @@ Compatible with `openenv` when installed; standalone FastAPI fallback otherwise.
 - [Architecture](docs/architecture.md) — full pipeline, network topology, episode lifecycle
 - [Builder & Validator](docs/builder-validator.md) — snapshot generation and admission
 - [Red & Blue Agents](docs/red-blue-agents.md) — tandem training, reward coupling, curriculum
+- [Synthetic Data](docs/synthetic-data.md) — snapshot-backed SFT trace generation with LiteLLM teachers
 - [Agent Protocols](docs/agent-protocols.md) — agent interface, episode runner, evaluation
 - [OpenEnv Compliance](docs/openenv-compliance.md) — API contract, models, deployment
 

@@ -130,7 +130,18 @@ class Episode:
     def to_jsonl_record(self, role: str) -> dict[str, Any]:
         """Build a single JSONL record for the given role."""
         reward = self.total_red_reward if role == "red" else self.total_blue_reward
-        return {
+        metadata = {
+            "source": self.metrics.get("source", "open_range.synthetic"),
+            "success": self.outcome == ("flag_captured" if role == "red" else "blue_defended"),
+            "snapshot_id": self.snapshot_id,
+            "tier": self.tier,
+            "role": role,
+        }
+        extra_metadata = self.metrics.get("metadata")
+        if isinstance(extra_metadata, dict):
+            metadata.update(extra_metadata)
+
+        record = {
             "episode_id": self.episode_id,
             "snapshot_id": self.snapshot_id,
             "tier": self.tier,
@@ -138,7 +149,15 @@ class Episode:
             "messages": self.to_chat_messages(role),
             "reward": round(reward, 4),
             "outcome": self.outcome,
+            "metadata": metadata,
         }
+        ground_truth_flags = self.metrics.get("ground_truth_flags")
+        if isinstance(ground_truth_flags, list):
+            record["ground_truth_flag"] = ground_truth_flags[0] if ground_truth_flags else None
+        else:
+            record["ground_truth_flag"] = None
+        record["optimal_steps"] = self.metrics.get("optimal_steps")
+        return record
 
 
 # ---------------------------------------------------------------------------
@@ -285,28 +304,35 @@ class TrajectoryLogger:
         Returns:
             Number of JSONL lines written.
         """
+        records = self.to_records(reward_threshold=reward_threshold, roles=roles)
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        count = 0
         with open(path, "w") as f:
-            for episode in self._episodes:
-                for role in roles:
-                    # Check if this role had any turns
-                    role_turns = [t for t in episode.turns if t.role == role]
-                    if not role_turns:
-                        continue
+            for record in records:
+                f.write(json.dumps(record) + "\n")
 
-                    # Filter by reward threshold
-                    total_reward = sum(t.reward for t in role_turns)
-                    if total_reward < reward_threshold:
-                        continue
+        return len(records)
 
-                    record = episode.to_jsonl_record(role)
-                    f.write(json.dumps(record) + "\n")
-                    count += 1
+    def to_records(
+        self,
+        reward_threshold: float = 0.0,
+        roles: tuple[str, ...] = ("red", "blue"),
+    ) -> list[dict[str, Any]]:
+        """Return JSONL-ready records without writing them to disk."""
+        records: list[dict[str, Any]] = []
+        for episode in self._episodes:
+            for role in roles:
+                role_turns = [t for t in episode.turns if t.role == role]
+                if not role_turns:
+                    continue
 
-        return count
+                total_reward = sum(t.reward for t in role_turns)
+                if total_reward < reward_threshold:
+                    continue
+
+                records.append(episode.to_jsonl_record(role))
+        return records
 
     def clear(self) -> None:
         """Remove all recorded episodes."""

@@ -23,6 +23,7 @@ dependencies = [
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx>=0.27"]
 training = ["trl>=0.8", "unsloth"]
 builder = ["litellm>=1.30"]
+synthetic = ["litellm>=1.30"]
 
 [project.scripts]
 openrange = "open_range.cli:cli"
@@ -45,3 +46,6 @@ package-data = { "open_range" = ["**/*.yaml", "**/*.yml"] }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "live_model: runs live LiteLLM model smoke tests",
+]

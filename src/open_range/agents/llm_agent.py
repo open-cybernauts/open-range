@@ -32,7 +32,7 @@ class LLMRangeAgent:
     def __init__(
         self,
         model: str = "anthropic/claude-sonnet-4-20250514",
-        temperature: float = 0.3,
+        temperature: float | None = 0.3,
         max_tokens: int = 512,
         **litellm_kwargs: Any,
     ) -> None:
@@ -67,13 +67,18 @@ class LLMRangeAgent:
         if self.messages and self.messages[-1]["role"] != "user":
             self.messages.append({"role": "user", "content": observation_text})
 
-        response = litellm.completion(
-            model=self.model,
-            messages=self.messages,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": self.messages,
+            "max_tokens": self.max_tokens,
+            "drop_params": True,
             **self.litellm_kwargs,
-        )
+        }
+        # Codex deployments commonly reject temperature; omit it when unsupported.
+        if self.temperature is not None and "codex" not in self.model.lower():
+            kwargs["temperature"] = self.temperature
+
+        response = litellm.completion(**kwargs)
         text = response.choices[0].message.content.strip()
         self.messages.append({"role": "assistant", "content": text})
 

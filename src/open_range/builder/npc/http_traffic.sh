@@ -20,23 +20,22 @@ INTERVAL=$(awk "BEGIN {printf \"%.1f\", 60.0 / $RATE_LAMBDA}")
 PAGES=(
     "/"
     "/index.php"
-    "/about"
-    "/products"
-    "/contact"
-    "/login"
-    "/api/users/1/profile"
-    "/search?q=quarterly+report"
-    "/search?q=product+catalog"
-    "/download?file=report.pdf"
-    "/dashboard"
-    "/help"
+    "/dashboard.php"
+    "/lookup.php?last=Smith"
+    "/lookup.php?last=Hart"
+    "/lookup.php?last=Bishop"
+    "/referral_submit.php"
+    "/api/referral_status.php?id=1001"
+    "/api/referral_status.php?id=1002"
+    "/admin/compliance_report.php"
+    "/logout.php"
 )
 
 # Common form submissions
 FORMS=(
-    "-d 'username=jsmith&password=Welcome1' http://${WEB_HOST}/login"
-    "-d 'q=marketing+materials' http://${WEB_HOST}/search"
-    "-d 'name=Janet&email=jsmith@acmecorp.local&message=Hello' http://${WEB_HOST}/contact"
+    "-d 'username=mgarcia&password=Welcome2024!' http://${WEB_HOST}/index.php"
+    "-d 'username=kwilliams&password=Welcome2024!' http://${WEB_HOST}/index.php"
+    "-d 'patient_id=1&clinic=Northside&specialist=Dr.Patel&diagnosis=Cardiology' http://${WEB_HOST}/referral_submit.php"
 )
 
 echo "[NPC-HTTP] Starting HTTP traffic to ${WEB_HOST} at ${RATE_LAMBDA} req/min"
