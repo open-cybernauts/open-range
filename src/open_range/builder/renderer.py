@@ -474,7 +474,9 @@ class KindRenderer:
             host_os = str(raw_host.get("os", "")).strip().lower()
 
         if name == "attacker" or "kali" in host_os:
-            return _KALI_IMAGE
+            # Use ubuntu instead of kali — kali's apt takes 5+ minutes
+            # in ephemeral pods.  Tools are installed via startup command.
+            return _GENERIC_LINUX_IMAGE
         if "mysql" in service_set or name == "db":
             return _MYSQL_IMAGE
         if "postgresql" in service_set:
