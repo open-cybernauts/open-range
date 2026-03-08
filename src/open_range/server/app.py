@@ -60,7 +60,9 @@ def create_app() -> FastAPI:
     if openenv_server is not None:
         fastapp.state.openenv_server = openenv_server
 
-    # Mount custom Gradio dashboard at /web if gradio is available
+    # Mount custom Gradio dashboard at /dashboard (separate from the OpenEnv
+    # Playground at /web which provides interactive reset/step via the
+    # WebInterfaceManager's persistent environment instance).
     try:
         import gradio as gr
         from open_range.server.gradio_ui import build_openrange_gradio_app
@@ -73,7 +75,7 @@ def create_app() -> FastAPI:
             title="OpenRange",
             quick_start_md="",
         )
-        fastapp = gr.mount_gradio_app(fastapp, blocks, path="/web")
+        fastapp = gr.mount_gradio_app(fastapp, blocks, path="/dashboard")
     except Exception:
         pass  # Gradio is optional
 
