@@ -615,7 +615,7 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
             else svc.start_command
         )
 
-        # Run init commands
+        # Run init commands (isolated from PID 1's process group)
         for cmd in init_commands:
             try:
                 result = sp.run(
@@ -625,6 +625,7 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
                     text=True,
                     env=env,
                     check=False,
+                    start_new_session=True,
                 )
                 if result.returncode != 0 and result.stderr:
                     logger.debug(
@@ -634,15 +635,20 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
             except Exception as exc:
                 logger.warning("Init command failed for %s: %s", svc.daemon, exc)
 
-        # Start the daemon
+        # Start the daemon in a new session so it cannot send signals to
+        # PID 1 (uvicorn).  Ensure the command is backgrounded.
+        effective_cmd = start_command
+        if not effective_cmd.rstrip().endswith("&"):
+            effective_cmd = f"({effective_cmd}) &"
         try:
             result = sp.run(
-                ["bash", "-c", start_command],
+                ["bash", "-c", effective_cmd],
                 capture_output=True,
                 timeout=30,
                 text=True,
                 env=env,
                 check=False,
+                start_new_session=True,
             )
             if result.returncode != 0 and result.stderr:
                 logger.debug(
