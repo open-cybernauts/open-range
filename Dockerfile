@@ -96,6 +96,8 @@ ENV OPENRANGE_EXECUTION_MODE=subprocess
 ENV OPENRANGE_RUNTIME_MANIFEST=manifests/tier1_basic.yaml
 ENV OPENRANGE_RUNTIME_VALIDATOR_PROFILE=offline
 ENV OPENRANGE_SNAPSHOT_POOL_SIZE=1
+# Enable the OpenEnv Gradio web interface at /web
+ENV ENABLE_WEB_INTERFACE=true
 
 # ── 6. Health check ──────────────────────────────────────────────────────────
 

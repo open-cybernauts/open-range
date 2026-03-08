@@ -38,6 +38,23 @@ def create_app() -> FastAPI:
         env_name="open_range",
     )
 
+    # Mount custom Gradio dashboard at /web if gradio is available
+    try:
+        import gradio as gr
+        from open_range.server.gradio_ui import build_openrange_gradio_app
+
+        blocks = build_openrange_gradio_app(
+            web_manager=None,
+            action_fields=[],
+            metadata=None,
+            is_chat_env=False,
+            title="OpenRange",
+            quick_start_md="",
+        )
+        fastapp = gr.mount_gradio_app(fastapp, blocks, path="/web")
+    except Exception:
+        pass  # Gradio is optional
+
     fastapp.state.env = env_factory()
     if runtime is not None:
         fastapp.state.runtime = runtime
