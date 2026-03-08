@@ -941,13 +941,28 @@ class TestNPCTrafficParsing:
         spec = _parse_llm_response(raw)
         assert spec.npc_traffic.rate_lambda == 25
 
-    def test_default_scripts(self):
+    def test_empty_npc_traffic_defaults(self):
+        """Empty npc_traffic from LLM produces sensible defaults."""
         raw = _minimal_json(npc_traffic={})
+        spec = _parse_llm_response(raw)
+        # Scripts default to empty (derived from topology at runtime)
+        assert spec.npc_traffic.scripts == []
+        assert spec.npc_traffic.max_concurrent_agents == 4
+        assert spec.npc_traffic.chat_message_count == 10
+
+    def test_llm_scripts_preserved(self):
+        """LLM can specify scripts explicitly."""
+        raw = _minimal_json(npc_traffic={"scripts": ["http_traffic.sh"]})
         spec = _parse_llm_response(raw)
         assert "http_traffic.sh" in spec.npc_traffic.scripts
 
-    def test_level_always_zero(self):
-        """Current parser hardcodes level=0."""
+    def test_level_from_llm(self):
+        """Parser reads level from LLM output (not hardcoded)."""
+        raw = _minimal_json(npc_traffic={"level": 1, "http_rate": 50})
+        spec = _parse_llm_response(raw)
+        assert spec.npc_traffic.level == 1
+
+    def test_level_defaults_to_zero(self):
         raw = _minimal_json(npc_traffic={"http_rate": 50})
         spec = _parse_llm_response(raw)
         assert spec.npc_traffic.level == 0

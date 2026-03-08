@@ -631,6 +631,186 @@ def server(host: str, port: int, mock: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Train command
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--model", default="Qwen/Qwen3.5-4B",
+    help="HuggingFace model name (e.g. Qwen/Qwen3.5-4B, Qwen/Qwen3.5-9B).",
+)
+@click.option(
+    "--data", "data_paths", multiple=True, required=True,
+    help="Path(s) to JSONL SFT data files.",
+)
+@click.option("--output", "output_dir", default="outputs/sft", help="Output directory.")
+@click.option("--merge-output", "merge_output_dir", default=None, help="Also save merged model here.")
+@click.option("--epochs", default=3, type=int, help="Number of training epochs.")
+@click.option("--batch-size", default=2, type=int, help="Per-device batch size.")
+@click.option("--lr", "learning_rate", default=2e-5, type=float, help="Learning rate.")
+@click.option("--lora-r", default=16, type=int, help="LoRA rank.")
+@click.option("--lora-alpha", default=16, type=int, help="LoRA alpha.")
+@click.option("--max-seq-length", default=0, type=int, help="Max sequence length (0=auto from data).")
+@click.option("--min-reward", default=None, type=float, help="Filter samples below this reward.")
+def train(
+    model: str,
+    data_paths: tuple[str, ...],
+    output_dir: str,
+    merge_output_dir: str | None,
+    epochs: int,
+    batch_size: int,
+    learning_rate: float,
+    lora_r: int,
+    lora_alpha: int,
+    max_seq_length: int,
+    min_reward: float | None,
+) -> None:
+    """Run Unsloth SFT training on OpenRange CTF trajectories.
+
+    Converts OpenAI-style tool_calls to qwen3_coder XML for Qwen3.5.
+    Auto-detects sequence length from data (no truncation).
+
+    Example::
+
+        openrange train --model Qwen/Qwen3.5-4B --data data/sft.jsonl
+        openrange train --model Qwen/Qwen3.5-4B --data data/sft.jsonl --merge-output outputs/merged
+    """
+    from open_range.training.sft_trainer import SFTConfig, run_sft
+
+    config = SFTConfig(
+        model_name=model,
+        data_paths=list(data_paths),
+        output_dir=output_dir,
+        merge_output_dir=merge_output_dir,
+        epochs=epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        lora_r=lora_r,
+        lora_alpha=lora_alpha,
+        max_seq_length=max_seq_length,
+        min_reward=min_reward,
+    )
+
+    click.echo(f"Training {model} on {len(data_paths)} data file(s)")
+    click.echo(f"  LoRA: r={lora_r}, alpha={lora_alpha}")
+    click.echo(f"  Epochs: {epochs}, Batch: {batch_size}, LR: {learning_rate}")
+    click.echo(f"  Output: {output_dir}")
+    if merge_output_dir:
+        click.echo(f"  Merge: {merge_output_dir}")
+
+    try:
+        result = run_sft(config)
+        click.echo(f"\nDone! Loss: {result['training_loss']:.4f}")
+        click.echo(f"  Samples: {result['num_samples']}")
+        click.echo(f"  Seq length: {result['max_seq_length']}")
+        click.echo(f"  LoRA adapter: {result['lora_adapter']}")
+        if result.get("merged_model"):
+            click.echo(f"  Merged model: {result['merged_model']}")
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# GRPO command
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--model", default="outputs/sft-merged",
+    help="HuggingFace model or local path (start from SFT checkpoint).",
+)
+@click.option(
+    "--data", "data_paths", multiple=True, required=True,
+    help="Path(s) to JSONL online RL data files.",
+)
+@click.option("--output", "output_dir", default="outputs/grpo", help="Output directory.")
+@click.option("--merge-output", "merge_output_dir", default=None, help="Also save merged model here.")
+@click.option("--reward", "reward_mode", default="progressive",
+              type=click.Choice(["binary", "progressive", "online"]),
+              help="Reward function: binary (flag only), progressive (multi-signal), online (live env).")
+@click.option("--env-url", default=None, help="OpenRange server URL (required for --reward online).")
+@click.option("--num-generations", default=4, type=int, help="Completions per prompt.")
+@click.option("--max-completion-length", default=2048, type=int, help="Max tokens per completion.")
+@click.option("--max-seq-length", default=4096, type=int, help="Max sequence length.")
+@click.option("--batch-size", default=1, type=int, help="Per-device batch size.")
+@click.option("--lr", "learning_rate", default=5e-6, type=float, help="Learning rate.")
+@click.option("--lora-r", default=16, type=int, help="LoRA rank.")
+@click.option("--beta", default=0.04, type=float, help="KL penalty coefficient.")
+@click.option("--temperature", default=0.7, type=float, help="Sampling temperature.")
+def grpo(
+    model: str,
+    data_paths: tuple[str, ...],
+    output_dir: str,
+    merge_output_dir: str | None,
+    reward_mode: str,
+    env_url: str | None,
+    num_generations: int,
+    max_completion_length: int,
+    max_seq_length: int,
+    batch_size: int,
+    learning_rate: float,
+    lora_r: int,
+    beta: float,
+    temperature: float,
+) -> None:
+    """Run Unsloth GRPO training on CTF trajectories.
+
+    Uses progressive reward by default (flag + format + efficiency + progression).
+    Binary reward checks flag capture only. Online reward executes against a live
+    OpenRange environment.
+
+    Example::
+
+        openrange grpo --model outputs/sft-merged --data data/online_rl.jsonl
+        openrange grpo --model outputs/sft-merged --data data/online_rl.jsonl --reward binary
+        openrange grpo --model outputs/sft-merged --data data/online_rl.jsonl --reward online --env-url http://localhost:8000
+    """
+    from open_range.training.grpo_trainer import GRPOConfig, run_grpo
+
+    if reward_mode == "online" and not env_url:
+        click.echo("Error: --env-url required for online reward mode.", err=True)
+        sys.exit(1)
+
+    config = GRPOConfig(
+        model_name=model,
+        data_paths=list(data_paths),
+        output_dir=output_dir,
+        merge_output_dir=merge_output_dir,
+        reward_mode=reward_mode,
+        env_url=env_url,
+        num_generations=num_generations,
+        max_completion_length=max_completion_length,
+        max_seq_length=max_seq_length,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        lora_r=lora_r,
+        beta=beta,
+        temperature=temperature,
+    )
+
+    click.echo(f"GRPO training: {model}")
+    click.echo(f"  Reward: {reward_mode}")
+    click.echo(f"  Generations/prompt: {num_generations}")
+    click.echo(f"  LoRA: r={lora_r}, LR: {learning_rate}")
+    click.echo(f"  Output: {output_dir}")
+
+    try:
+        result = run_grpo(config)
+        click.echo(f"\nDone! Loss: {result['training_loss']:.4f}")
+        click.echo(f"  Prompts: {result['num_prompts']}")
+        click.echo(f"  Reward mode: {result['reward_mode']}")
+        click.echo(f"  LoRA adapter: {result['lora_adapter']}")
+        if result.get("merged_model"):
+            click.echo(f"  Merged model: {result['merged_model']}")
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

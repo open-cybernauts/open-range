@@ -126,6 +126,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
     def __init__(
         self,
         runtime: "ManagedSnapshotRuntime | None" = None,
+        default_snapshot: SnapshotSpec | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         exec_timeout: float = EXEC_TIMEOUT,
         docker_available: bool | None = None,
@@ -154,6 +155,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         self._docker_client: Any = None
         self._docker_available = docker_available
         self._runtime = runtime
+        self._default_snapshot = default_snapshot
         self._episode_recorded = False
         self._active_project: "BootedSnapshotProject | None" = None
         self._mock_mode = _env_flag("OPENRANGE_MOCK") or docker_available is False
@@ -650,6 +652,9 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         if "snapshot" in kwargs and isinstance(kwargs["snapshot"], SnapshotSpec):
             self._snapshot_id = kwargs.get("snapshot_id")
             snap = kwargs["snapshot"]
+        elif self._default_snapshot is not None:
+            self._snapshot_id = kwargs.get("snapshot_id")
+            snap = self._default_snapshot.model_copy(deep=True)
         elif self._runtime is not None:
             if "snapshot_id" in kwargs and kwargs["snapshot_id"]:
                 admitted = self._runtime.get_snapshot(str(kwargs["snapshot_id"]))

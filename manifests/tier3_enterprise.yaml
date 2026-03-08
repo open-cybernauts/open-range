@@ -147,6 +147,17 @@ users:
     hosts: [ci_cd, devtools, web, db, jumpbox, monitoring]
 
 # ---------------------------------------------------------------------------
+# NPC traffic configuration
+# ---------------------------------------------------------------------------
+
+npc_config:
+  level: 1                     # LLM NPC agents active
+  rate_lambda: 20.0            # high traffic volume
+  max_concurrent_agents: 5     # cap for Tier 3 (7 personas, 5 active)
+  action_interval_min: 1       # faster NPC cadence at enterprise scale
+  chat_message_count: 30       # dense background noise
+
+# ---------------------------------------------------------------------------
 # NPC personas (generate realistic traffic + social engineering surface)
 # ---------------------------------------------------------------------------
 

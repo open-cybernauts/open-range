@@ -205,7 +205,11 @@ class LLMNPCAgent:
             else persona.name.lower().split()[0]
         )
 
-        base_interval = persona.routine.get("action_interval_min", 2)
+        # Prefer traffic spec interval (manifest-driven), fall back to persona
+        base_interval = (
+            snapshot.npc_traffic.action_interval_min
+            or persona.routine.get("action_interval_min", 2)
+        )
         interval_s = base_interval * 60
 
         logger.info(

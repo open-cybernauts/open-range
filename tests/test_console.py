@@ -23,7 +23,6 @@ def client(monkeypatch):
     """Create a TestClient with a shared env on app.state for console API."""
     monkeypatch.setenv("OPENRANGE_MOCK", "1")
     app = create_app()
-    # Store a shared env so console API endpoints can access state
     env = RangeEnvironment(docker_available=False)
     app.state.env = env
     clear_episode()

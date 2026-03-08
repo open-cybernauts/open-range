@@ -52,8 +52,59 @@ _ROLE_SERVICE_KEYWORDS: dict[str, list[str]] = {
 
 
 def _hosts_from_topology(topology: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract the list of host dicts from *topology*, tolerating missing keys."""
-    return topology.get("hosts") or []
+    """Return normalized host dicts for compiled or manifest-style topology.
+
+    ``compile_manifest_topology()`` canonicalizes ``topology["hosts"]`` to a
+    list of host names and keeps the richer metadata in ``host_catalog`` /
+    ``host_details``. NPC helpers need the richer dict shape, so normalize the
+    compiled form back into ``{"name": ..., "services": ...}`` records here.
+    """
+    raw_hosts = topology.get("hosts") or []
+    host_catalog = topology.get("host_catalog")
+    if not isinstance(host_catalog, dict):
+        host_catalog = {}
+    host_details = topology.get("host_details")
+    if not isinstance(host_details, dict):
+        host_details = {}
+
+    hosts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _append_host(raw_host: Any) -> None:
+        if isinstance(raw_host, dict):
+            name = str(raw_host.get("name", "")).strip()
+        else:
+            name = str(raw_host).strip()
+        if not name or name in seen:
+            return
+
+        merged: dict[str, Any] = {}
+        catalog_detail = host_catalog.get(name)
+        if isinstance(catalog_detail, dict):
+            merged.update(catalog_detail)
+        detailed_detail = host_details.get(name)
+        if isinstance(detailed_detail, dict):
+            merged.update(detailed_detail)
+        if isinstance(raw_host, dict):
+            merged.update(raw_host)
+
+        merged["name"] = name
+        services = merged.get("services")
+        merged["services"] = list(services) if isinstance(services, list) else []
+        seen.add(name)
+        hosts.append(merged)
+
+    if isinstance(raw_hosts, list):
+        for raw_host in raw_hosts:
+            _append_host(raw_host)
+
+    for name in host_catalog:
+        _append_host(name)
+
+    for name in host_details:
+        _append_host(name)
+
+    return hosts
 
 
 def _host_matches_keywords(host: dict[str, Any], keywords: list[str]) -> bool:
@@ -68,31 +119,29 @@ def _host_matches_keywords(host: dict[str, Any], keywords: list[str]) -> bool:
 
 
 def _container_for_script(script_name: str, topology: dict[str, Any]) -> str:
-    """Determine which container a script should run inside.
+    """Pick the container a shell script runs in.
 
-    Matches the script filename against service keywords in the topology
-    hosts.  Falls back to the first host if nothing matches.
+    Each script needs tools installed on the target container (mysql
+    client on db, sshpass on the SSH source, etc.).  The scripts
+    themselves target remote hosts by hostname via env vars so the
+    traffic still appears in service logs for Blue.
     """
     hosts = _hosts_from_topology(topology)
-    if not hosts:
-        return "web"  # legacy fallback when topology is empty
-
     for prefix, keywords in _SCRIPT_SERVICE_KEYWORDS.items():
         if prefix in script_name.lower():
             for host in hosts:
                 if _host_matches_keywords(host, keywords):
                     return host["name"]
-            break  # prefix matched but no host found; fall through
-
-    # Default: first host in topology
-    return hosts[0].get("name", "web")
+            break
+    return hosts[0].get("name", "web") if hosts else "web"
 
 
 def _resolve_env_vars(topology: dict[str, Any], rate_lambda: float) -> dict[str, str]:
-    """Build environment variables by resolving roles from the topology.
+    """Build environment variables by resolving roles and credentials from topology.
 
-    Instead of hardcoding ``WEB_HOST=web``, this finds the host whose
-    services list contains web/nginx/etc and maps the role to its name.
+    Resolves host roles (WEB_HOST, DB_HOST, etc.) and credentials (DB_USER,
+    DB_PASS, SSH_USER, SSH_PASS) from the topology so shell scripts don't
+    need hardcoded values.
     """
     hosts = _hosts_from_topology(topology)
     env: dict[str, str] = {"RATE_LAMBDA": str(int(rate_lambda))}
@@ -102,6 +151,21 @@ def _resolve_env_vars(topology: dict[str, Any], rate_lambda: float) -> dict[str,
             if _host_matches_keywords(host, keywords):
                 env[role] = host["name"]
                 break
+
+    # Pass DB and SSH credentials from topology to shell scripts
+    users = topology.get("users", [])
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        hosts_list = user.get("hosts", [])
+        if "db" in hosts_list and "DB_USER" not in env:
+            env["DB_USER"] = user.get("username", "app_user")
+            env["DB_PASS"] = user.get("password", "AppUs3r!2024")
+        if any(h in hosts_list for h in ("web", "files", "ldap", "siem")):
+            role = user.get("role", "")
+            if role in ("admin", "sysadmin", "root") and "SSH_USER" not in env:
+                env["SSH_USER"] = user.get("username", "admin")
+                env["SSH_PASS"] = user.get("password", "Adm1n!2024")
 
     return env
 
@@ -127,10 +191,20 @@ def _derive_scripts_from_topology(topology: dict[str, Any]) -> list[str]:
 
 
 class NPCManager:
-    """Start and stop NPC background traffic for a snapshot."""
+    """Start and stop NPC background traffic for a snapshot.
 
-    def __init__(self, mock_mode: bool = False) -> None:
+    Args:
+        mock_mode: When True, skip Docker exec and LLM calls (unit tests).
+        model: LiteLLM model string for Level 1 NPC agents.
+            Defaults to ``OPENRANGE_NPC_MODEL`` env var, then
+            ``azure/gpt-5.2-codex``.  Any LiteLLM-supported model works
+            (e.g. ``openai/gpt-4o``, ``anthropic/claude-haiku-4-5-20251001``,
+            ``ollama/llama3``).
+    """
+
+    def __init__(self, mock_mode: bool = False, model: str | None = None) -> None:
         self._mock_mode = mock_mode
+        self._model = model  # passed to LLMNPCAgent
         self._processes: list[asyncio.subprocess.Process] = []
         self._tasks: list[asyncio.Task[Any]] = []
         self._running = False
@@ -168,25 +242,39 @@ class NPCManager:
 
         self._running = True
         self._containers = containers
-        npc_cfg = snapshot.npc_traffic
 
-        # Re-initialise channels for the new episode
+        self._init_channels_and_chat(snapshot)
+
+        # In mock mode, skip Docker exec and LLM agent loops
+        if self._mock_mode:
+            logger.info("NPC manager running in mock mode (no Docker/LLM)")
+            return
+
+        if containers is not None:
+            await self._deploy_live_npcs(snapshot, containers)
+
+    # -----------------------------------------------------------------
+    # Shared helpers (used by both async start and sync inner start)
+    # -----------------------------------------------------------------
+
+    def _init_channels_and_chat(self, snapshot: SnapshotSpec) -> None:
+        """Re-initialise channels and generate Level 0 chat traffic."""
         self.channels = {
             "chat": ChatChannel(),
             "voice": VoiceChannel(),
             "document": DocumentChannel(),
         }
 
-        # Generate Level 0 chat traffic if personas are available
         if snapshot.npc_personas and len(snapshot.npc_personas) >= 2:
             from open_range.builder.npc.chat_traffic import generate_chat_traffic
 
             chat_ch = self.channels["chat"]
             assert isinstance(chat_ch, ChatChannel)
+            msg_count = snapshot.npc_traffic.chat_message_count
             generate_chat_traffic(
                 personas=snapshot.npc_personas,
                 channel=chat_ch,
-                num_messages=10,
+                num_messages=msg_count,
             )
             logger.info(
                 "Generated %d chat messages for %d personas",
@@ -194,12 +282,20 @@ class NPCManager:
                 len(snapshot.npc_personas),
             )
 
-        # In mock mode, skip Docker exec and LLM agent loops
-        if self._mock_mode:
-            logger.info("NPC manager running in mock mode (no Docker/LLM)")
-            return
+    async def _deploy_live_npcs(
+        self,
+        snapshot: SnapshotSpec,
+        containers: ContainerSet,
+    ) -> None:
+        """Deploy shell scripts into containers and spawn LLM NPC agent loops.
 
+        This is the async work that requires a running event loop.  It is
+        called directly from :meth:`start` and scheduled as a background
+        task from :meth:`_start_sync_inner` when an event loop is already
+        running (e.g. inside FastAPI/uvicorn).
+        """
         topology = snapshot.topology
+        npc_cfg = snapshot.npc_traffic
 
         # Determine which scripts to run -- derive from topology when
         # the snapshot does not specify scripts explicitly.
@@ -215,55 +311,54 @@ class NPCManager:
                 logger.warning("NPC script not found: %s", script_path)
                 continue
 
-            container = _container_for_script(script_name, topology)
+            # Each script runs on the container that has its tools
+            # (mysql client on db, sshpass on ssh host, etc.).
+            target = _container_for_script(script_name, topology)
+
             logger.info(
-                "Starting NPC script: %s in container %s (rate=%s)",
-                script_name, container, npc_cfg.rate_lambda,
+                "Starting NPC script: %s on %s (rate=%s)",
+                script_name, target, npc_cfg.rate_lambda,
             )
 
-            if containers is not None:
-                # Run script inside the target container via docker exec
-                try:
-                    script_content = script_path.read_text()
-                    encoded = base64.b64encode(script_content.encode()).decode()
-                    env_prefix = " ".join(
-                        f"{k}={v}" for k, v in env_vars.items()
-                    )
-                    await containers.exec(
-                        container,
-                        f"echo {encoded} | base64 -d > /tmp/{script_name} "
-                        f"&& chmod +x /tmp/{script_name} "
-                        f"&& {env_prefix} nohup bash /tmp/{script_name} "
-                        f"> /dev/null 2>&1 &",
-                    )
-                    self._script_containers.append(container)
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to start NPC script %s in container %s: %s",
-                        script_name, container, exc,
-                    )
-            else:
-                # Fallback: run on host (original behavior)
-                try:
-                    proc = await asyncio.create_subprocess_exec(
-                        "bash",
-                        str(script_path),
-                        stdout=asyncio.subprocess.DEVNULL,
-                        stderr=asyncio.subprocess.DEVNULL,
-                        env=env_vars,
-                    )
-                    self._processes.append(proc)
-                except OSError as exc:
-                    logger.warning("Failed to start NPC script %s: %s", script_name, exc)
+            try:
+                script_content = script_path.read_text()
+                encoded = base64.b64encode(script_content.encode()).decode()
+                env_prefix = " ".join(
+                    f"{k}={v}" for k, v in env_vars.items()
+                )
+                await containers.exec(
+                    target,
+                    f"echo {encoded} | base64 -d > /tmp/{script_name} "
+                    f"&& chmod +x /tmp/{script_name} "
+                    f"&& {env_prefix} nohup bash /tmp/{script_name} "
+                    f"> /dev/null 2>&1 &",
+                )
+                self._script_containers.append(target)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to start NPC script %s in %s: %s",
+                    script_name, target, exc,
+                )
 
-        # Level 1 LLM NPCs -- start async agent loops if personas are present
-        if npc_cfg.level >= 1 and snapshot.npc_personas and containers is not None:
+        # Level 1 LLM NPCs -- start async agent loops if personas are present.
+        # Respect max_concurrent_agents to prevent LLM API floods at high tiers.
+        if npc_cfg.level >= 1 and snapshot.npc_personas:
             from open_range.builder.npc.npc_agent import LLMNPCAgent
 
-            for persona in snapshot.npc_personas:
-                agent = LLMNPCAgent()
+            max_agents = npc_cfg.max_concurrent_agents
+            agent_model = npc_cfg.model or self._model
+            personas_to_run = snapshot.npc_personas[:max_agents]
+            if len(snapshot.npc_personas) > max_agents:
+                logger.info(
+                    "Capping NPC agents to %d/%d (max_concurrent_agents)",
+                    max_agents,
+                    len(snapshot.npc_personas),
+                )
+
+            for persona in personas_to_run:
+                agent = LLMNPCAgent(model=agent_model)
                 task = asyncio.create_task(
-                    agent.run_loop(persona, containers),
+                    agent.run_loop(persona, containers, snapshot),
                     name=f"npc_{persona.name}",
                 )
                 self._tasks.append(task)
@@ -348,49 +443,42 @@ class NPCManager:
             asyncio.run(self.stop())
 
     def _start_sync_inner(self, snapshot: SnapshotSpec, containers: ContainerSet | None = None) -> None:
-        """Synchronous start that avoids asyncio for mock mode and chat traffic."""
+        """Synchronous start that works inside a running event loop.
+
+        Generates chat traffic synchronously (available immediately for
+        the first step), then schedules shell script deployment and LLM
+        agent spawning as a background task on the running event loop.
+        """
         if self._running:
             self._stop_sync_inner()
 
         self._running = True
         self._containers = containers
-        npc_cfg = snapshot.npc_traffic
 
-        # Re-initialise channels for the new episode
-        self.channels = {
-            "chat": ChatChannel(),
-            "voice": VoiceChannel(),
-            "document": DocumentChannel(),
-        }
-
-        # Generate Level 0 chat traffic if personas are available
-        if snapshot.npc_personas and len(snapshot.npc_personas) >= 2:
-            from open_range.builder.npc.chat_traffic import generate_chat_traffic
-
-            chat_ch = self.channels["chat"]
-            assert isinstance(chat_ch, ChatChannel)
-            generate_chat_traffic(
-                personas=snapshot.npc_personas,
-                channel=chat_ch,
-                num_messages=10,
-            )
-            logger.info(
-                "Generated %d chat messages for %d personas",
-                len(chat_ch.get_channel_log()),
-                len(snapshot.npc_personas),
-            )
+        self._init_channels_and_chat(snapshot)
 
         if self._mock_mode:
             logger.info("NPC manager running in mock mode (no Docker/LLM)")
             return
 
-        # In live mode with an active event loop, schedule async start
-        # for scripts and LLM agents. This is best-effort -- if it
-        # fails, the chat traffic is already available.
+        # Schedule the async container-side work (scripts + LLM agents)
+        # on the running event loop.  Chat traffic is already available
+        # so agents have NPC noise from step 1 even if this task hasn't
+        # finished yet.
         if containers is not None:
-            logger.info(
-                "NPC live scripts deferred (use async start() for full support)"
-            )
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(
+                    self._deploy_live_npcs(snapshot, containers),
+                    name="npc_live_deploy",
+                )
+                logger.info(
+                    "Scheduled NPC live deployment (scripts + LLM agents) on event loop"
+                )
+            except RuntimeError:
+                logger.warning(
+                    "No event loop available — NPC live scripts not started"
+                )
 
     def _stop_sync_inner(self) -> None:
         """Synchronous stop for mock mode (no async cleanup needed)."""

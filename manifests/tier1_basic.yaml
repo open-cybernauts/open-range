@@ -111,6 +111,17 @@ users:
     hosts: [web, mail, files, siem]
 
 # ---------------------------------------------------------------------------
+# NPC traffic configuration
+# ---------------------------------------------------------------------------
+
+npc_config:
+  level: 0                     # 0=shell scripts + chat, 1=+ LLM agents
+  rate_lambda: 10.0            # shell script requests/minute
+  max_concurrent_agents: 3     # cap LLM NPC agents for Tier 1
+  action_interval_min: 2       # minutes between LLM NPC actions
+  chat_message_count: 10       # deterministic chat messages at episode start
+
+# ---------------------------------------------------------------------------
 # NPC personas — security_awareness reflects role and training level
 # ---------------------------------------------------------------------------
 

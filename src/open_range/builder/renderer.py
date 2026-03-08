@@ -474,7 +474,9 @@ class KindRenderer:
             host_os = str(raw_host.get("os", "")).strip().lower()
 
         if name == "attacker" or "kali" in host_os:
-            return _KALI_IMAGE
+            # Use ubuntu instead of kali — kali's apt takes 5+ minutes
+            # in ephemeral pods.  Tools are installed via startup command.
+            return _GENERIC_LINUX_IMAGE
         if "mysql" in service_set or name == "db":
             return _MYSQL_IMAGE
         if "postgresql" in service_set:
@@ -664,6 +666,14 @@ CREATE TABLE IF NOT EXISTS secrets (
     flag VARCHAR(128),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Ensure the app_user account always exists (LLM PHP code hardcodes it).
+-- The MYSQL_USER env var may create a different user, but app_user must
+-- be available for the web app's DB connection string.
+CREATE USER IF NOT EXISTS 'app_user'@'%' IDENTIFIED BY 'AppUs3r!2024';
+GRANT ALL PRIVILEGES ON referral_db.* TO 'app_user'@'%';
+GRANT SELECT ON flags.* TO 'app_user'@'%';
+FLUSH PRIVILEGES;
 
 USE referral_db;
 """

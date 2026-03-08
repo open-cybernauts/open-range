@@ -114,6 +114,17 @@ users:
     hosts: [web, mail, files, siem]
 
 # ---------------------------------------------------------------------------
+# NPC traffic configuration
+# ---------------------------------------------------------------------------
+
+npc_config:
+  level: 0
+  rate_lambda: 10.0
+  max_concurrent_agents: 3
+  action_interval_min: 2
+  chat_message_count: 10
+
+# ---------------------------------------------------------------------------
 # NPC personas (same security awareness levels)
 # ---------------------------------------------------------------------------
 

@@ -161,11 +161,20 @@ class NPCPersona(BaseModel):
 
 
 class NPCTrafficSpec(BaseModel):
-    """NPC traffic configuration."""
+    """NPC traffic configuration.
 
-    level: int = 0  # 0=shell scripts, 1=LLM personas
-    rate_lambda: float = 10.0  # requests/minute
+    Controls NPC background noise intensity and LLM agent behavior.
+    All fields have sensible defaults so a bare ``NPCTrafficSpec()``
+    works for Tier 1 shell-script-only mode.
+    """
+
+    level: int = 0  # 0=shell scripts only, 1=shell scripts + LLM agents
+    rate_lambda: float = 10.0  # shell script requests/minute
     scripts: list[str] = Field(default_factory=list)
+    max_concurrent_agents: int = 4  # cap on simultaneous LLM NPC tasks
+    model: str = ""  # LLM model override; empty = use OPENRANGE_NPC_MODEL env
+    action_interval_min: int = 2  # minutes between LLM NPC routine actions
+    chat_message_count: int = 10  # Level 0 deterministic chat messages to seed
 
 
 class TaskType(str, Enum):
@@ -189,6 +198,24 @@ class TaskSpec(BaseModel):
     success_conditions: list[dict[str, Any]] = Field(
         default_factory=list,
     )  # [{type: "flag", value: "..."}, {type: "endpoint", url: "...", expect: "..."}]
+
+
+class ChallengeSpec(BaseModel):
+    """Structured challenge catalog entry."""
+
+    id: str = ""
+    name: str = ""
+    challenge_type: str = "exploit"
+    roles: list[str] = Field(default_factory=list)
+    role_briefings: dict[str, str] = Field(default_factory=dict)
+    entry_points: list[str] = Field(default_factory=list)
+    success_conditions: list[dict[str, Any]] = Field(default_factory=list)
+    linked_vulns: list[str] = Field(default_factory=list)
+    linked_flags: list[str] = Field(default_factory=list)
+    evidence_requirements: list[str] = Field(default_factory=list)
+    difficulty: int = 1
+    prerequisites: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReadinessCheck(BaseModel):
@@ -240,6 +267,7 @@ class SnapshotSpec(BaseModel):
     npc_personas: list[NPCPersona] = Field(default_factory=list)
     npc_traffic: NPCTrafficSpec = Field(default_factory=NPCTrafficSpec)
     task: TaskSpec = Field(default_factory=TaskSpec)
+    challenges: list[ChallengeSpec] = Field(default_factory=list)
     compose: dict[str, Any] = Field(default_factory=dict)  # rendered docker-compose
     files: dict[str, str] = Field(default_factory=dict)  # path -> content
     services: list[ServiceSpec] = Field(default_factory=list)
@@ -348,6 +376,44 @@ class ContainerSet(BaseModel):
             await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
+
+
+def build_default_challenge_catalog(
+    task: TaskSpec,
+    truth_graph: TruthGraph,
+    flags: list[FlagSpec],
+    evidence_spec: list[EvidenceItem],
+) -> list[ChallengeSpec]:
+    """Synthesize a default challenge catalog when the builder omitted one."""
+    success_conditions = list(task.success_conditions)
+    if not success_conditions:
+        success_conditions = [{"type": "flag", "value": flag.value} for flag in flags]
+
+    entry_points = [
+        vuln.injection_point or vuln.host
+        for vuln in truth_graph.vulns
+        if vuln.injection_point or vuln.host
+    ] or ["attacker"]
+
+    return [
+        ChallengeSpec(
+            id="default_primary",
+            name="Primary challenge",
+            challenge_type=task.task_type or "exploit",
+            roles=["red", "blue"],
+            role_briefings={
+                "red": task.red_briefing,
+                "blue": task.blue_briefing,
+            },
+            entry_points=entry_points,
+            success_conditions=success_conditions,
+            linked_vulns=[vuln.id for vuln in truth_graph.vulns],
+            linked_flags=[flag.id for flag in flags],
+            evidence_requirements=[item.location for item in evidence_spec if item.location],
+            difficulty=max(1, len(truth_graph.vulns)),
+            metadata={},
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------

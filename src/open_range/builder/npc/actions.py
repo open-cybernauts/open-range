@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shlex
 import time
 from typing import Any
 
@@ -17,21 +18,103 @@ from open_range.protocols import ContainerSet, NPCAction, NPCPersona, SnapshotSp
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Host resolution -- resolve logical roles to actual topology hostnames
+# ---------------------------------------------------------------------------
+
+
+def _resolve_host(
+    snapshot: SnapshotSpec,
+    keywords: list[str],
+    fallback: str,
+) -> str:
+    """Resolve a logical role to an actual hostname from the snapshot topology.
+
+    Searches ``snapshot.topology["hosts"]`` for a host whose name or services
+    match any of the given *keywords*.  Returns the first match, or *fallback*
+    if the topology is empty or no match is found.
+
+    This mirrors the keyword-matching pattern used in ``npc_manager.py``
+    (``_host_matches_keywords`` / ``_ROLE_SERVICE_KEYWORDS``).
+    """
+    hosts = snapshot.topology.get("hosts") or []
+    for host in hosts:
+        if isinstance(host, str):
+            # Plain string host name -- match against keywords directly
+            host_lower = host.lower()
+            for kw in keywords:
+                if kw.lower() in host_lower:
+                    return host
+            continue
+        if not isinstance(host, dict):
+            continue
+        host_name = (host.get("name") or "").lower()
+        services = [s.lower() for s in (host.get("services") or [])]
+        for kw in keywords:
+            kw_lower = kw.lower()
+            if kw_lower in host_name or any(kw_lower in svc for svc in services):
+                return host.get("name", fallback)
+    return fallback
+
+
+# ---------------------------------------------------------------------------
+# NPC source resolution -- determine which container a persona "sits at"
+# ---------------------------------------------------------------------------
+
+def _resolve_npc_source(persona: NPCPersona, snapshot: SnapshotSpec) -> str:
+    """Pick the container a persona originates traffic from.
+
+    NPCs are people — their traffic should cross the Docker network.
+    Uses ``siem`` as the default workstation since it exists in every tier
+    and sits in the management zone where employee workstations would be.
+    """
+    return "siem"
+
+
 class NPCActionExecutor:
     """Execute NPC actions inside Docker containers.
 
-    At init, extracts available pages, shares, DB tables, and users from
-    the snapshot so every action targets real resources in this environment.
+    At init, extracts available pages, shares, DB tables, users, and
+    credentials from the snapshot so every action targets real resources
+    in this environment.  Container names are resolved from the snapshot
+    topology via keyword matching, so the executor works with any host
+    naming convention (not just the default tier-1 names).
     """
 
     def __init__(self, containers: ContainerSet, snapshot: SnapshotSpec) -> None:
         self.containers = containers
+        self._snapshot = snapshot
         # Derive available targets from the snapshot
         self._pages = _extract_web_pages(snapshot)
         self._shares = _extract_shares(snapshot)
         self._db_tables = _extract_db_tables(snapshot)
         self._users = _extract_users(snapshot)
         self._domain = snapshot.topology.get("domain", "corp.local")
+        self._db_creds = _extract_db_credentials(snapshot)
+        self._ssh_creds = _extract_ssh_credentials(snapshot)
+
+        # Resolve logical roles to actual hostnames from the topology
+        self._host_web = _resolve_host(snapshot, ["nginx", "apache", "httpd", "web", "php-fpm"], "web")
+        self._host_mail = _resolve_host(snapshot, ["postfix", "sendmail", "dovecot", "mail"], "mail")
+        self._host_db = _resolve_host(snapshot, ["mysql", "mariadb", "postgres", "mongodb"], "db")
+        self._host_siem = _resolve_host(snapshot, ["rsyslog", "elasticsearch", "siem", "splunk"], "siem")
+        self._host_files = _resolve_host(snapshot, ["samba", "smb", "files", "nfs"], "files")
+
+        # NPC source containers -- maps persona name -> source container.
+        # Lazily populated by source_for() as personas are encountered.
+        self._source_hosts: dict[str, str] = {}
+
+    def source_for(self, persona: NPCPersona) -> str:
+        """Return the source container for a persona (their "workstation").
+
+        Results are cached per persona name.  NPCs originate network traffic
+        from this container and target services by hostname across the Docker
+        network, so that traffic is visible on the wire.
+        """
+        name = persona.name
+        if name not in self._source_hosts:
+            self._source_hosts[name] = _resolve_npc_source(persona, self._snapshot)
+        return self._source_hosts[name]
 
     # ------------------------------------------------------------------
     # Routine actions (autonomous workday)
@@ -61,15 +144,22 @@ class NPCActionExecutor:
         return await handler(persona, username, target, detail, email_body)
 
     async def _routine_browse(self, persona, username, target, detail, _eb):
-        """Browse a page that exists in this snapshot."""
+        """Browse a page that exists in this snapshot.
+
+        Executes from the persona's source container, targeting the web
+        server by hostname across the Docker network.
+        """
         path = target if target.startswith("/") else f"/{target}" if target else "/"
         # Fall back to a known page if target isn't in snapshot
         if path == "/" and self._pages:
             import random
             path = random.choice(self._pages)
+        safe_path = shlex.quote(f"http://{self._host_web}{path}")
+        safe_ua = shlex.quote(f"Mozilla/5.0 ({username})")
+        source = self.source_for(persona)
         await self.containers.exec(
-            "web",
-            f'curl -s -o /dev/null -A "Mozilla/5.0 ({username})" "http://localhost{path}"',
+            source,
+            f"curl -s -o /dev/null -A {safe_ua} {safe_path}",
         )
         return _log(persona, "browse", detail or f"Browsed {path}", f"web:{path}")
 
@@ -89,15 +179,21 @@ class NPCActionExecutor:
             f"To: {recipient}@{self._domain}\\n"
             f"Subject: {detail or 'Update'}\\n\\n{content}"
         )
+        safe_user = shlex.quote(username)
+        safe_msg = shlex.quote(msg)
         await self.containers.exec(
-            "mail",
-            f"mkdir -p /var/mail/{username} "
-            f"&& echo '{msg}' > /var/mail/{username}/sent_{ts_i}.eml",
+            self._host_mail,
+            f"mkdir -p /var/mail/{safe_user} "
+            f"&& echo {safe_msg} > /var/mail/{safe_user}/sent_{ts_i}.eml",
         )
         return _log(persona, "send_email", detail or f"Emailed {recipient}", f"mail:{username}")
 
     async def _routine_lookup(self, persona, username, target, detail, _eb):
-        """Look up data on the web app -- uses whatever search/lookup page exists."""
+        """Look up data on the web app -- uses whatever search/lookup page exists.
+
+        Executes from the persona's source container, targeting the web
+        server by hostname across the Docker network.
+        """
         # Find a page with query params in the snapshot
         lookup_pages = [p for p in self._pages if "?" in p or "lookup" in p or "search" in p]
         if lookup_pages:
@@ -109,9 +205,12 @@ class NPCActionExecutor:
         else:
             page = f"/?q={target or 'data'}"
 
+        safe_url = shlex.quote(f"http://{self._host_web}{page}")
+        safe_ua = shlex.quote(f"Mozilla/5.0 ({username})")
+        source = self.source_for(persona)
         await self.containers.exec(
-            "web",
-            f'curl -s -o /dev/null -A "Mozilla/5.0 ({username})" "http://localhost{page}"',
+            source,
+            f"curl -s -o /dev/null -A {safe_ua} {safe_url}",
         )
         return _log(persona, "lookup", detail or f"Searched: {target}", f"web:{page}")
 
@@ -119,36 +218,56 @@ class NPCActionExecutor:
         """Access a file share that exists in this snapshot."""
         import random
         share = target or (random.choice(self._shares) if self._shares else "general")
+        safe_share = shlex.quote(f"/srv/shares/{share}/")
         await self.containers.exec(
-            "files",
-            f"ls /srv/shares/{share}/ 2>/dev/null || true",
+            self._host_files,
+            f"ls {safe_share} 2>/dev/null || true",
         )
         return _log(persona, "access_share", detail or f"Browsed {share} share", f"files:{share}")
 
     async def _routine_login(self, persona, username, target, detail, _eb):
-        """Log into the web portal."""
+        """Log into the web portal.
+
+        Executes from the persona's source container, targeting the web
+        server by hostname across the Docker network.
+        """
         # Find the login page from snapshot
         login_pages = [p for p in self._pages if "login" in p or "index" in p]
         page = login_pages[0] if login_pages else "/"
+        safe_ua = shlex.quote(f"Mozilla/5.0 ({username})")
+        safe_data = shlex.quote(f"username={username}&password=placeholder")
+        safe_url = shlex.quote(f"http://{self._host_web}{page}")
+        source = self.source_for(persona)
         await self.containers.exec(
-            "web",
-            f'curl -s -o /dev/null -A "Mozilla/5.0 ({username})" '
-            f'-d "username={username}&password=placeholder" '
-            f'"http://localhost{page}"',
+            source,
+            f"curl -s -o /dev/null -A {safe_ua} -d {safe_data} {safe_url}",
         )
         return _log(persona, "login", detail or "Portal login", "web:access_log")
 
     async def _routine_query_db(self, persona, username, target, detail, _eb):
-        """Query the database -- uses tables that exist in this snapshot."""
+        """Query the database -- uses tables that exist in this snapshot.
+
+        Runs on the DB host directly (mysql client lives there, not on
+        the NPC workstation).  The query still appears in DB logs for
+        Blue to observe.
+        """
         import random
         if self._db_tables:
             table = random.choice(self._db_tables)
             query = f"SELECT * FROM {table} LIMIT 5"
         else:
             query = "SHOW TABLES"
+        db_user, db_pass = self._db_creds
+        safe_user = shlex.quote(db_user)
+        safe_query = shlex.quote(query)
+        if db_pass:
+            safe_pass = shlex.quote(db_pass)
+            cred_flag = f"-u {safe_user} -p{safe_pass}"
+        else:
+            cred_flag = f"-u {safe_user}"
         await self.containers.exec(
-            "db",
-            f'mysql -u app_user -p\'AppUs3r!2024\' -e "{query}" 2>/dev/null || true',
+            self._host_db,
+            f"mysql {cred_flag} -e {safe_query} 2>/dev/null || true",
         )
         return _log(persona, "query_db", detail or f"Queried {target or 'database'}", "db:query_log")
 
@@ -173,74 +292,78 @@ class NPCActionExecutor:
         return await handler(persona, action)
 
     async def _react_click(self, persona: NPCPersona, action: NPCAction) -> dict[str, Any]:
-        url = "http://localhost/"
+        """Click a link from a stimulus.
+
+        Executes from the persona's source container so the request crosses
+        the Docker network and is visible to Blue on the wire.
+        """
+        url = f"http://{self._host_web}/"
         for effect in action.side_effects:
             urls = re.findall(r"https?://\S+", effect)
             if urls:
                 url = urls[0].rstrip(".")
                 break
         username = _username_from_persona(persona)
+        safe_ua = shlex.quote(f"Mozilla/5.0 ({username})")
+        safe_url = shlex.quote(url)
+        source = self.source_for(persona)
         await self.containers.exec(
-            "web",
-            f'curl -s -o /dev/null -A "Mozilla/5.0 ({username})" "{url}"',
+            source,
+            f"curl -s -o /dev/null -A {safe_ua} {safe_url}",
         )
-        return _se_log(
-            persona,
-            "click_link",
-            f"Clicked: {url}",
-            "web:access_log",
-            result="success",
-        )
+        return _se_log(persona, "click_link", f"Clicked: {url}", "web:access_log", result="success")
 
     async def _react_email(self, persona: NPCPersona, action: NPCAction) -> dict[str, Any]:
         username = _username_from_persona(persona)
         ts_i = int(time.time())
         body = (action.response_content or "acknowledged")[:500]
+        safe_user = shlex.quote(username)
+        safe_msg = shlex.quote(f"From: {username}@{self._domain}\\nSubject: Re\\n\\n{body}")
         await self.containers.exec(
-            "mail",
-            f"mkdir -p /var/mail/{username} "
-            f"&& echo 'From: {username}@{self._domain}\\nSubject: Re\\n\\n{body}' "
-            f"> /var/mail/{username}/sent_{ts_i}.eml",
+            self._host_mail,
+            f"mkdir -p /var/mail/{safe_user} "
+            f"&& echo {safe_msg} "
+            f"> /var/mail/{safe_user}/sent_{ts_i}.eml",
         )
-        return _se_log(
-            persona,
-            action.action,
-            "Replied to message",
-            "mail:spool",
-            result="success",
-        )
+        return _se_log(persona, action.action, "Replied to message", "mail:spool", result="success")
 
     async def _react_share_creds(self, persona: NPCPersona, action: NPCAction) -> dict[str, Any]:
+        """NPC shares credentials after social engineering.
+
+        The curl login attempt executes from the persona's source container
+        (crosses the network).  The SIEM alert is written locally inside
+        the siem container.
+        """
         username = _username_from_persona(persona)
         content = action.response_content or f"username: {username}"
         ts_i = int(time.time())
-        # Leaked creds file
-        await self.containers.exec("web", f"echo '{content}' >> /tmp/leaked_{ts_i}.txt")
-        # Suspicious login
+        source = self.source_for(persona)
+        # Leaked creds file -- written on the source (persona's workstation)
+        safe_content = shlex.quote(content)
+        await self.containers.exec(source, f"echo {safe_content} >> /tmp/leaked_{ts_i}.txt")
+        # Suspicious login -- curl FROM source to web server by hostname
+        safe_data = shlex.quote(f"username={username}&password=leaked")
         await self.containers.exec(
-            "web",
-            f'curl -s -o /dev/null -A "Mozilla/5.0 (external)" '
-            f'-d "username={username}&password=leaked" "http://localhost/"',
+            source,
+            f"curl -s -o /dev/null -A {shlex.quote('Mozilla/5.0 (external)')} "
+            f"-d {safe_data} {shlex.quote(f'http://{self._host_web}/')}",
         )
-        # SIEM alert
+        # SIEM alert -- written locally inside the siem container
+        safe_name = shlex.quote(persona.name)
         await self.containers.exec(
-            "siem",
-            f'echo "[$(date)] CRED-LEAK: {persona.name} shared credentials" '
+            self._host_siem,
+            f"printf '[%s] CRED-LEAK: %s shared credentials\\n' \"$(date)\" {safe_name} "
             f">> /var/log/siem/consolidated/all.log",
         )
-        return _se_log(
-            persona,
-            "share_credentials",
-            f"{persona.name} leaked credentials",
-            "web+siem",
-            result="success",
-        )
+        return _se_log(persona, "share_credentials", f"{persona.name} leaked credentials", "web+siem", result="success")
 
     async def _react_report(self, persona: NPCPersona, action: NPCAction) -> dict[str, Any]:
         detail = "; ".join(action.side_effects) if action.side_effects else "suspicious activity"
+        safe_name = shlex.quote(persona.name)
+        safe_detail = shlex.quote(detail)
         await self.containers.exec(
-            "siem",
-            f'echo "[$(date)] NPC-REPORT: {persona.name}: {detail}" '
+            self._host_siem,
+            f"printf '[%s] NPC-REPORT: %s: %s\\n' \"$(date)\" {safe_name} {safe_detail} "
             f">> /var/log/siem/consolidated/all.log",
         )
         return _se_log(persona, "report_to_IT", detail, "siem:alert", result="blocked")
@@ -255,17 +378,22 @@ class NPCActionExecutor:
 
 
 def _extract_web_pages(snapshot: SnapshotSpec) -> list[str]:
-    """Extract URL paths from snapshot files dict (web:*.php -> /path)."""
+    """Extract URL paths from snapshot files dict (web:*.php -> /path).
+
+    Handles arbitrary doc roots by stripping any ``/var/www/<app>/`` prefix
+    to produce URL paths.
+    """
     pages: list[str] = []
     for key in snapshot.files:
         if not key.startswith("web:"):
             continue
         path = key.split(":", 1)[1]
-        # Convert filesystem path to URL path
-        if "/var/www/" in path and path.endswith(".php"):
-            url_path = path.replace("/var/www/portal", "").replace("/var/www/html", "")
-            if url_path:
-                pages.append(url_path)
+        if not path.endswith((".php", ".html", ".htm")):
+            continue
+        # Strip doc root: /var/www/<anything>/ -> /
+        url_path = re.sub(r"^/var/www/[^/]+", "", path)
+        if url_path:
+            pages.append(url_path)
     return pages or ["/"]
 
 
@@ -306,33 +434,42 @@ def _extract_users(snapshot: SnapshotSpec) -> list[str]:
 
 
 def _extract_db_credentials(snapshot: SnapshotSpec) -> tuple[str, str]:
-    """Extract a DB user/password pair from topology users."""
+    """Extract DB credentials from topology users. Fallback to defaults."""
     users = snapshot.topology.get("users", [])
     for user in users:
         if not isinstance(user, dict):
             continue
         hosts = user.get("hosts", [])
         if isinstance(hosts, list) and "db" in hosts:
-            return str(user.get("username", "app_user")), str(user.get("password", "AppUs3r!2024"))
+            return (
+                str(user.get("username", "app_user")),
+                str(user.get("password") or "AppUs3r!2024"),
+            )
     return "app_user", "AppUs3r!2024"
 
 
 def _extract_ssh_credentials(snapshot: SnapshotSpec) -> tuple[str, str]:
-    """Extract an admin-like SSH credential pair from topology users."""
+    """Extract SSH admin credentials from topology users. Fallback to defaults."""
     users = snapshot.topology.get("users", [])
     for user in users:
         if not isinstance(user, dict):
             continue
         groups = user.get("groups", [])
         role = str(user.get("role", "")).strip().lower()
-        if role == "admin" or (isinstance(groups, list) and "admins" in groups):
-            return str(user.get("username", "admin")), str(user.get("password", "Adm1n!2024"))
+        if role in {"admin", "sysadmin", "root"} or (isinstance(groups, list) and "admins" in groups):
+            return (
+                str(user.get("username", "admin")),
+                str(user.get("password") or "Adm1n!2024"),
+            )
     for user in users:
         if not isinstance(user, dict):
             continue
         hosts = user.get("hosts", [])
-        if isinstance(hosts, list) and any(host != "db" for host in hosts):
-            return str(user.get("username", "admin")), str(user.get("password", "Adm1n!2024"))
+        if isinstance(hosts, list) and any(h in hosts for h in ("web", "files", "ldap", "siem")):
+            return (
+                str(user.get("username", "admin")),
+                str(user.get("password") or "Adm1n!2024"),
+            )
     return "admin", "Adm1n!2024"
 
 
@@ -344,15 +481,16 @@ def _username_from_persona(persona: NPCPersona) -> str:
 
 
 def _log(persona: NPCPersona, action: str, detail: str, source: str) -> dict[str, Any]:
+    """Log a routine (benign) NPC action."""
     return {
         "timestamp": time.time(),
         "type": f"npc_{action}",
+        "label": "benign",
         "persona": persona.name,
         "department": persona.department,
         "action": action,
         "detail": detail,
         "source": source,
-        "label": "benign",
     }
 
 
@@ -362,7 +500,7 @@ def _se_log(
     detail: str,
     source: str,
     *,
-    result: str,
+    result: str = "unknown",
 ) -> dict[str, Any]:
     """Build a social-engineering event entry used by reward coupling."""
     return {
@@ -374,5 +512,27 @@ def _se_log(
         "detail": detail,
         "source": source,
         "label": "reactive",
+        "result": result,
+    }
+
+
+def _se_log(
+    persona: NPCPersona,
+    action: str,
+    detail: str,
+    source: str,
+    *,
+    result: str = "unknown",
+) -> dict[str, Any]:
+    """Log a social-engineering reactive NPC action for reward coupling."""
+    return {
+        "timestamp": time.time(),
+        "type": "social_engineering",
+        "label": "reactive",
+        "persona": persona.name,
+        "department": persona.department,
+        "action": action,
+        "detail": detail,
+        "source": source,
         "result": result,
     }

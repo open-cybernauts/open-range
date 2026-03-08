@@ -80,6 +80,41 @@ class NPCProfile(BaseModel, extra="allow"):
     )
 
 
+class NPCConfig(BaseModel, extra="allow"):
+    """Manifest-level NPC traffic configuration.
+
+    Controls background noise intensity, LLM agent behavior, and
+    scalability knobs.  All fields have tier-appropriate defaults.
+    """
+
+    level: int = Field(
+        default=0,
+        ge=0,
+        le=1,
+        description="0=shell scripts + chat only, 1=shell scripts + LLM NPC agents",
+    )
+    rate_lambda: float = Field(
+        default=10.0,
+        gt=0,
+        description="Shell script requests per minute",
+    )
+    max_concurrent_agents: int = Field(
+        default=4,
+        ge=1,
+        description="Max simultaneous LLM NPC agent tasks (prevents API floods)",
+    )
+    action_interval_min: int = Field(
+        default=2,
+        ge=1,
+        description="Minutes between LLM NPC routine actions",
+    )
+    chat_message_count: int = Field(
+        default=10,
+        ge=0,
+        description="Number of deterministic chat messages to seed at episode start",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Data and business processes -- tells the Builder what to protect
 # ---------------------------------------------------------------------------
@@ -355,6 +390,7 @@ class Manifest(BaseModel):
     departments: list[Department] = Field(default_factory=list)
     users: list[User] = Field(default_factory=list)
     npc_personas: list[NPCProfile] = Field(default_factory=list)
+    npc_config: NPCConfig = Field(default_factory=NPCConfig)
     data_inventory: list[DataAsset] = Field(default_factory=list)
     business_processes: list[BusinessProcess] = Field(default_factory=list)
 

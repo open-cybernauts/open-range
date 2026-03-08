@@ -127,6 +127,17 @@ users:
     hosts: [web, db, files, siem, mail]
 
 # ---------------------------------------------------------------------------
+# NPC traffic configuration
+# ---------------------------------------------------------------------------
+
+npc_config:
+  level: 1                     # Tier 2+: enable LLM NPC agents
+  rate_lambda: 15.0            # higher traffic volume
+  max_concurrent_agents: 4     # cap LLM NPC agents for Tier 2
+  action_interval_min: 2
+  chat_message_count: 20       # more background noise for Blue
+
+# ---------------------------------------------------------------------------
 # NPC personas (subset of users who generate background traffic)
 # ---------------------------------------------------------------------------
 

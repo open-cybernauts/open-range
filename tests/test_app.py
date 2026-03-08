@@ -10,11 +10,24 @@ Stateful tests use WebSocket sessions.
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 from starlette.testclient import TestClient
 
+from open_range.protocols import SnapshotSpec
 from open_range.server.app import create_app
+
+
+_TEST_SNAPSHOT = SnapshotSpec(
+    topology={"hosts": ["attacker", "siem"]},
+    flags=[],
+    golden_path=[],
+    task={
+        "red_briefing": "Test mode — app endpoint tests.",
+        "blue_briefing": "Test mode — app endpoint tests.",
+    },
+)
 
 
 @pytest.fixture()
@@ -35,6 +48,31 @@ class TestHealth:
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json()["status"] == "healthy"
+
+
+class TestAppFactory:
+    def test_managed_runtime_enabled_by_default(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("OPENRANGE_MOCK", raising=False)
+        monkeypatch.delenv("OPENRANGE_ENABLE_MANAGED_RUNTIME", raising=False)
+        monkeypatch.delenv("OPENRANGE_DISABLE_MANAGED_RUNTIME", raising=False)
+        app = create_app()
+        assert hasattr(app.state, "runtime")
+
+    def test_managed_runtime_can_be_disabled(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("OPENRANGE_MOCK", raising=False)
+        monkeypatch.setenv("OPENRANGE_DISABLE_MANAGED_RUNTIME", "1")
+        app = create_app()
+        assert not hasattr(app.state, "runtime")
+
+    def test_web_interface_does_not_double_mount_web(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("OPENRANGE_MOCK", raising=False)
+        monkeypatch.setenv("ENABLE_WEB_INTERFACE", "true")
+        app = create_app()
+        web_mounts = [
+            route for route in app.router.routes
+            if getattr(route, "path", None) == "/web" and route.__class__.__name__ == "Mount"
+        ]
+        assert web_mounts == []
 
 
 # ===================================================================
