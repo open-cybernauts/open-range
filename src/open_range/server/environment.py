@@ -112,7 +112,8 @@ class RangeEnvironment(MCPEnvironment):
     - **Text commands**: ``RangeAction(command="nmap -sV ...", mode="red")``
     - **MCP tool calls**: ``CallToolAction(tool_name="run_command", ...)``
 
-    Both paths route to the same Docker exec / subprocess backend.
+    Both paths route to the same Docker-backed execution backend, with an
+    explicit mock mode available only for tests and local demos.
     """
 
     SUPPORTS_CONCURRENT_SESSIONS = False
@@ -315,37 +316,45 @@ class RangeEnvironment(MCPEnvironment):
         # Docker client -- resolved lazily
         self._docker_client: Any = None
         self._docker_available = docker_available
+        self._mock_mode = docker_available is False
         self._runtime = runtime
         self._episode_recorded = False
         self._active_project: "BootedSnapshotProject | None" = None
 
-        # Service PIDs tracked for subprocess mode lifecycle
+        # Service PID bookkeeping retained for legacy helpers/tests.
         self._service_pids: list[int] = []
 
-        # Zone router for subprocess mode enforcement
-        self._zone_router: Any = None
-
-        # Execution mode: "auto", "docker", or "subprocess"
+        # Execution mode: "auto" or "docker"
         self._execution_mode = execution_mode
 
         # OPENRANGE_MOCK=1 forces mock mode (docker_available=False)
         if os.environ.get("OPENRANGE_MOCK") == "1" and docker_available is None:
             self._docker_available = False
+            self._mock_mode = True
+
+        if execution_mode == "subprocess":
+            raise ValueError(
+                "execution_mode='subprocess' is no longer supported. "
+                "OpenRange requires Docker-backed execution."
+            )
 
         if execution_mode == "auto":
             env_mode = os.environ.get("OPENRANGE_EXECUTION_MODE", "")
             if env_mode:
+                if env_mode == "subprocess":
+                    raise ValueError(
+                        "OPENRANGE_EXECUTION_MODE=subprocess is no longer supported. "
+                        "OpenRange requires Docker-backed execution."
+                    )
                 self._execution_mode = env_mode
             elif docker_available is False or self._docker_available is False:
-                # Explicit docker_available=False (unit tests) → mock mode,
-                # NOT subprocess. Keep execution_mode as "auto" so
-                # _exec_in_container falls through to mock.
+                # Explicit docker_available=False opts into mock mode for
+                # tests/demo helpers. Keep execution_mode as "docker".
                 self._execution_mode = "docker"
             elif self._get_docker() is not None:
                 self._execution_mode = "docker"
             else:
-                # Missing Docker must not silently change the environment
-                # semantics to host-shell execution. Degrade to mock mode.
+                # Missing Docker must not silently change semantics.
                 self._execution_mode = "docker"
 
     # -----------------------------------------------------------------
@@ -366,7 +375,10 @@ class RangeEnvironment(MCPEnvironment):
             return self._docker_client
         except Exception:
             self._docker_available = False
-            logger.warning("Docker SDK unavailable -- running in mock mode")
+            if self._mock_mode:
+                logger.warning("Docker SDK unavailable -- running in explicit mock mode")
+            else:
+                logger.warning("Docker SDK unavailable")
             return None
 
     def _container_name(self, host: str) -> str:
@@ -404,15 +416,10 @@ class RangeEnvironment(MCPEnvironment):
             except Exception:
                 pass
 
-        # In subprocess mode, commands run locally — the host name is only
-        # used for logging/routing, not for Docker container lookup.
-        if self._execution_mode == "subprocess":
-            return host
-
         # In unit-test mock mode or when no containers are running,
         # return the bare hostname.  Execution will fail gracefully
         # (docker exec won't find the container → stderr returned).
-        if self._docker_available is False and self._execution_mode == "docker":
+        if self._mock_mode and self._docker_available is False and self._execution_mode == "docker":
             return host
 
         # Docker is reachable but no matching container exists — return bare
@@ -423,25 +430,6 @@ class RangeEnvironment(MCPEnvironment):
         )
         return host
 
-    def _exec_via_subprocess(self, host: str, command: str, timeout: float = 30.0) -> tuple[str, str]:
-        """Execute a command via local subprocess (all-in-one container mode).
-
-        All services run locally. Commands execute directly via bash.
-        The host parameter is used for logging but commands run on localhost.
-        """
-        try:
-            result = sp.run(
-                ["bash", "-c", command],
-                capture_output=True,
-                timeout=timeout,
-                text=True,
-            )
-            return result.stdout, result.stderr
-        except sp.TimeoutExpired:
-            return "", f"Command timed out after {timeout}s"
-        except Exception as exc:
-            return "", f"Execution error: {exc}"
-
     def _exec_in_container(
         self,
         container_name: str,
@@ -450,37 +438,24 @@ class RangeEnvironment(MCPEnvironment):
     ) -> tuple[str, str]:
         """Execute a command inside a Docker container.
 
-        Returns (stdout, stderr). Routes based on execution_mode:
-        - "subprocess": runs via local bash
-        - "docker": runs via Docker SDK
-        - Falls back to mock when docker_available is explicitly False
-          (unit test backward compatibility).
+        Returns (stdout, stderr). Runs via Docker SDK, or explicit mock mode
+        when docker_available=False was requested for tests/demo helpers.
         """
-        # Subprocess execution mode
-        if self._execution_mode == "subprocess":
-            return self._exec_via_subprocess(
-                container_name,
-                command,
-                timeout_s if timeout_s is not None else self._exec_timeout,
-            )
-
         # Unit-test backward compatibility: when docker_available was explicitly
-        # set to False AND execution_mode resolved to "docker" (the auto path
-        # for tests), return synthetic output so tests can assert on container
-        # routing without real Docker.
+        # set to False or OPENRANGE_MOCK=1 is enabled, return synthetic output
+        # so tests/demo helpers can assert on container routing without Docker.
         if self._docker_available is False:
-            if self._execution_mode == "docker":
+            if self._mock_mode and self._execution_mode == "docker":
                 return (
                     f"[mock] executed on {container_name}: {command}",
                     "",
                 )
-            # Production path: docker unavailable and mode is not subprocess
             return "", f"Docker unavailable (execution_mode={self._execution_mode})"
 
         # Docker execution mode
         client = self._get_docker()
         if client is None:
-            return "", "Docker unavailable and execution_mode is not 'subprocess'"
+            return "", "Docker unavailable"
         try:
             container = client.containers.get(container_name)
             if timeout_s is not None:
@@ -540,17 +515,13 @@ class RangeEnvironment(MCPEnvironment):
         ``<container>:<path>`` for file deployments and ``db:sql`` for SQL
         statements. Creates parent directories as needed.
 
-        In subprocess mode, files are written directly to disk and SQL is
-        executed via the local ``mysql`` CLI.
         """
-        if self._execution_mode == "subprocess":
-            self._apply_snapshot_subprocess(snapshot)
-            return
-
         client = self._get_docker()
         if client is None:
-            logger.info("Docker unavailable — skipping snapshot application")
-            return
+            if self._mock_mode:
+                logger.info("Docker unavailable in mock mode — skipping snapshot application")
+                return
+            raise RuntimeError("Docker unavailable during snapshot application")
 
         if not snapshot.files:
             logger.info("No files in snapshot to deploy")
@@ -614,135 +585,21 @@ class RangeEnvironment(MCPEnvironment):
             deployed, len(snapshot.files),
         )
 
-    def _apply_snapshot_subprocess(self, snapshot: SnapshotSpec) -> None:
-        """Deploy snapshot artifacts directly to the local filesystem.
-
-        Used in subprocess execution mode where all services run locally.
-        SQL statements are written to a temp file and executed via ``mysql`` CLI.
-        Regular files are written directly to their target paths.
-        """
-        if not snapshot.files:
-            logger.info("No files in snapshot to deploy")
-            return
-
-        import tempfile
-
-        deployed = 0
-        for key, content in snapshot.files.items():
-            try:
-                if key == "db:sql":
-                    # Auto-create databases referenced by USE statements
-                    import re
-
-                    db_names = re.findall(r"(?i)USE\s+(\w+)\s*;", content)
-                    preamble = ""
-                    for db in dict.fromkeys(db_names):  # dedupe, preserve order
-                        preamble += f"CREATE DATABASE IF NOT EXISTS `{db}`;\n"
-                    sql_content = preamble + content
-
-                    # Write SQL to temp file, execute via mysql CLI
-                    with tempfile.NamedTemporaryFile(
-                        mode="w", suffix=".sql", delete=False
-                    ) as tmp:
-                        tmp.write(sql_content)
-                        tmp_path = tmp.name
-                    try:
-                        db_creds = self._db_credentials()
-                        _, stderr = self._exec_via_subprocess(
-                            "db",
-                            f"mysql {db_creds} < {shlex.quote(tmp_path)}",
-                            timeout=self._exec_timeout,
-                        )
-                        if stderr and "ERROR" in stderr:
-                            logger.warning("SQL deployment error: %s", stderr)
-                        else:
-                            deployed += 1
-                            logger.info("Deployed SQL to db (subprocess)")
-                    finally:
-                        os.unlink(tmp_path)
-                    continue
-
-                if ":" not in key:
-                    logger.warning("Skipping file with bad key format: %s", key)
-                    continue
-
-                _container, path = key.split(":", 1)
-
-                # Create parent directory and write file directly
-                parent_dir = os.path.dirname(path) if os.path.dirname(path) else "/"
-                os.makedirs(parent_dir, exist_ok=True)
-
-                with open(path, "w") as f:
-                    f.write(content)
-                deployed += 1
-                logger.info("Deployed file (subprocess): %s:%s", _container, path)
-
-            except Exception as exc:
-                logger.warning("Failed to deploy %s: %s", key, exc)
-
-        logger.info(
-            "Snapshot application complete (subprocess): %d/%d artifacts deployed",
-            deployed, len(snapshot.files),
-        )
-
-    # -----------------------------------------------------------------
-    # Service lifecycle (subprocess mode)
-    # -----------------------------------------------------------------
-
     def _stop_services(self) -> None:
         """Stop services started by a previous episode.
 
-        Derives daemon names from the snapshot's ``services`` list.
+        Service lifecycle is Docker-managed; explicit local subprocess daemons
+        are no longer supported.
         """
-        if self._execution_mode != "subprocess":
-            return
-
-        import signal
-
-        # Kill tracked PIDs first
-        for pid in self._service_pids:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            except Exception as exc:
-                logger.debug("Failed to stop PID %d: %s", pid, exc)
-
-        daemon_names: list[str] = []
-        if self._snapshot and self._snapshot.services:
-            for svc in self._snapshot.services:
-                name = svc.daemon.split("/")[-1].split()[0]
-                if name and name not in daemon_names:
-                    daemon_names.append(name)
-
-        for daemon_name in daemon_names:
-            try:
-                sp.run(
-                    ["pkill", "-x", daemon_name],
-                    capture_output=True,
-                    timeout=5,
-                    text=True,
-                    check=False,
-                )
-            except Exception as exc:
-                logger.debug("Failed to stop daemon %s: %s", daemon_name, exc)
-
         self._service_pids = []
-        logger.info("Stopped previous episode services")
 
     def _start_snapshot_services(self, snapshot: SnapshotSpec) -> None:
-        """Start services based on snapshot spec (subprocess mode only).
+        """Start services for a snapshot.
 
-        The snapshot's ``services`` list is normally populated by the renderer.
-        Snapshots without explicit service specs skip subprocess provisioning.
+        Snapshot service lifecycle is Docker-managed; explicit local subprocess
+        provisioning is no longer supported.
         """
-        if self._execution_mode != "subprocess":
-            return
-
-        if snapshot.services:
-            self._start_services_from_specs(snapshot.services)
-        else:
-            logger.info("No service specs in snapshot -- skipping service provisioning")
+        return None
 
     def _start_services_from_specs(self, services: list[ServiceSpec]) -> None:
         """Start a list of :class:`ServiceSpec` entries generically."""
@@ -1066,8 +923,7 @@ class RangeEnvironment(MCPEnvironment):
             return
         raise RuntimeError(
             "Direct docker snapshot reset is disabled because it overlays mutable "
-            "container state across episodes. Use ManagedSnapshotRuntime or "
-            "explicitly opt into execution_mode='subprocess'."
+            "container state across episodes. Use ManagedSnapshotRuntime."
         )
 
     def _refresh_npc_traffic_log(self) -> None:
@@ -1126,9 +982,8 @@ class RangeEnvironment(MCPEnvironment):
         else:
             raise RuntimeError(
                 "No snapshot source available. Provide a snapshot via "
-                "kwargs['snapshot'], set OPENRANGE_RUNTIME_SNAPSHOT or "
-                "OPENRANGE_RUNTIME_MANIFEST, or pass a runtime/default snapshot "
-                "to the constructor."
+                "kwargs['snapshot'], set OPENRANGE_RUNTIME_MANIFEST, or pass "
+                "a runtime/default snapshot to the constructor."
             )
 
         # Defensive: ensure required fields are not None
@@ -1518,16 +1373,6 @@ class RangeEnvironment(MCPEnvironment):
                 self._state.services_status = status_map
                 return
 
-        if self._execution_mode == "subprocess" and self._snapshot and self._snapshot.services:
-            checks_by_host: dict[str, list[bool]] = {}
-            for svc in self._snapshot.services:
-                host = str(getattr(svc, "host", "") or "").strip()
-                if not host:
-                    continue
-                checks_by_host.setdefault(host, []).append(self._probe_readiness(svc.readiness))
-            for host, checks in checks_by_host.items():
-                status_map[host] = "healthy" if checks and all(checks) else "degraded"
-
         self._state.services_status = status_map
 
     # -----------------------------------------------------------------
@@ -1555,7 +1400,6 @@ class RangeEnvironment(MCPEnvironment):
         self._stop_npcs()
         self._teardown_active_project()
 
-        # Stop services from previous episode (subprocess mode)
         self._stop_services()
 
         # Select snapshot
@@ -1592,19 +1436,10 @@ class RangeEnvironment(MCPEnvironment):
         activated = self._activate_runtime_snapshot(self._snapshot, episode_id=eid)
         self._ensure_clean_reset_path(activated=activated)
 
-        # Start services BEFORE applying snapshot data so that daemons
-        # (MySQL, slapd, etc.) are ready to receive SQL / LDIF payloads.
         self._start_snapshot_services(self._snapshot)
 
         if not activated:
             self._apply_snapshot(self._snapshot)
-
-        # Initialize zone router from topology (subprocess mode)
-        if self._execution_mode == "subprocess":
-            from open_range.server.zone_router import ZoneRouter
-
-            topology = self._snapshot.topology if isinstance(self._snapshot.topology, dict) else {}
-            self._zone_router = ZoneRouter.from_snapshot(topology)
 
         # Start NPC traffic for this episode
         self._start_npcs(self._snapshot)
@@ -1896,13 +1731,12 @@ class RangeEnvironment(MCPEnvironment):
     def _get_pending_alerts(self) -> list[str]:
         """Return alerts from Red's recent actions for Blue to observe.
 
-        In production (docker or subprocess mode with real infrastructure),
-        queries the SIEM container for actual log-based alerts. Falls back
+        In production, queries the SIEM container for actual log-based alerts. Falls back
         to synthetic alerts derived from Red action history when SIEM queries
         return nothing or in unit-test mock mode (capped to recent 20 lines).
         """
         # Try real SIEM query in non-mock modes
-        if self._docker_available is not False or self._execution_mode == "subprocess":
+        if not self._mock_mode and self._docker_available is not False:
             siem_alerts = self._query_siem_alerts()
             if siem_alerts:
                 return siem_alerts
@@ -1950,17 +1784,10 @@ class RangeEnvironment(MCPEnvironment):
         return list(self._npc_traffic_log)
 
     def close(self) -> None:
-        """Release resources (Docker client, NPC manager, episode state).
-
-        In subprocess mode, services are global system processes shared across
-        env instances.  They are managed by reset() (episode lifecycle), not by
-        close() — the stateless HTTP handler creates and closes an env per
-        request, and killing services here would undo the work done in reset().
-        """
+        """Release resources (Docker client, NPC manager, episode state)."""
         self._report_episode_result(completed=False)
         self._stop_npcs()
-        if self._execution_mode != "subprocess":
-            self._stop_services()
+        self._stop_services()
         self._teardown_active_project()
         if self._docker_client is not None:
             try:

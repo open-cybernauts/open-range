@@ -1,4 +1,4 @@
-"""Helpers for publishing validated OpenRange bundles to Hugging Face Spaces."""
+"""Helpers for packaging OpenRange app bundles for external deployment."""
 
 from __future__ import annotations
 
@@ -8,8 +8,6 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-SPACE_SNAPSHOT_PATH = Path("snapshots/deployed/spec.json")
-_SPACE_ENV_VAR = "OPENRANGE_RUNTIME_SNAPSHOT"
 _SPACE_ID_ENV_VARS = ("OPENRANGE_HF_SPACE", "HF_SPACE")
 _HF_TOKEN_ENV_VARS = (
     "HF_TOKEN",
@@ -98,38 +96,10 @@ def deploy_validated_snapshot_to_space(
     private: bool | None = None,
     commit_message: str | None = None,
 ) -> Any:
-    """Upload the current OpenRange app plus a validated snapshot to a Space."""
-    from huggingface_hub import HfApi
-
-    resolved_space = resolve_space_id(space_id)
-    resolved_token = resolve_hf_token(token)
-    bundle_dir = stage_space_bundle(snapshot_path)
-    api = HfApi()
-
-    try:
-        if create_repo:
-            api.create_repo(
-                resolved_space,
-                token=resolved_token,
-                repo_type="space",
-                exist_ok=True,
-                private=private,
-                space_sdk="docker",
-            )
-        api.add_space_variable(
-            resolved_space,
-            _SPACE_ENV_VAR,
-            SPACE_SNAPSHOT_PATH.as_posix(),
-            description="Validated snapshot served by OpenRange.",
-            token=resolved_token,
-        )
-        return api.upload_folder(
-            repo_id=resolved_space,
-            repo_type="space",
-            folder_path=bundle_dir,
-            token=resolved_token,
-            commit_message=commit_message
-            or f"Deploy validated snapshot {Path(snapshot_path).stem}",
-        )
-    finally:
-        shutil.rmtree(bundle_dir, ignore_errors=True)
+    """Reject direct HF snapshot deployment for Docker-only OpenRange."""
+    raise RuntimeError(
+        "Direct Hugging Face snapshot deployment is unsupported. "
+        "OpenRange now requires Docker-backed execution and no longer "
+        "ships the fixed-snapshot subprocess fallback. Deploy a proxy/UI "
+        "to HF or use a Docker-capable backend instead."
+    )

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
-import json
 from typing import Any
 
 from fastapi import FastAPI
@@ -144,41 +143,16 @@ class TestAppFactoryContract:
         assert "episode_id" in payload["state"]["properties"]
         assert "step_count" in payload["state"]["properties"]
 
-    def test_create_app_prefers_runtime_snapshot_over_managed_runtime(self, monkeypatch, tmp_path):
-        from open_range.protocols import SnapshotSpec
-
+    def test_create_app_rejects_fixed_runtime_snapshot_mode(self, monkeypatch, tmp_path):
         snapshot_path = tmp_path / "runtime-spec.json"
-        snapshot = SnapshotSpec(
-            topology={"hosts": ["attacker", "siem"]},
-            flags=[],
-            golden_path=[],
-            task={
-                "red_briefing": "Fixed snapshot.",
-                "blue_briefing": "Fixed snapshot.",
-            },
-        )
-        snapshot_path.write_text(
-            json.dumps(snapshot.model_dump(mode="python")),
-            encoding="utf-8",
-        )
+        snapshot_path.write_text("{}", encoding="utf-8")
 
         monkeypatch.setenv("OPENRANGE_RUNTIME_SNAPSHOT", str(snapshot_path))
-        monkeypatch.setenv("OPENRANGE_RUNTIME_MANIFEST", "manifests/tier1_basic.yaml")
-
-        def _explode():
-            raise AssertionError("managed runtime should not be created in snapshot mode")
 
         app_module = importlib.import_module("open_range.server.app")
-        monkeypatch.setattr(
-            "open_range.server.runtime.ManagedSnapshotRuntime.from_env",
-            _explode,
-        )
 
-        app = app_module.create_app()
-        env = app.state.env
-        assert isinstance(env, RangeEnvironment)
-        assert env._default_snapshot is not None
-        assert env._default_snapshot.task.red_briefing == "Fixed snapshot."
+        with pytest.raises(RuntimeError, match="OPENRANGE_RUNTIME_SNAPSHOT is no longer supported"):
+            app_module.create_app()
 
 
 class TestClientContract:

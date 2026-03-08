@@ -1,9 +1,9 @@
-"""Generate subprocess ServiceSpec entries from snapshot service instances.
+"""Generate ServiceSpec metadata from snapshot service instances.
 
 The lifecycle knowledge for known service families lives in
 ``service_catalog.py``. This module stays as the compatibility adapter that
 turns explicit or inferred service instances into ``ServiceSpec`` entries for
-subprocess execution mode.
+rendering, validation, and orchestration metadata.
 """
 
 from __future__ import annotations

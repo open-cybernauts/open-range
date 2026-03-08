@@ -59,7 +59,7 @@ uv sync --extra synthetic
 export OPENRANGE_ENABLE_MANAGED_REFILL=1
 export OPENRANGE_RUNTIME_BUILDER=llm
 
-# End-to-end demo (no Docker, no LLM)
+# End-to-end demo (mock mode, no Docker, no LLM)
 uv run python examples/demo.py
 
 # Generate synthetic SFT traces from a snapshot or manifest
@@ -92,8 +92,6 @@ uv run openrange build \
   --timeout 180
 uv run openrange validate -s /tmp/openrange-tier2/snapshot/spec.json
 uv run openrange validate -s /tmp/openrange-tier2/snapshot/spec.json --docker
-uv run openrange validate -s /tmp/openrange-tier2/snapshot/spec.json --docker \
-  --deploy-hf --hf-space <user>/<space>
 uv run openrange render -s /tmp/openrange-tier2/snapshot/spec.json -o /tmp/openrange-tier2/artifacts
 uv run openrange deploy -s /tmp/openrange-tier2/snapshot/spec.json --compose-dir /tmp/openrange-tier2/artifacts
 uv run openrange episode -s /tmp/openrange-tier2/snapshot/spec.json --docker --golden-path
@@ -111,7 +109,8 @@ uv run pytest tests/ -v --tb=short
 
 Notes:
 - `openrange validate --docker` now boots a temporary compose project, runs the live Docker-backed checks, and tears the project down automatically.
-- `openrange validate --deploy-hf` uploads the current app plus the validated snapshot to a Hugging Face Space and configures the Space to boot that exact snapshot.
+- `examples/demo.py` is an explicit mock-mode harness for local docs/testing. It is not the production runtime path.
+- Direct Hugging Face snapshot deployment is unsupported for Docker-only OpenRange. Use a proxy/UI on HF or a Docker-capable backend for the real runtime.
 - The same workflow works for any manifest; swap the manifest path, output directory, and `--tier` value to match the range you want to build.
 - For large builder responses, cap `--max-tokens` and set an explicit `--timeout` so the CLI fails fast instead of waiting indefinitely on oversized generations.
 

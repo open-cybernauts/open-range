@@ -1,11 +1,11 @@
 import json
-from types import SimpleNamespace
 
 from click.testing import CliRunner
 
 from open_range.cli import cli
 from open_range.protocols import CheckResult, ContainerSet
 from open_range.server.compose_runner import BootedSnapshotProject
+from open_range.validator.validator import ValidationResult
 
 
 class _DockerAwareCheck:
@@ -79,7 +79,7 @@ def test_validate_docker_boots_temporary_project_and_passes_live_containers(
     assert "Validation PASSED" in result.output
 
 
-def test_validate_can_deploy_to_hugging_face_after_success(
+def test_validate_rejects_hugging_face_snapshot_deploy_for_docker_only_runtime(
     tmp_path,
     sample_snapshot_spec,
     monkeypatch,
@@ -90,24 +90,12 @@ def test_validate_can_deploy_to_hugging_face_after_success(
         encoding="utf-8",
     )
 
-    deployed = {}
-
-    def fake_deploy(snapshot, *, space_id, token, create_repo, private, commit_message):
-        deployed.update(
-            {
-                "snapshot": snapshot,
-                "space_id": space_id,
-                "token": token,
-                "create_repo": create_repo,
-                "private": private,
-                "commit_message": commit_message,
-            }
-        )
-        return SimpleNamespace(commit_url="https://huggingface.co/spaces/test/open-range/commit/abc123")
+    async def fake_validate(self, snapshot, containers):
+        return ValidationResult(passed=True, checks=[], total_time_s=0.0)
 
     monkeypatch.setattr(
-        "open_range.hf_space.deploy_validated_snapshot_to_space",
-        fake_deploy,
+        "open_range.validator.validator.ValidatorGate.validate",
+        fake_validate,
     )
 
     runner = CliRunner()
@@ -127,9 +115,6 @@ def test_validate_can_deploy_to_hugging_face_after_success(
         ],
     )
 
-    assert result.exit_code == 0, result.output
-    assert deployed["snapshot"] == str(snapshot_path)
-    assert deployed["space_id"] == "test/open-range"
-    assert deployed["token"] == "hf_test"
-    assert deployed["create_repo"] is True
-    assert "Hugging Face deployment complete." in result.output
+    assert result.exit_code == 1, result.output
+    assert "Hugging Face deployment failed" in result.output
+    assert "Direct Hugging Face snapshot deployment is unsupported" in result.output

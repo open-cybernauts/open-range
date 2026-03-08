@@ -450,7 +450,7 @@ def _import_check(dotted: str) -> Any:
 @click.option("-s", "--snapshot", required=True, type=click.Path(exists=True), help="Path to snapshot JSON.")
 @click.option("--checks", default=None, help="Comma-separated check names (default: all applicable).")
 @click.option("--docker/--no-docker", default=False, help="Include Docker-dependent checks (requires running containers).")
-@click.option("--deploy-hf", is_flag=True, default=False, help="After validation passes, publish the current app plus this snapshot to a Hugging Face Space.")
+@click.option("--deploy-hf", is_flag=True, default=False, help="Attempt Hugging Face deployment after validation (unsupported for Docker-only OpenRange).")
 @click.option("--hf-space", default=None, help="Hugging Face Space repo id (<user>/<space>). Defaults to $OPENRANGE_HF_SPACE.")
 @click.option("--hf-token", default=None, help="Hugging Face token. Defaults to $HF_TOKEN.")
 @click.option("--hf-create/--no-hf-create", default=True, help="Create the Space automatically if it does not exist.")

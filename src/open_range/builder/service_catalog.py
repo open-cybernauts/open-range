@@ -2,8 +2,8 @@
 
 This module is the bridge from snapshot-level service instances to concrete
 runtime daemons. It centralizes image hints, host/service-name hints, and
-subprocess lifecycle declarations so the renderer and validator do not have to
-re-encode service semantics in multiple places.
+lifecycle declarations so the renderer and validator do not have to re-encode
+service semantics in multiple places.
 """
 
 from __future__ import annotations

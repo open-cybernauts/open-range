@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -430,52 +429,18 @@ class TestEnvironmentServiceLifecycle:
         # Should not raise or attempt to start anything
         env._start_snapshot_services(snapshot)
 
-    @patch("subprocess.Popen")
-    @patch("subprocess.run")
-    def test_start_snapshot_services_subprocess_mode(self, mock_run, mock_popen):
-        """_start_snapshot_services starts declared services in subprocess mode."""
+    def test_subprocess_execution_mode_is_rejected(self):
+        """RangeEnvironment no longer supports subprocess execution mode."""
         from open_range.server.environment import RangeEnvironment
 
-        # Mock Popen to return an object with a wait() method
-        mock_proc = MagicMock()
-        mock_popen.return_value = mock_proc
+        with pytest.raises(ValueError, match="execution_mode='subprocess' is no longer supported"):
+            RangeEnvironment(docker_available=False, execution_mode="subprocess")
 
-        env = RangeEnvironment(docker_available=False, execution_mode="subprocess")
-        snapshot = SnapshotSpec(
-            topology={"hosts": ["web"]},
-            services=[
-                ServiceSpec(
-                    host="web",
-                    daemon="nginx",
-                    init_commands=["mkdir -p /var/log/nginx"],
-                    start_command="nginx &",
-                    readiness=ReadinessCheck(type="tcp", port=80, timeout_s=0),
-                ),
-            ],
-        )
-        env._start_snapshot_services(snapshot)
-        # Init commands use subprocess.run, daemon start uses Popen
-        assert mock_run.call_count >= 1  # init command
-        assert mock_popen.call_count >= 1  # daemon start
-
-    def test_start_services_empty_skips(self):
-        """When no services are declared, logs and skips provisioning."""
+    def test_stop_services_is_noop_without_local_subprocess_support(self):
+        """_stop_services no longer shells out to pkill for local daemons."""
         from open_range.server.environment import RangeEnvironment
 
-        env = RangeEnvironment(docker_available=False, execution_mode="subprocess")
-        snapshot = SnapshotSpec(
-            topology={"hosts": ["web", "db"]},
-            services=[],  # empty
-        )
-        # Should not raise — just logs and returns
-        env._start_snapshot_services(snapshot)
-
-    @patch("subprocess.run")
-    def test_stop_services_uses_snapshot_daemons(self, mock_run):
-        """_stop_services uses daemon names from snapshot.services."""
-        from open_range.server.environment import RangeEnvironment
-
-        env = RangeEnvironment(docker_available=False, execution_mode="subprocess")
+        env = RangeEnvironment(docker_available=False)
         env._snapshot = SnapshotSpec(
             topology={"hosts": ["web"]},
             services=[
@@ -483,33 +448,6 @@ class TestEnvironmentServiceLifecycle:
                 ServiceSpec(host="db", daemon="mysqld", start_command="mysqld &"),
             ],
         )
-        env._stop_services()
-
-        # Should have called pkill for each daemon (either individually or via bash -c)
-        all_call_strs = []
-        for call in mock_run.call_args_list:
-            args = call[0][0] if call[0] else call.kwargs.get("args", [])
-            all_call_strs.append(" ".join(str(a) for a in args))
-        combined = " ".join(all_call_strs)
-        assert "nginx" in combined
-        assert "mysqld" in combined
-
-    def test_stop_services_no_services_skips_pkill(self):
-        """_stop_services skips pkill when snapshot has no services."""
-        from open_range.server.environment import RangeEnvironment
-
-        env = RangeEnvironment(docker_available=False, execution_mode="subprocess")
-        env._snapshot = SnapshotSpec(topology={"hosts": ["web"]})
-        # Should not raise — just skips pkill since no service specs
-        env._stop_services()
-
-    def test_stop_services_no_snapshot(self):
-        """_stop_services handles None snapshot gracefully."""
-        from open_range.server.environment import RangeEnvironment
-
-        env = RangeEnvironment(docker_available=False, execution_mode="subprocess")
-        env._snapshot = None
-        # Should not raise
         env._stop_services()
 
     def test_probe_readiness_tcp_unreachable(self):

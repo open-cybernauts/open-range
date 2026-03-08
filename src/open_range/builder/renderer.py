@@ -108,8 +108,8 @@ class SnapshotRenderer:
 
         Delegates to :func:`generate_service_specs` which resolves explicit
         or inferred service instances through the archetype registry into
-        subprocess-mode daemon lifecycle declarations. Only runs if the spec
-        does not already have services declared (idempotent).
+        daemon lifecycle metadata. Only runs if the spec does not already have
+        services declared (idempotent).
         """
         if spec.services:
             logger.debug("ServiceSpec entries already present — skipping generation")
