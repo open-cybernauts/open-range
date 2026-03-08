@@ -39,30 +39,41 @@ mkdir -p /var/lib/samba/private
 mkdir -p /var/log/nginx
 mkdir -p /var/log/mysql
 
-# ── 2. MySQL ────────────────────────────────────────────────────────────────
+# ── 2. MySQL / MariaDB ────────────────────────────────────────────────────
 
-echo "[start.sh] Starting MySQL..."
-if [ ! -d /var/lib/mysql/mysql ]; then
-    echo "[start.sh]   Initializing MySQL data directory..."
-    mysqld --initialize-insecure --user=mysql 2>&1 | tee "${LOGDIR}/mysql.log"
+echo "[start.sh] Starting MySQL/MariaDB..."
+# Detect which daemon is available (MariaDB on Bookworm, MySQL on Jammy)
+MYSQLD=$(command -v mariadbd || command -v mysqld || echo "")
+if [ -n "$MYSQLD" ]; then
+    if [ ! -d /var/lib/mysql/mysql ]; then
+        echo "[start.sh]   Initializing database data directory..."
+        if command -v mariadb-install-db >/dev/null 2>&1; then
+            mariadb-install-db --user=mysql 2>&1 | tee "${LOGDIR}/mysql.log"
+        else
+            mysqld --initialize-insecure --user=mysql 2>&1 | tee "${LOGDIR}/mysql.log"
+        fi
+    fi
+
+    $MYSQLD --user=mysql --log-error="${LOGDIR}/mysql.log" &
+    PIDS+=($!)
+
+    echo -n "[start.sh]   Waiting for database readiness"
+    ADMIN_CMD=$(command -v mariadb-admin || command -v mysqladmin || echo "")
+    for i in $(seq 1 30); do
+        if [ -n "$ADMIN_CMD" ] && $ADMIN_CMD ping --silent 2>/dev/null; then
+            echo " ready (${i}s)"
+            break
+        fi
+        echo -n "."
+        sleep 1
+        if [ "$i" -eq 30 ]; then
+            echo " TIMEOUT"
+            echo "[start.sh]   WARNING: Database did not become ready in 30s"
+        fi
+    done
+else
+    echo "[start.sh]   MySQL/MariaDB not installed, skipping"
 fi
-
-mysqld --user=mysql --log-error="${LOGDIR}/mysql.log" &
-PIDS+=($!)
-
-echo -n "[start.sh]   Waiting for MySQL readiness"
-for i in $(seq 1 30); do
-    if mysqladmin ping --silent 2>/dev/null; then
-        echo " ready (${i}s)"
-        break
-    fi
-    echo -n "."
-    sleep 1
-    if [ "$i" -eq 30 ]; then
-        echo " TIMEOUT"
-        echo "[start.sh]   WARNING: MySQL did not become ready in 30s"
-    fi
-done
 
 # ── 3. PHP-FPM ──────────────────────────────────────────────────────────────
 
@@ -204,4 +215,4 @@ echo "============================================================"
 # ── 10. exec uvicorn as PID 1 ──────────────────────────────────────────────
 
 cd /app/env
-exec python3 -m uvicorn server.app:app --host 0.0.0.0 --port 8000
+exec python3 -m uvicorn open_range.server.app:app --host 0.0.0.0 --port 8000

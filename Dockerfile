@@ -1,27 +1,21 @@
 # =============================================================================
 # OpenRange — Production All-in-One Dockerfile
 # =============================================================================
-# Single-stage build on Ubuntu 22.04 with Python 3.11 + all range services.
-# Installs uv for Python dependency management, then all system services.
+# Python 3.11 base + all range services installed via apt.
+# No PPA needed — python:3.11-slim-bookworm ships Python 3.11 natively.
 # =============================================================================
 
-FROM ubuntu:22.04
+FROM python:3.11-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 # ── 1. System packages: services + security tools ────────────────────────────
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # Python 3.11 via deadsnakes PPA
-    software-properties-common \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3.11-venv python3.11-dev \
     # Web
     nginx \
-    php8.1-fpm php8.1-mysql php8.1-ldap php8.1-xml php8.1-mbstring \
     # Database
-    mysql-server \
+    default-mysql-server default-mysql-client \
     # LDAP
     slapd ldap-utils \
     # Logging
@@ -37,13 +31,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     netcat-openbsd dnsutils tcpdump curl wget sshpass \
     iputils-ping whois \
     # Utilities
-    jq procps iproute2 git ca-certificates \
+    jq procps iproute2 git ca-certificates bash \
     && rm -rf /var/lib/apt/lists/*
 
 # ── 2. Install uv for Python dependency management ──────────────────────────
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
-    && mv /root/.local/bin/uv /usr/local/bin/uv
+RUN pip install --no-cache-dir uv
 
 # ── 3. Create directories and fix permissions ────────────────────────────────
 
@@ -59,6 +52,7 @@ COPY . /app/env
 WORKDIR /app/env
 
 RUN uv venv --python python3.11 /app/.venv \
+    && . /app/.venv/bin/activate \
     && if [ -f uv.lock ]; then \
         uv sync --frozen --no-editable; \
     else \
