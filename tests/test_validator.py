@@ -336,7 +336,6 @@ async def test_exploitability_skips_meta_commands(mock_containers):
     assert result.details["skipped_steps"] == [2]
 
 
-@pytest.mark.asyncio
 async def test_exploitability_fails_when_expectation_missing_in_strict_mode(mock_containers):
     from open_range.validator.exploitability import ExploitabilityCheck
 
@@ -621,6 +620,36 @@ async def test_evidence_fails_when_pattern_missing(mock_containers):
     mock_containers.exec_results[("siem", "grep")] = "0"
     result = await EvidenceCheck().check(spec, mock_containers)
     assert result.passed is False
+
+
+@pytest.mark.asyncio
+async def test_evidence_fails_when_grep_returns_error_text(mock_containers):
+    from open_range.validator.evidence import EvidenceCheck
+
+    spec = SnapshotSpec(
+        evidence_spec=[
+            EvidenceItem(type="log_entry", location="siem:/var/log/missing.log", pattern="ATTACK"),
+        ]
+    )
+    mock_containers.exec_results[("siem", "grep")] = "grep: /var/log/missing.log: No such file or directory"
+    result = await EvidenceCheck().check(spec, mock_containers)
+    assert result.passed is False
+    assert "No such file or directory" in result.details["missing"][0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_evidence_fails_on_nonzero_exit_marker_even_when_output_present(mock_containers):
+    from open_range.validator.evidence import EvidenceCheck
+
+    spec = SnapshotSpec(
+        evidence_spec=[
+            EvidenceItem(type="artifact", location="siem:/var/log/test.log"),
+        ]
+    )
+    mock_containers.exec_results[("siem", "test -f")] = "exists\n__OPENRANGE_RC__:1"
+    result = await EvidenceCheck().check(spec, mock_containers)
+    assert result.passed is False
+    assert result.details["missing"][0]["location"] == "siem:/var/log/test.log"
 
 
 # ---------------------------------------------------------------------------
