@@ -450,7 +450,6 @@ class KindRenderer:
             "kind": "Cluster",
             "name": "openrange",
             "networking": {
-                "disableDefaultCNI": True,
                 "podSubnet": "192.168.0.0/16",
             },
             "nodes": [

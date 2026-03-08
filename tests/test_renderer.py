@@ -404,12 +404,12 @@ def test_renderer_supports_non_tier1_host_names(renderer):
         assert "monitoring" in values["services"]
 
 
-def test_kind_config_disables_default_cni(renderer, sqli_spec):
+def test_kind_config_keeps_default_cni_enabled(renderer, sqli_spec):
     with tempfile.TemporaryDirectory() as tmpdir:
         out = Path(tmpdir) / "out"
         renderer.render(sqli_spec, out)
         data = yaml.safe_load((out / "kind-config.yaml").read_text())
-        assert data["networking"]["disableDefaultCNI"] is True
+        assert data["networking"].get("disableDefaultCNI") is not True
 
 
 # ---------------------------------------------------------------------------

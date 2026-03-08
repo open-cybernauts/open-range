@@ -142,9 +142,9 @@ class TestKindConfig:
         assert len(data["nodes"]) >= 1
         assert data["nodes"][0]["role"] == "control-plane"
 
-    def test_disables_default_cni(self, rendered_dir):
+    def test_keeps_default_cni_enabled(self, rendered_dir):
         data = yaml.safe_load((rendered_dir / "kind-config.yaml").read_text())
-        assert data["networking"]["disableDefaultCNI"] is True
+        assert data["networking"].get("disableDefaultCNI") is not True
 
 
 # ---------------------------------------------------------------------------

@@ -869,11 +869,12 @@ class ManagedSnapshotRuntime:
             logger.warning("Failed to uninstall validation release %s", release_name)
 
     def _discover_pods(self, release_name: str) -> ContainerSet:
-        from open_range.server.helm_runner import KubePodSet
+        from open_range.server.helm_runner import KubePodSet, resolve_kubectl_cmd
 
         proc = sp.run(
             [
-                "kubectl", "get", "pods",
+                *resolve_kubectl_cmd(),
+                "get", "pods",
                 "--all-namespaces",
                 "-l", "app.kubernetes.io/part-of=openrange",
                 "-o", "jsonpath="
@@ -902,7 +903,11 @@ class ManagedSnapshotRuntime:
 
         if not container_ids:
             raise RuntimeError(f"no running pods found for release {release_name}")
-        return KubePodSet(project_name=release_name, container_ids=container_ids)
+        return KubePodSet(
+            project_name=release_name,
+            container_ids=container_ids,
+            kubectl_cmd=resolve_kubectl_cmd(),
+        )
 
     @staticmethod
     def _mysql_credentials(snapshot: SnapshotSpec) -> str:

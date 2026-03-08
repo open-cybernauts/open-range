@@ -17,6 +17,7 @@ from open_range.server.helm_runner import (
     BootedSnapshotProject,
     HelmRunner,
     KubePodSet,
+    resolve_kubectl_cmd,
 )
 
 
@@ -162,6 +163,19 @@ class TestKubePodSet:
 
 
 class TestHelmRunner:
+    def test_resolve_kubectl_cmd_prefers_host_binary(self):
+        with patch("shutil.which", return_value="/usr/bin/kubectl"):
+            assert resolve_kubectl_cmd("openrange") == ("kubectl",)
+
+    def test_resolve_kubectl_cmd_falls_back_to_kind_control_plane(self):
+        with patch("shutil.which", return_value=None):
+            assert resolve_kubectl_cmd("openrange") == (
+                "docker",
+                "exec",
+                "openrange-control-plane",
+                "kubectl",
+            )
+
     def test_release_name_for_simple(self):
         assert HelmRunner.release_name_for("my_snap") == "or-my-snap"
 

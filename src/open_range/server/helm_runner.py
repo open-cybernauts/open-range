@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -12,6 +13,18 @@ from typing import Any
 from open_range.protocols import ContainerSet
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_kubectl_cmd(kind_cluster: str = "openrange") -> tuple[str, ...]:
+    """Return a working kubectl command prefix.
+
+    Prefer a host kubectl when present. Otherwise use the kubectl bundled in
+    the Kind control-plane container so the local runtime only depends on
+    Docker + Kind.
+    """
+    if shutil.which("kubectl"):
+        return ("kubectl",)
+    return ("docker", "exec", f"{kind_cluster}-control-plane", "kubectl")
 
 
 # ---------------------------------------------------------------------------
@@ -26,13 +39,16 @@ class KubePodSet(ContainerSet):
     ``container_ids`` maps service name → ``namespace/pod-name``.
     """
 
+    kubectl_cmd: tuple[str, ...] = ("kubectl",)
+
     async def exec(self, container: str, cmd: str, timeout: float = 30.0) -> str:
         """Run *cmd* inside *container* pod via ``kubectl exec``."""
         import asyncio
 
         namespace, pod = self._resolve(container)
         proc = await asyncio.create_subprocess_exec(
-            "kubectl", "exec", pod,
+            *self.kubectl_cmd,
+            "exec", pod,
             "-n", namespace,
             "--", "sh", "-c", cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -51,7 +67,8 @@ class KubePodSet(ContainerSet):
 
         namespace, pod = self._resolve(container)
         proc = await asyncio.create_subprocess_exec(
-            "kubectl", "get", "pod", pod,
+            *self.kubectl_cmd,
+            "get", "pod", pod,
             "-n", namespace,
             "-o", "jsonpath={.status.phase}",
             stdout=asyncio.subprocess.PIPE,
@@ -64,7 +81,8 @@ class KubePodSet(ContainerSet):
 
         # Check container readiness
         proc2 = await asyncio.create_subprocess_exec(
-            "kubectl", "get", "pod", pod,
+            *self.kubectl_cmd,
+            "get", "pod", pod,
             "-n", namespace,
             "-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}",
             stdout=asyncio.subprocess.PIPE,
@@ -79,7 +97,8 @@ class KubePodSet(ContainerSet):
 
         namespace, pod = self._resolve(container)
         proc = await asyncio.create_subprocess_exec(
-            "kubectl", "cp", src, f"{namespace}/{pod}:{dest}",
+            *self.kubectl_cmd,
+            "cp", src, f"{namespace}/{pod}:{dest}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -91,7 +110,8 @@ class KubePodSet(ContainerSet):
 
         namespace, pod = self._resolve(container)
         proc = await asyncio.create_subprocess_exec(
-            "kubectl", "delete", "pod", pod,
+            *self.kubectl_cmd,
+            "delete", "pod", pod,
             "-n", namespace,
             "--grace-period=5",
             stdout=asyncio.subprocess.PIPE,
@@ -165,6 +185,7 @@ class HelmRunner:
         self.health_timeout_s = health_timeout_s
         self.health_poll_interval_s = health_poll_interval_s
         self.kind_cluster = kind_cluster
+        self.kubectl_cmd = resolve_kubectl_cmd(self.kind_cluster)
 
     def boot(
         self,
@@ -196,6 +217,7 @@ class HelmRunner:
         pod_set = KubePodSet(
             project_name=release_name,
             container_ids=pod_map,
+            kubectl_cmd=self.kubectl_cmd,
         )
 
         release = BootedRelease(
@@ -263,7 +285,8 @@ class HelmRunner:
         """
         result = self._run(
             [
-                "kubectl", "get", "pods",
+                *self.kubectl_cmd,
+                "get", "pods",
                 "--all-namespaces",
                 "-l", (
                     "app.kubernetes.io/part-of=openrange,"
@@ -287,6 +310,7 @@ class HelmRunner:
                 ns_pod, app_label = parts[0], parts[1]
                 pod_map[app_label] = ns_pod
         return pod_map
+
 
     def _wait_until_healthy(
         self,
