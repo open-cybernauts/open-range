@@ -125,8 +125,8 @@ services:
     environment:
       - MYSQL_ROOT_PASSWORD={{ mysql_root_password | default('r00tP@ss!') }}
       - MYSQL_DATABASE=referral_db
-      - MYSQL_USER={{ db_user | default('app_user') }}
-      - MYSQL_PASSWORD={{ db_pass | default('AppUs3r!2024') }}
+      - MYSQL_USER=app_user
+      - MYSQL_PASSWORD=AppUs3r!2024
     volumes:
       - db_data:/var/lib/mysql
       - shared_logs:/var/log/mysql
