@@ -574,14 +574,20 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
         Snapshots without explicit service specs skip subprocess provisioning.
         """
         # Debug trace
+        import sys
+        svc_count = len(snapshot.services) if snapshot.services else 0
+        print(f"[OPENRANGE_DEBUG] _start_snapshot_services: "
+              f"mode={self._execution_mode} services={svc_count}",
+              file=sys.stderr, flush=True)
         _dbg = "/tmp/openrange_svc_debug.log"
         try:
             with open(_dbg, "a") as f:
                 f.write(
                     f"[{time.time():.3f}] _start_snapshot_services: "
                     f"mode={self._execution_mode} "
-                    f"services={len(snapshot.services) if snapshot.services else 0}\n"
+                    f"services={svc_count}\n"
                 )
+                f.flush()
         except Exception:
             pass
 
@@ -1423,12 +1429,16 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
             Initial RangeObservation with the challenge briefing.
         """
         # Debug trace for service startup investigation
+        import sys
+        print(f"[OPENRANGE_DEBUG] reset() called, mode={self._execution_mode}, "
+              f"runtime={self._runtime is not None}", file=sys.stderr, flush=True)
         _dbg = "/tmp/openrange_svc_debug.log"
         try:
             with open(_dbg, "a") as f:
                 f.write(f"[{time.time():.3f}] reset() called, mode={self._execution_mode}\n")
-        except Exception:
-            pass
+                f.flush()
+        except Exception as e:
+            print(f"[OPENRANGE_DEBUG] debug file write failed: {e}", file=sys.stderr, flush=True)
 
         self._report_episode_result(completed=False)
         self._stop_npcs()
