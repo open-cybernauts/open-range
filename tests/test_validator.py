@@ -8,6 +8,7 @@ import pytest
 from open_range.protocols import (
     CheckResult,
     EvidenceItem,
+    ExecResult,
     ExploitStep,
     FlagSpec,
     GoldenPathStep,
@@ -795,6 +796,36 @@ async def test_evidence_fails_on_nonzero_exit_even_when_output_present(mock_cont
     assert result.details["missing"][0]["location"] == "siem:/var/log/test.log"
 
 
+@pytest.mark.asyncio
+async def test_evidence_quotes_pattern_and_location_path():
+    """Evidence grep command must quote pattern and path from snapshot content."""
+    import shlex
+
+    from open_range.validator.evidence import EvidenceCheck
+
+    class RecordingContainers:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        async def exec_run(self, container: str, cmd: str, **kwargs) -> ExecResult:
+            self.calls.append((container, cmd))
+            return ExecResult(stdout="1", exit_code=0)
+
+    containers = RecordingContainers()
+    pattern = "ERR'; touch /tmp/pwn #"
+    path = "/var/log/app; echo PWNED"
+    spec = SnapshotSpec(
+        evidence_spec=[
+            EvidenceItem(type="log_entry", location=f"siem:{path}", pattern=pattern),
+        ],
+    )
+
+    result = await EvidenceCheck().check(spec, containers)  # type: ignore[arg-type]
+    assert result.passed is True
+    assert containers.calls
+    assert containers.calls[0][1] == f"grep -c {shlex.quote(pattern)} {shlex.quote(path)}"
+
+
 # ---------------------------------------------------------------------------
 # Check 5: Reward grounding
 # ---------------------------------------------------------------------------
@@ -1053,7 +1084,7 @@ async def test_isolation_fails_on_non_ssh_port(mock_containers):
     # Only port 3306 is OPEN; everything else CLOSED.
     async def exec_side_effect(container, cmd, **kwargs):
         if container == "attacker" and "/dev/tcp/" in cmd:
-            if "/3306'" in cmd or "/3306}" in cmd:
+            if " 3306 " in cmd:
                 return "OPEN"
             return "CLOSED"
         return ""
@@ -1063,6 +1094,38 @@ async def test_isolation_fails_on_non_ssh_port(mock_containers):
     assert result.passed is False
     assert "3306" in result.error
     assert "db" in result.error
+
+
+@pytest.mark.asyncio
+async def test_isolation_uses_argument_safe_tcp_probe_for_target_name():
+    """Target names are passed as positional args, not interpolated into script."""
+    from open_range.validator.isolation import IsolationCheck
+
+    class RecordingContainers:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        async def exec(self, container: str, cmd: str, **kwargs) -> str:
+            self.calls.append((container, cmd))
+            return "CLOSED"
+
+    containers = RecordingContainers()
+    target = "db'; touch /tmp/pwn #"
+    spec = SnapshotSpec(
+        topology={"hosts": ["attacker", "db"], "zones": {"internal": [target]}},
+        flags=[],
+        golden_path=[],
+        task=TaskSpec(red_briefing="Go.", blue_briefing="Watch."),
+    )
+
+    result = await IsolationCheck().check(spec, containers)  # type: ignore[arg-type]
+    assert result.passed is True
+    assert containers.calls
+    first_cmd = containers.calls[0][1]
+    script_part, _, arg_part = first_cmd.partition(" _ ")
+    assert "bash -lc 'echo > /dev/tcp/\"$1\"/\"$2\"'" in script_part
+    assert "touch /tmp/pwn" not in script_part
+    assert "touch /tmp/pwn" in arg_part
 
 
 # ---------------------------------------------------------------------------
