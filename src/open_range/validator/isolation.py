@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shlex
+
 from open_range.protocols import CheckResult, ContainerSet, SnapshotSpec
 
 # Common service ports to probe for zone isolation violations.
@@ -33,10 +35,14 @@ class IsolationCheck:
                 open_ports: list[int] = []
                 for port in _PROBE_PORTS:
                     try:
+                        probe_cmd = (
+                            "timeout 2 bash -lc 'echo > /dev/tcp/\"$1\"/\"$2\"' _ "
+                            f"{shlex.quote(target_name)} {shlex.quote(str(port))} "
+                            "2>/dev/null && echo OPEN || echo CLOSED"
+                        )
                         output = await containers.exec(
                             attacker_host,
-                            f"timeout 2 bash -c 'echo > /dev/tcp/{target_name}/{port}' "
-                            f"2>/dev/null && echo OPEN || echo CLOSED",
+                            probe_cmd,
                         )
                         if "OPEN" in output:
                             open_ports.append(port)
