@@ -28,7 +28,7 @@ import yaml
 from open_range.builder.builder import LLMSnapshotBuilder, TemplateOnlyBuilder
 from open_range.builder.mutation_policy import PopulationMutationPolicy
 from open_range.builder.mutator import Mutator
-from open_range.builder.renderer import PAYLOAD_MANIFEST_NAME, SnapshotRenderer
+from open_range.builder.renderer import KindRenderer
 from open_range.builder.snapshot_store import SnapshotStore
 from open_range.protocols import (
     BuildContext,
@@ -37,7 +37,11 @@ from open_range.protocols import (
     SnapshotBuilder,
     SnapshotSpec,
 )
-from open_range.server.compose_runner import BootedSnapshotProject, ComposeProjectRunner
+from open_range.server.helm_runner import BootedRelease, HelmRunner
+
+# Backward-compat alias used by callers that haven't migrated.
+BootedSnapshotProject = BootedRelease
+ComposeProjectRunner = HelmRunner
 from open_range.server.models import RangeState
 from open_range.validator.build_boot import BuildBootCheck
 from open_range.validator.difficulty import DifficultyCheck
@@ -389,7 +393,8 @@ class ManagedSnapshotRuntime:
         generation_retries: int = 3,
         live_admission_enabled: bool = False,
         teardown_booted_projects: bool = True,
-        compose_runner: ComposeProjectRunner | None = None,
+        helm_runner: HelmRunner | None = None,
+        compose_runner: ComposeProjectRunner | None = None,  # compat alias
         live_validator: ValidatorGate | None = None,
         enable_patch_validation: bool = False,
         mutation_policy: PopulationMutationPolicy | None = None,
@@ -409,7 +414,7 @@ class ManagedSnapshotRuntime:
             validator_profile or os.getenv("OPENRANGE_RUNTIME_VALIDATOR_PROFILE", "offline")
         )
         self.validator = validator or _build_validator(self.validator_profile, self.manifest)
-        self.renderer = SnapshotRenderer()
+        self.renderer = KindRenderer()
         self.curriculum = CurriculumTracker()
         self.pool_size = max(1, pool_size)
         self.selection_strategy = selection_strategy
@@ -419,7 +424,8 @@ class ManagedSnapshotRuntime:
         self.generation_retries = max(1, generation_retries)
         self.live_admission_enabled = live_admission_enabled
         self.teardown_booted_projects = teardown_booted_projects
-        self.compose_runner = compose_runner or ComposeProjectRunner()
+        self.helm_runner = helm_runner or compose_runner or HelmRunner()
+        self.compose_runner = self.helm_runner  # compat alias
         self.enable_patch_validation = enable_patch_validation
         self.live_validator = live_validator or (
             _default_live_validator(include_patchability=enable_patch_validation)
@@ -767,13 +773,13 @@ class ManagedSnapshotRuntime:
             rendered.topology = topology
             self.renderer.render(rendered, snapshot_dir)
 
-            compose_file = snapshot_dir / "docker-compose.yml"
-            up_result = self._compose_up(snapshot_dir, compose_file, project_name)
+            chart_dir = snapshot_dir / "openrange"
+            up_result = self._helm_up(snapshot_dir, chart_dir, project_name)
             if up_result is not None:
                 return up_result
 
             try:
-                containers = self._discover_containers(project_name)
+                containers = self._discover_pods(project_name)
                 self._deploy_snapshot_artifacts(rendered, containers, snapshot_dir)
                 return _run_coro_sync(self.validator.validate(rendered, containers))
             except Exception as exc:  # noqa: BLE001
@@ -788,36 +794,32 @@ class ManagedSnapshotRuntime:
                     ],
                 )
             finally:
-                self._compose_down(snapshot_dir, compose_file, project_name)
+                self._helm_down(project_name)
 
     def _project_name(self, snapshot_id: str) -> str:
         safe = "".join(ch if ch.isalnum() else "-" for ch in snapshot_id.lower()).strip("-")
         safe = safe[:40] or "snapshot"
         return f"openrange-{safe}"
 
-    def _compose_up(
+    def _helm_up(
         self,
         snapshot_dir: Path,
-        compose_file: Path,
-        project_name: str,
+        chart_dir: Path,
+        release_name: str,
     ) -> ValidationResult | None:
         try:
             proc = sp.run(
                 [
-                    "docker",
-                    "compose",
-                    "-p",
-                    project_name,
-                    "-f",
-                    str(compose_file),
-                    "up",
-                    "-d",
-                    "--build",
+                    "helm", "upgrade", "--install",
+                    release_name,
+                    str(chart_dir),
+                    "--wait",
+                    "--timeout", "300s",
                 ],
                 cwd=str(snapshot_dir),
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=330,
                 check=False,
             )
         except FileNotFoundError as exc:
@@ -832,51 +834,44 @@ class ManagedSnapshotRuntime:
                     CheckResult(
                         name="build_boot",
                         passed=False,
-                        error="docker compose up timed out after 300s",
+                        error="helm install timed out after 300s",
                     )
                 ],
             )
 
         if proc.returncode != 0:
-            error = (proc.stderr or proc.stdout or "").strip() or "docker compose up failed"
+            error = (proc.stderr or proc.stdout or "").strip() or "helm install failed"
             return ValidationResult(
                 passed=False,
                 checks=[CheckResult(name="build_boot", passed=False, error=error)],
             )
         return None
 
-    def _compose_down(self, snapshot_dir: Path, compose_file: Path, project_name: str) -> None:
+    def _helm_down(self, release_name: str) -> None:
         try:
             sp.run(
-                [
-                    "docker",
-                    "compose",
-                    "-p",
-                    project_name,
-                    "-f",
-                    str(compose_file),
-                    "down",
-                    "-v",
-                    "--remove-orphans",
-                ],
-                cwd=str(snapshot_dir),
+                ["helm", "uninstall", release_name, "--wait"],
                 capture_output=True,
                 text=True,
                 timeout=120,
                 check=False,
             )
         except Exception:  # noqa: BLE001
-            logger.warning("Failed to tear down validation project %s", project_name)
+            logger.warning("Failed to uninstall validation release %s", release_name)
 
-    def _discover_containers(self, project_name: str) -> ContainerSet:
+    def _discover_pods(self, release_name: str) -> ContainerSet:
+        from open_range.server.helm_runner import KubePodSet
+
         proc = sp.run(
             [
-                "docker",
-                "ps",
-                "--filter",
-                f"label=com.docker.compose.project={project_name}",
-                "--format",
-                "{{.Label \"com.docker.compose.service\"}} {{.Names}}",
+                "kubectl", "get", "pods",
+                "--all-namespaces",
+                "-l", "app.kubernetes.io/part-of=openrange",
+                "-o", "jsonpath="
+                "{range .items[*]}"
+                "{.metadata.namespace}/{.metadata.name} "
+                "{.metadata.labels.app}\\n"
+                "{end}",
             ],
             capture_output=True,
             text=True,
@@ -884,17 +879,21 @@ class ManagedSnapshotRuntime:
             check=False,
         )
         if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or "docker ps failed")
+            raise RuntimeError(proc.stderr.strip() or "kubectl get pods failed")
 
         container_ids: dict[str, str] = {}
-        for line in proc.stdout.splitlines():
-            service, _, container_name = line.partition(" ")
-            if service and container_name:
-                container_ids[service.strip()] = container_name.strip()
+        for line in proc.stdout.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                ns_pod, app_label = parts[0], parts[1]
+                container_ids[app_label] = ns_pod
 
         if not container_ids:
-            raise RuntimeError(f"no running containers found for project {project_name}")
-        return ContainerSet(project_name=project_name, container_ids=container_ids)
+            raise RuntimeError(f"no running pods found for release {release_name}")
+        return KubePodSet(project_name=release_name, container_ids=container_ids)
 
     @staticmethod
     def _mysql_credentials(snapshot: SnapshotSpec) -> str:
@@ -1049,8 +1048,9 @@ class ManagedSnapshotRuntime:
 
         self.renderer.render(rendered, artifacts_dir)
 
-        compose_path = artifacts_dir / "docker-compose.yml"
-        rendered.compose = yaml.safe_load(compose_path.read_text(encoding="utf-8")) or {}
+        values_path = artifacts_dir / "openrange" / "values.yaml"
+        if values_path.exists():
+            rendered.compose = yaml.safe_load(values_path.read_text(encoding="utf-8")) or {}
         return rendered
 
     def activate_snapshot_project(
@@ -1130,7 +1130,7 @@ class ManagedSnapshotRuntime:
         containers: ContainerSet,
         snapshot: SnapshotSpec,
     ) -> None:
-        manifest_path = self._artifacts_dir(snapshot_id) / PAYLOAD_MANIFEST_NAME
+        manifest_path = self._artifacts_dir(snapshot_id) / "file-payloads.json"
         if not manifest_path.exists():
             return
 

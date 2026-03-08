@@ -330,13 +330,13 @@ def synthetic_data(
 
 @cli.command()
 @click.option("-s", "--snapshot", required=True, type=click.Path(exists=True), help="Path to snapshot JSON.")
-@click.option("-o", "--output", required=True, type=click.Path(), help="Output directory for Docker artifacts.")
+@click.option("-o", "--output", required=True, type=click.Path(), help="Output directory for Helm chart and Kind config.")
 def render(snapshot: str, output: str) -> None:
-    """Render a snapshot JSON into Docker artifacts (Dockerfiles, compose, configs)."""
-    from open_range.builder.renderer import SnapshotRenderer
+    """Render a snapshot JSON into a Helm chart targeting Kind."""
+    from open_range.builder.renderer import KindRenderer
 
     spec = _load_snapshot(snapshot)
-    renderer = SnapshotRenderer()
+    renderer = KindRenderer()
     output_path = Path(output)
 
     click.echo(f"Rendering snapshot to {output_path} ...")
@@ -352,6 +352,9 @@ def render(snapshot: str, output: str) -> None:
         click.echo(f"Produced {len(artifacts)} artifacts:")
         for name in artifacts:
             click.echo(f"  {name}")
+        chart_dir = output_path / "openrange"
+        if chart_dir.is_dir():
+            click.echo(f"  openrange/ (Helm chart)")
 
 
 # ---------------------------------------------------------------------------
@@ -461,68 +464,87 @@ def validate(snapshot: str, checks: str | None, docker: bool) -> None:
 
 @cli.command()
 @click.option("-s", "--snapshot", required=True, type=click.Path(exists=True), help="Path to snapshot JSON.")
-@click.option("--compose-dir", default=None, type=click.Path(), help="Directory containing docker-compose.yml (default: render into temp dir).")
-def deploy(snapshot: str, compose_dir: str | None) -> None:
-    """Deploy a snapshot to running Docker containers.
+@click.option("--chart-dir", default=None, type=click.Path(), help="Directory for rendered Helm chart (default: deploy/ next to snapshot).")
+def deploy(snapshot: str, chart_dir: str | None) -> None:
+    """Deploy a snapshot to a Kind cluster.
 
-    Renders the snapshot into Docker artifacts and runs docker compose up.
-    If --compose-dir is given, uses that directory; otherwise renders into
-    a temporary directory alongside the snapshot.
+    Renders the snapshot into a Helm chart, creates a Kind cluster,
+    and installs the chart.
     """
     import subprocess
 
-    from open_range.builder.renderer import SnapshotRenderer
+    from open_range.builder.renderer import KindRenderer
 
     spec = _load_snapshot(snapshot)
 
-    if compose_dir:
-        target = Path(compose_dir)
+    if chart_dir:
+        target = Path(chart_dir)
     else:
         target = Path(snapshot).parent / "deploy"
 
-    # Render artifacts
-    renderer = SnapshotRenderer()
-    click.echo(f"Rendering Docker artifacts to {target} ...")
+    # Render Helm chart + Kind config
+    renderer = KindRenderer()
+    click.echo(f"Rendering Helm chart to {target} ...")
     try:
         renderer.render(spec, target)
     except Exception as exc:
         click.echo(f"Error: render failed: {exc}", err=True)
         sys.exit(1)
 
-    compose_file = target / "docker-compose.yml"
-    if not compose_file.exists():
-        click.echo(f"Error: no docker-compose.yml found in {target}", err=True)
+    kind_config = target / "kind-config.yaml"
+    chart_path = target / "openrange"
+    if not chart_path.exists():
+        click.echo(f"Error: no openrange/ chart found in {target}", err=True)
         sys.exit(1)
 
-    click.echo("Starting containers with docker compose ...")
+    click.echo("Creating Kind cluster ...")
     try:
         proc = subprocess.run(
-            ["docker", "compose", "-f", str(compose_file), "up", "-d", "--build"],
-            cwd=str(target),
+            ["kind", "create", "cluster", "--config", str(kind_config)],
             capture_output=True,
             text=True,
             timeout=300,
         )
     except FileNotFoundError:
-        click.echo("Error: docker command not found. Is Docker installed and in PATH?", err=True)
+        click.echo("Error: kind command not found. Install Kind: https://kind.sigs.k8s.io/", err=True)
         sys.exit(1)
     except subprocess.TimeoutExpired:
-        click.echo("Error: docker compose up timed out after 300s.", err=True)
+        click.echo("Error: kind create cluster timed out after 300s.", err=True)
         sys.exit(1)
 
     if proc.returncode != 0:
-        click.echo(f"Error: docker compose up failed (exit {proc.returncode}):", err=True)
+        click.echo(f"Error: kind create cluster failed (exit {proc.returncode}):", err=True)
         if proc.stderr:
             click.echo(proc.stderr, err=True)
         sys.exit(1)
 
-    click.echo("Containers started.")
+    click.echo("Kind cluster created. Installing Helm chart ...")
+    try:
+        proc = subprocess.run(
+            ["helm", "install", "openrange", str(chart_path)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except FileNotFoundError:
+        click.echo("Error: helm command not found. Install Helm: https://helm.sh/", err=True)
+        sys.exit(1)
+    except subprocess.TimeoutExpired:
+        click.echo("Error: helm install timed out after 120s.", err=True)
+        sys.exit(1)
 
-    # Show running container status
+    if proc.returncode != 0:
+        click.echo(f"Error: helm install failed (exit {proc.returncode}):", err=True)
+        if proc.stderr:
+            click.echo(proc.stderr, err=True)
+        sys.exit(1)
+
+    click.echo("Helm chart installed.")
+
+    # Show pod status
     try:
         ps = subprocess.run(
-            ["docker", "compose", "-f", str(compose_file), "ps", "--format", "table"],
-            cwd=str(target),
+            ["kubectl", "get", "pods", "--all-namespaces", "-l", "app.kubernetes.io/part-of=openrange"],
             capture_output=True,
             text=True,
             timeout=30,

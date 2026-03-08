@@ -128,17 +128,17 @@ class TestRealLLMOutput:
         spec = _parse_llm_response(llm_json)
         # Real LLM output has explicit files + vulnerable_code dicts
         assert len(spec.files) > 0
-        assert "web:/var/www/portal/lookup.php" in spec.files
-        assert "web:/var/www/portal/admin/compliance_report.php" in spec.files
+        assert "web:/var/www/html/lookup.php" in spec.files
+        assert "web:/var/www/html/admin/compliance_report.php" in spec.files
 
     def test_vulnerable_code_as_dict_extracted_to_files(self, llm_json):
         spec = _parse_llm_response(llm_json)
         # The VULN-SQLI-LOOKUP has vulnerable_code as dict with key
-        # /var/www/portal/lookup.php. It should be extracted to files
-        # as "web:/var/www/portal/lookup.php".
+        # /var/www/html/lookup.php. It should be extracted to files
+        # as "web:/var/www/html/lookup.php".
         # But the explicit files dict already has this key, so the
         # explicit one takes precedence (container_key not in files check).
-        assert "web:/var/www/portal/lookup.php" in spec.files
+        assert "web:/var/www/html/lookup.php" in spec.files
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +540,7 @@ class TestFilesDictExtraction:
         assert spec.files["web:/var/www/search.php"] == "<?php $q=$_GET['q']; ?>"
 
     def test_vulnerable_code_string_on_web_host(self):
-        """String vulnerable_code on web host with / injection_point goes to web:/var/www/portal{ip}."""
+        """String vulnerable_code on web host with / injection_point goes to web:/var/www/html{ip}."""
         raw = _minimal_json(
             truth_graph={
                 "vulns": [
@@ -557,7 +557,7 @@ class TestFilesDictExtraction:
             }
         )
         spec = _parse_llm_response(raw)
-        assert "web:/var/www/portal/search.php" in spec.files
+        assert "web:/var/www/html/search.php" in spec.files
 
     def test_vulnerable_code_string_non_web_host_skipped(self):
         """String vulnerable_code on non-web host without / prefix is not extracted."""

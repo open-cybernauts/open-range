@@ -122,7 +122,7 @@ async def test_template_builder_emits_payload_files(tier1_manifest):
     ctx = BuildContext(seed=42, tier=1)
     spec = await builder.build(tier1_manifest, ctx)
     assert spec.files
-    assert any(key.startswith("web:/var/www/portal/") for key in spec.files)
+    assert any(key.startswith("web:/var/www/html/") for key in spec.files)
     assert any(key.endswith("/var/log/app/access.log") for key in spec.files)
 
 
@@ -149,7 +149,7 @@ async def test_template_builder_uses_manifest_company_context(tier1_manifest):
     assert company["name"] in spec.task.red_briefing
     assert company["name"] in spec.task.blue_briefing
     assert ldap_dn in spec.files["web:/var/www/config.php"]
-    assert company["name"] in spec.files["web:/var/www/portal/index.php"]
+    assert company["name"] in spec.files["web:/var/www/html/index.php"]
 
 
 @pytest.mark.asyncio

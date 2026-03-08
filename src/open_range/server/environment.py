@@ -28,7 +28,7 @@ from open_range.protocols import SnapshotSpec, TaskSpec
 from open_range.server.models import RangeAction, RangeObservation, RangeState
 
 if TYPE_CHECKING:
-    from open_range.server.compose_runner import BootedSnapshotProject
+    from open_range.server.helm_runner import BootedRelease as BootedSnapshotProject
     from open_range.server.runtime import ManagedSnapshotRuntime
 
 logger = logging.getLogger(__name__)

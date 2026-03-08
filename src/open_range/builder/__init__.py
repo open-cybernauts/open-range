@@ -1,5 +1,5 @@
 """Builder pipeline -- LLM-driven snapshot generation for OpenRange."""
 
-from open_range.builder.renderer import SnapshotRenderer
+from open_range.builder.renderer import KindRenderer
 
-__all__ = ["SnapshotRenderer"]
+__all__ = ["KindRenderer"]

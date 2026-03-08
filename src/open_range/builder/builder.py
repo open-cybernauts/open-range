@@ -565,7 +565,7 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
         elif isinstance(vc, str) and vc.strip():
             ip = v.injection_point
             if ip.startswith("/") and v.host == "web":
-                container_key = f"web:/var/www/portal{ip}"
+                container_key = f"web:/var/www/html{ip}"
                 if container_key not in files:
                     files[container_key] = vc
 
@@ -1165,23 +1165,23 @@ def render_template_payloads(
     domain = str(topology.get("domain") or company.get("domain") or "corp.local")
 
     files: dict[str, str] = {
-        "web:/var/www/portal/index.php": _default_index_php(company_name),
-        "web:/var/www/portal/login.php": _default_login_php(),
+        "web:/var/www/html/index.php": _default_index_php(company_name),
+        "web:/var/www/html/login.php": _default_login_php(),
         "web:/var/www/config.php": _default_config_php(domain=domain),
     }
 
     if "sqli" in vuln_types:
-        files["web:/var/www/portal/search.php"] = _search_php(
+        files["web:/var/www/html/search.php"] = _search_php(
             _flag_value_for_type(snapshot, "sqli")
         )
 
     if vuln_types.intersection({"path_traversal", "credential_reuse"}):
-        files["web:/var/www/portal/download.php"] = _download_php(
+        files["web:/var/www/html/download.php"] = _download_php(
             path_flag=_flag_value_for_type(snapshot, "path_traversal"),
         )
 
     if "idor" in vuln_types:
-        files["web:/var/www/portal/api/index.php"] = _idor_api_php(
+        files["web:/var/www/html/api/index.php"] = _idor_api_php(
             _flag_value_for_type(snapshot, "idor"),
         )
 
@@ -1277,7 +1277,7 @@ echo "Login";
 def _default_config_php(*, domain: str) -> str:
     ldap_dn = ",".join(f"dc={part}" for part in domain.split(".") if part) or "dc=corp,dc=local"
     return f"""<?php
-$db_host = "db";
+$db_host = "db.openrange-internal.svc.cluster.local";
 $db_name = "referral_db";
 $db_user = "app_user";
 $db_pass = "AppUs3r!2024";
