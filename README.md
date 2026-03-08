@@ -146,6 +146,8 @@ flowchart TB
 
 Every service is real. The web app queries the database. Users authenticate against LDAP. Mail flows through Postfix. Logs stream to the SIEM. NPC traffic simulates employees browsing, sending email, and running cron jobs -- so Blue can't just flag everything as malicious.
 
+NPCs evolve from shell-script noise generators to **LLM-driven employees** with persona cards, susceptibility profiles, and realistic communication styles. Red can craft spearphishing emails, pretext calls, and watering-hole attacks against NPCs who decide whether to click, ignore, or report based on their security awareness. Blue must detect these social engineering campaigns in logs alongside normal traffic.
+
 ## Episode Lifecycle
 
 ```mermaid
@@ -285,6 +287,7 @@ flowchart TB
         RF[Flag Capture<br/>docker exec cat flag<br/>binary match]
         RE[Efficiency<br/>gamma^steps]
         RS[Stealth<br/>Did Blue detect?]
+        RSE[Social Engineering<br/>NPC fell for phish/pretext]
         RH[Anti-hallucination<br/>-0.3 per fake flag]
     end
 
@@ -292,6 +295,7 @@ flowchart TB
         BD[Detection<br/>TP rate vs Red log]
         BP[Patch<br/>Golden path re-run fails]
         BA[Availability<br/>Healthcheck fraction]
+        BPH[Phishing Detection<br/>social engineering caught in logs]
         BF[False Positive<br/>-0.2 per NPC flagged]
     end
 

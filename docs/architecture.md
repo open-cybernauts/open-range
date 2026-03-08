@@ -199,6 +199,7 @@ Each validated snapshot contains:
 | **Docker artifacts** | Compose file, Dockerfiles, configs, app code, flag files | docker-compose.yml, nginx.conf, init.sql, app.php |
 | **Golden path** | Step-by-step exploit chain with expected outputs | nmap, curl, sqlmap, pivot, submit_flag |
 | **NPC traffic config** | Background traffic rates per service | HTTP: 30/min, SMTP: 5/min, LDAP: 10/min |
+| **NPC persona cards** | LLM-driven employee personas with susceptibility profiles | Janet Smith (Marketing, security_awareness=0.3, phishing_susceptibility=0.7) |
 
 ## Reward Architecture
 
@@ -206,20 +207,54 @@ All rewards implemented as OpenEnv `Rubric` subclasses:
 
 ```
 CompositeRedReward (WeightedSum)
-  ├── FlagReward          binary, docker exec verified
-  ├── EfficiencyReward    gamma^steps
-  ├── StealthReward       coupled to Blue detection history
-  ├── EvidenceReward      quality of submit_evidence
-  └── HallucinationPenalty  -0.3 per fake flag
+  ├── FlagReward              binary, docker exec verified
+  ├── EfficiencyReward        gamma^steps
+  ├── StealthReward           coupled to Blue detection history
+  ├── EvidenceReward          quality of submit_evidence
+  ├── SocialEngineeringReward NPC fell for phish/pretext (Level 1+)
+  └── HallucinationPenalty    -0.3 per fake flag
 
 CompositeBlueReward (WeightedSum)
-  ├── DetectionReward     TP rate vs Red action log
-  ├── PatchReward         binary, golden path re-execution
-  ├── AvailabilityReward  healthcheck fraction
-  └── FalsePositiveReward -0.2 per NPC traffic flagged
+  ├── DetectionReward         TP rate vs Red action log
+  ├── PatchReward             binary, golden path re-execution
+  ├── AvailabilityReward      healthcheck fraction
+  ├── PhishingDetection       correctly identified social engineering in logs (Level 1+)
+  └── FalsePositiveReward     -0.2 per NPC traffic/email flagged
 ```
 
 Rewards are computed from **container state and action logs**, never from LLM judgment.
+
+## NPC Evolution: Shell Scripts to LLM Agents
+
+NPCs progress from mechanical noise generators to intelligent social engineering targets. Each level adds a modality without removing the previous one.
+
+```mermaid
+flowchart TB
+    subgraph l0 [Level 0 - Shell Scripts]
+        SH[curl/sshpass/mysql loops<br/>Configurable rates per service<br/>Labeled for FP scoring]
+    end
+
+    subgraph l1 [Level 1 - LLM Email NPCs]
+        PERSONA[Persona cards from Builder<br/>name, role, security_awareness,<br/>susceptibility profile]
+        MAIL_NPC[Async LLM agent checks Postfix<br/>Decides: click, reply, ignore, report<br/>Creates realistic log trail]
+        PERSONA --> MAIL_NPC
+    end
+
+    subgraph l2 [Level 2+ - Multimodal Stretch]
+        CHAT[Internal chat/IM]
+        VOICE[Voice via TTS/STT]
+        DOCS[Document inspection via vision LLM]
+    end
+
+    l0 -->|always running| l1
+    l1 -->|adds social engineering surface| l2
+
+    style l0 fill:#6bcb7722,stroke:#6bcb77
+    style l1 fill:#4a9eff22,stroke:#4a9eff
+    style l2 fill:#7c73e622,stroke:#7c73e6
+```
+
+**Key design**: NPC LLM calls are **async, not in the step() hot path**. Red sends a phishing email to Postfix in one step. The NPC agent processes it on its own schedule (per `email_check_interval_min`). Red observes the result in later steps via access logs, new sessions, or SIEM alerts. Blue sees the same logs and must distinguish legitimate NPC-to-NPC email from Red's social engineering.
 
 ## LLM Integration via LiteLLM
 

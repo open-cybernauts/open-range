@@ -159,6 +159,49 @@ The Builder outputs a structured JSON snapshot spec. The LLM does the creative w
     "ldap_rate": 10,
     "smb_rate": 8
   },
+  "npc_personas": [
+    {
+      "id": "npc_jsmith",
+      "name": "Janet Smith",
+      "role": "Marketing Coordinator",
+      "department": "Marketing",
+      "reports_to": "npc_director_marketing",
+      "communication_style": "casual, responds quickly, uses exclamation marks",
+      "security_awareness": 0.3,
+      "susceptibility": {
+        "phishing_email": 0.7,
+        "credential_sharing": 0.4,
+        "attachment_opening": 0.8,
+        "vishing": 0.6
+      },
+      "relationships": ["trusts IT helpdesk", "friends with npc_bob in accounting"],
+      "routine": {
+        "email_check_interval_min": 15,
+        "typical_actions": ["browse intranet", "send marketing reports", "LDAP lookups"]
+      },
+      "accounts": {"email": "jsmith@acmecorp.local", "ldap": "jsmith", "smb_shares": ["marketing", "shared"]}
+    },
+    {
+      "id": "npc_ciso",
+      "name": "David Chen",
+      "role": "CISO",
+      "department": "Security",
+      "communication_style": "formal, suspicious of unusual requests, always verifies sender",
+      "security_awareness": 0.95,
+      "susceptibility": {
+        "phishing_email": 0.05,
+        "credential_sharing": 0.01,
+        "attachment_opening": 0.1,
+        "vishing": 0.05
+      },
+      "relationships": ["reports to CEO", "manages SOC team"],
+      "routine": {
+        "email_check_interval_min": 5,
+        "typical_actions": ["review SIEM alerts", "approve access requests", "policy updates"]
+      },
+      "accounts": {"email": "dchen@acmecorp.local", "ldap": "dchen", "smb_shares": ["security", "executive"]}
+    }
+  ],
   "task": {
     "red_briefing": "A corporate network with web services and backend infrastructure. Investigate the environment and capture the flags.",
     "blue_briefing": "You are the SOC analyst for AcmeCorp. Monitor the SIEM for suspicious activity, investigate alerts, and respond to threats."
@@ -206,6 +249,7 @@ The LLM generates the structured spec. A thin template layer renders it into Doc
 | `slapd.conf.j2` | users, groups | LDAP directory setup |
 | `iptables.rules.j2` | firewall_rules | Firewall rule set |
 | `npc_traffic.sh.j2` | npc_traffic rates | Background traffic scripts |
+| `npc_personas.yaml.j2` | npc_personas array | Persona cards for LLM-driven NPCs |
 
 ## Validator Gate (Mechanical Only)
 
@@ -220,9 +264,10 @@ flowchart LR
     S3 --> S4[4. Evidence sufficiency<br/>logs + alerts exist<br/>for Blue investigation]
     S4 --> S5[5. Reward grounding<br/>rubrics produce<br/>valid scores]
     S5 --> S6[6. Isolation + leakage<br/>zones enforced<br/>no answer leaks]
+    S6 --> S7[7. NPC consistency<br/>personas respond<br/>per security_awareness]
 
-    S6 -->|All pass| PASS[ADMIT SNAPSHOT]
-    S6 -->|Any fail| FAIL[REJECT + RETRY]
+    S7 -->|All pass| PASS[ADMIT SNAPSHOT]
+    S7 -->|Any fail| FAIL[REJECT + RETRY]
 
     style PASS fill:#6bcb77,color:#fff
     style FAIL fill:#ff6b6b,color:#fff
@@ -239,6 +284,7 @@ flowchart LR
 | **4. Evidence sufficiency** | Blue has enough to investigate | Check logs exist, SIEM alerts fire, evidence files present | All evidence_spec items found |
 | **5. Reward grounding** | Rubrics produce valid scores | Run CompositeRedReward and CompositeBlueReward against known scenarios | Scores in expected ranges |
 | **6. Isolation + leakage** | Network segmentation holds, no answer leaks | Attacker tries to reach internal directly; grep task briefings for flag values | Connection refused; no flag strings in briefings |
+| **7. NPC consistency** | Personas behave per security_awareness | Send calibrated test phishing to each NPC persona | High-awareness NPCs reject, low-awareness NPCs fall for well-crafted lures |
 
 ### Check 3: Patchability (Most Important)
 
@@ -291,3 +337,93 @@ R2E-Gym found ~10% of validations incorrectly favor wrong solutions. Track:
 - False-positive rate (admitted broken snapshots that don't produce training signal)
 - False-negative rate (rejected valid snapshots unnecessarily)
 - Log every admission decision for post-hoc auditing
+
+## LLM NPCs: Social Engineering Surface
+
+### Why
+
+Shell-script NPCs generate noise. LLM NPCs create an **attack surface**. Social engineering is the #1 real-world breach vector, but current cybersecurity AI training environments ignore it entirely because there's nobody to phish.
+
+LLM NPCs let Red learn to craft phishing emails, pretext calls, and watering hole attacks. Blue simultaneously learns to detect these patterns in logs. The coupled reward creates an arms race in social engineering.
+
+### Architecture
+
+NPCs follow the same platform pattern: **Builder generates persona cards, Validator checks consistency, NPCs run as lightweight LLM agents during episodes.**
+
+```mermaid
+flowchart LR
+    BLD[Builder LLM] --> PC[Persona Cards<br/>name, role, security_awareness,<br/>susceptibility, relationships]
+    PC --> VAL{Validator<br/>NPC consistency check}
+    VAL -->|pass| SNAP[Snapshot store]
+
+    subgraph episode [During Episode]
+        STIM[Stimulus<br/>email, chat, call] --> NPC[NPC LLM Agent<br/>persona + context]
+        NPC --> ACT{Action}
+        ACT --> CLICK[Click link]
+        ACT --> REPLY[Reply with info]
+        ACT --> IGNORE[Ignore]
+        ACT --> REPORT[Report to IT]
+    end
+
+    SNAP --> episode
+
+    style BLD fill:#ff6b6b,color:#fff
+    style VAL fill:#ffd93d,color:#333
+    style NPC fill:#7c73e6,color:#fff
+```
+
+### NPC Decision Function
+
+Each NPC receives incoming stimuli and decides based on persona:
+
+```
+Input:  persona_card + stimulus (email body, sender, subject) + time_of_day + conversation_history
+Output: action (click_link | open_attachment | reply | share_credentials | ignore | report_to_IT | forward)
+```
+
+The NPC LLM call is **not in the hot path** of `step()`. It runs asynchronously -- Red sends a phishing email in one step, the NPC processes it on its own schedule (based on `email_check_interval_min`), and Red sees the result in subsequent observations (access logs, new sessions, SIEM alerts).
+
+### Red Social Engineering Actions
+
+| Attack Vector | Channel | Red Action | NPC Response Based On |
+|---------------|---------|------------|----------------------|
+| Spearphishing | Email (Postfix) | Craft email from spoofed sender | `security_awareness` + email plausibility + sender reputation |
+| Pretexting | Email/Chat | Impersonate IT, request creds | `credential_sharing` susceptibility + pretext quality |
+| Watering hole | Web | Plant malicious page on compromised intranet | NPC browsing routine + link plausibility |
+| Baiting | SMB | Drop malicious file on shared drive | `attachment_opening` susceptibility + file name/type |
+| Vishing | Voice (stretch) | Call NPC, social-engineer credentials | `vishing` susceptibility + conversation plausibility |
+
+### Blue Detection
+
+Blue sees the **effects** in logs, never the NPC's internal reasoning:
+- Anomalous email patterns (external sender → credential reset → new login)
+- Unusual login locations (NPC account authenticates from attacker IP)
+- Credential usage from wrong hosts (jsmith's creds used on DB, not marketing)
+
+### Reward Extensions
+
+| Signal | Agent | Source |
+|--------|-------|--------|
+| `r_social_engineering` | Red | NPC fell for attack (clicked link, shared creds) |
+| `r_pretext_quality` | Red | Consistency of social engineering narrative |
+| `r_phishing_detection` | Blue | Correctly identified phishing email in mail logs |
+| `r_social_FP` | Blue | -0.2 per legitimate NPC email flagged as phishing |
+
+### Multimodal Progression
+
+| Level | Modality | Infrastructure | Training Signal |
+|-------|----------|---------------|-----------------|
+| 0 | None | Shell scripts | Noise ratio only |
+| 1 | Text email | Postfix + LLM NPC agent | Social engineering + phishing detection |
+| 2 | Text chat | Internal messaging service + LLM | Lateral social engineering |
+| 3 | Voice | TTS/STT (Whisper + voice synthesis) | Vishing + voice phishing detection |
+| 4 | Documents | Multimodal LLM (vision) | Malicious document analysis |
+
+### Validator Check 7: NPC Consistency
+
+For each NPC persona in the snapshot:
+1. Send a **calibrated test phishing email** matching the persona's role
+2. NPC with `security_awareness >= 0.8` MUST reject/report it
+3. NPC with `security_awareness <= 0.3` MUST fall for a well-crafted lure
+4. Verify communication style matches persona (formal CISO vs casual intern)
+5. Verify NPC never leaks flag values or truth graph details
