@@ -1,8 +1,5 @@
 """RangeEnvironment -- OpenEnv Environment for the OpenRange cyber gymnasium.
 
-If openenv is installed, inherits from Environment[RangeAction, RangeObservation, RangeState].
-Otherwise works standalone with the same API surface.
-
 Design:
 - reset() selects a pre-validated snapshot from SnapshotStore (or accepts one via kwargs)
 - step() routes commands via Docker SDK (docker exec)
@@ -18,33 +15,24 @@ from __future__ import annotations
 import logging
 import os
 import shlex
+import socket
 import subprocess as sp
 import time
+import urllib.request
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from open_range.protocols import ServiceSpec, SnapshotSpec, TaskSpec
+from openenv.core.env_server.interfaces import Environment
+from openenv.core.env_server.types import EnvironmentMetadata
 
-from open_range.server.models import RangeAction, RangeObservation, RangeState
+from open_range.models import RangeAction, RangeObservation, RangeState
+from open_range.protocols import ReadinessCheck, ServiceSpec, SnapshotSpec, TaskSpec
 
 if TYPE_CHECKING:
     from open_range.server.compose_runner import BootedSnapshotProject
     from open_range.server.runtime import ManagedSnapshotRuntime
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Try to inherit from OpenEnv's Environment base class
-# ---------------------------------------------------------------------------
-
-try:
-    from openenv.core.env_server.interfaces import Environment
-
-    _BASE = Environment  # type: ignore[assignment]
-    _HAS_OPENENV = True
-except ImportError:
-    _BASE = object  # type: ignore[assignment,misc]
-    _HAS_OPENENV = False
 
 # Meta-commands processed by the environment itself (not forwarded to containers)
 META_COMMANDS = {"submit_flag", "submit_evidence", "submit_finding", "auth", "logout"}
@@ -72,7 +60,7 @@ def _extract_command_name(command: str) -> str:
     return parts[0] if parts else ""
 
 
-class RangeEnvironment(_BASE):  # type: ignore[misc]
+class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
     """OpenEnv Environment subclass for the cybersecurity range.
 
     Manages episode lifecycle, command routing, action tracking, and
@@ -81,16 +69,16 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
 
     SUPPORTS_CONCURRENT_SESSIONS = False
 
-    def get_metadata(self) -> dict[str, Any]:
+    def get_metadata(self) -> EnvironmentMetadata:
         """Return environment metadata for /metadata endpoint.
 
         Matches OpenEnv's EnvironmentMetadata schema.
         """
-        return {
-            "name": "open_range",
-            "version": "0.1.0",
-            "description": "Multi-agent cybersecurity gymnasium built on OpenEnv",
-        }
+        return EnvironmentMetadata(
+            name="open_range",
+            version="0.1.0",
+            description="Multi-agent cybersecurity gymnasium built on OpenEnv",
+        )
 
     def __init__(
         self,
@@ -100,8 +88,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         docker_available: bool | None = None,
         execution_mode: str = "auto",
     ) -> None:
-        if _HAS_OPENENV:
-            super().__init__()
+        super().__init__()
         self._state = RangeState()
         self._snapshot: SnapshotSpec | None = None
         self._snapshot_id: str | None = None
@@ -431,11 +418,20 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         for key, content in snapshot.files.items():
             try:
                 if key == "db:sql":
+                    # Auto-create databases referenced by USE statements
+                    import re
+
+                    db_names = re.findall(r"(?i)USE\s+(\w+)\s*;", content)
+                    preamble = ""
+                    for db in dict.fromkeys(db_names):  # dedupe, preserve order
+                        preamble += f"CREATE DATABASE IF NOT EXISTS `{db}`;\n"
+                    sql_content = preamble + content
+
                     # Write SQL to temp file, execute via mysql CLI
                     with tempfile.NamedTemporaryFile(
                         mode="w", suffix=".sql", delete=False
                     ) as tmp:
-                        tmp.write(content)
+                        tmp.write(sql_content)
                         tmp_path = tmp.name
                     try:
                         db_creds = self._db_credentials()
@@ -480,53 +476,26 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
     # Service lifecycle (subprocess mode)
     # -----------------------------------------------------------------
 
-    # Map topology host names to service start commands.
-    # Each entry is (service_name, start_commands, readiness_check).
-    _HOST_SERVICE_MAP: dict[str, tuple[list[list[str]], list[str] | None]] = {
-        "db": (
-            [
-                ["bash", "-c", "mkdir -p /var/run/mysqld && chown mysql:mysql /var/run/mysqld 2>/dev/null; mkdir -p /var/log/mysql && chown mysql:mysql /var/log/mysql 2>/dev/null; true"],
-                ["bash", "-c", "test -d /var/lib/mysql/mysql || { CMD=$(command -v mariadb-install-db || command -v mysql_install_db || echo ''); [ -n \"$CMD\" ] && $CMD --user=mysql 2>/dev/null; true; }"],
-                ["bash", "-c", "MYSQLD=$(command -v mariadbd || command -v mysqld || echo ''); [ -n \"$MYSQLD\" ] && $MYSQLD --user=mysql --log-error=/var/log/mysql/error.log &"],
-            ],
-            ["bash", "-c", "ADMIN=$(command -v mariadb-admin || command -v mysqladmin || echo ''); [ -n \"$ADMIN\" ] && $ADMIN ping --silent 2>/dev/null"],
-        ),
-        "web": (
-            [
-                ["bash", "-c", "mkdir -p /var/log/nginx; nginx -g 'daemon off;' > /var/log/nginx/access.log 2>&1 &"],
-            ],
-            ["bash", "-c", "curl -sf http://localhost:80/ >/dev/null 2>&1"],
-        ),
-        "ldap": (
-            [
-                ["bash", "-c", "mkdir -p /var/run/slapd; slapd -h 'ldap:/// ldapi:///' -u openldap -g openldap 2>/dev/null &"],
-            ],
-            ["bash", "-c", "ldapsearch -x -H ldap://localhost -b '' -s base namingContexts >/dev/null 2>&1"],
-        ),
-        "siem": (
-            [
-                ["bash", "-c", "mkdir -p /var/log/siem/consolidated; command -v rsyslogd >/dev/null 2>&1 && rsyslogd -n &"],
-            ],
-            None,  # rsyslog starts fast, no readiness check needed
-        ),
-        "files": (
-            [
-                ["bash", "-c", "mkdir -p /var/lib/samba/private; command -v smbd >/dev/null 2>&1 && smbd --foreground --no-process-group &"],
-            ],
-            None,
-        ),
-        "mail": (
-            [
-                ["bash", "-c", "command -v postfix >/dev/null 2>&1 && postfix start 2>/dev/null || true"],
-            ],
-            None,
-        ),
-    }
+    # Daemon names to kill when stopping services (legacy + modern).
+    _LEGACY_STOP_DAEMONS = [
+        "nginx", "mysqld", "mariadbd", "slapd", "rsyslogd",
+        "smbd", "postfix", "sshd", "redis-server", "postgres",
+        "jenkins", "prometheus", "grafana-server", "openvpn",
+    ]
 
     def _stop_services(self) -> None:
-        """Stop services started by a previous episode."""
+        """Stop services started by a previous episode.
+
+        Uses the snapshot's ``services`` list when available to determine
+        which daemon names to kill.  Falls back to a legacy kill-list
+        when no snapshot is loaded or the snapshot has no ``services``.
+        """
+        if self._execution_mode != "subprocess":
+            return
+
         import signal
 
+        # Kill tracked PIDs first
         for pid in self._service_pids:
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -535,24 +504,170 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
             except Exception as exc:
                 logger.debug("Failed to stop PID %d: %s", pid, exc)
 
+        # Determine daemon names to kill (from snapshot or legacy list)
+        daemon_names: list[str] = []
+        if self._snapshot and self._snapshot.services:
+            for svc in self._snapshot.services:
+                name = svc.daemon.split("/")[-1].split()[0]
+                if name:
+                    daemon_names.append(name)
+        if not daemon_names:
+            daemon_names = list(self._LEGACY_STOP_DAEMONS)
+
         # Also stop known service processes by name (catches orphans)
-        sp.run(
-            ["bash", "-c",
-             "for proc in nginx mysqld mariadbd slapd rsyslogd smbd postfix sshd; do "
-             "pkill -x $proc 2>/dev/null || true; done"],
-            capture_output=True, timeout=5,
+        kill_expr = " ".join(
+            f"pkill -x {name} 2>/dev/null || true;" for name in daemon_names
         )
+        try:
+            sp.run(
+                ["bash", "-c", kill_expr],
+                capture_output=True, timeout=5,
+            )
+        except Exception:
+            pass
+
         self._service_pids = []
         logger.info("Stopped previous episode services")
 
     def _start_snapshot_services(self, snapshot: SnapshotSpec) -> None:
-        """Start services based on snapshot topology (subprocess mode only).
+        """Start services based on snapshot spec (subprocess mode only).
 
-        Reads the ``hosts`` list from the topology and starts the
-        corresponding service daemons.  Waits for readiness where applicable.
+        If the snapshot has a ``services`` list (populated by the Renderer
+        via :func:`generate_service_specs`), each :class:`ServiceSpec` is
+        started generically.  Otherwise falls back to
+        :meth:`_start_services_legacy` which generates ephemeral specs
+        from the topology host names.
         """
         if self._execution_mode != "subprocess":
             return
+
+        if snapshot.services:
+            self._start_services_from_specs(snapshot.services)
+        else:
+            self._start_services_legacy(snapshot)
+
+    def _start_services_from_specs(self, services: list[ServiceSpec]) -> None:
+        """Start a list of :class:`ServiceSpec` entries generically."""
+        for candidate in ("/var/log/siem/consolidated", "/tmp/openrange/siem/consolidated"):
+            try:
+                os.makedirs(candidate, exist_ok=True)
+                break
+            except PermissionError:
+                continue
+
+        started: list[str] = []
+        for svc in services:
+            try:
+                self._start_service(svc)
+                started.append(svc.daemon)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to start service %s (host=%s): %s",
+                    svc.daemon, svc.host, exc,
+                )
+
+        # Capture PIDs of started service processes
+        self._capture_service_pids()
+        logger.info(
+            "Service provisioning complete (spec-driven): %s",
+            ", ".join(started) or "none",
+        )
+
+    def _start_service(self, svc: ServiceSpec) -> None:
+        """Run init commands, start daemon, wait for readiness."""
+        logger.info("Starting service: %s (host=%s)", svc.daemon, svc.host)
+
+        # Set env vars
+        env = os.environ.copy()
+        env.update(svc.env_vars)
+
+        # Create log directory
+        if svc.log_dir:
+            os.makedirs(svc.log_dir, exist_ok=True)
+
+        # Run init commands
+        for cmd in svc.init_commands:
+            try:
+                result = sp.run(
+                    ["bash", "-c", cmd],
+                    capture_output=True, timeout=30, text=True, env=env,
+                )
+                if result.returncode != 0 and result.stderr:
+                    logger.debug(
+                        "Init cmd stderr for %s: %s",
+                        svc.daemon, result.stderr[:200],
+                    )
+            except Exception as exc:
+                logger.warning("Init command failed for %s: %s", svc.daemon, exc)
+
+        # Start the daemon
+        try:
+            result = sp.run(
+                ["bash", "-c", svc.start_command],
+                capture_output=True, timeout=30, text=True, env=env,
+            )
+            if result.returncode != 0 and result.stderr:
+                logger.debug(
+                    "Start cmd stderr for %s: %s",
+                    svc.daemon, result.stderr[:200],
+                )
+        except Exception as exc:
+            logger.warning("Start command failed for %s: %s", svc.daemon, exc)
+            return
+
+        # Wait for readiness
+        self._wait_for_readiness(svc)
+
+    def _wait_for_readiness(self, svc: ServiceSpec) -> None:
+        """Poll the readiness check until success or timeout."""
+        check = svc.readiness
+        if check.type == "tcp" and check.port == 0 and not check.url and not check.command:
+            logger.info("  %s: started (no readiness check)", svc.daemon)
+            return
+
+        max_attempts = int(check.timeout_s / max(check.interval_s, 0.1))
+        for attempt in range(max_attempts):
+            if self._probe_readiness(check):
+                logger.info("  %s: ready (%ds)", svc.daemon, attempt + 1)
+                return
+            time.sleep(check.interval_s)
+
+        logger.warning("  %s: readiness timeout after %ds", svc.daemon, check.timeout_s)
+
+    @staticmethod
+    def _probe_readiness(check: ReadinessCheck) -> bool:
+        """Execute a single readiness probe. Returns True on success."""
+        try:
+            if check.type == "tcp" and check.port > 0:
+                import socket
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(2)
+                    s.connect(("127.0.0.1", check.port))
+                return True
+            elif check.type == "http" and check.url:
+                result = sp.run(
+                    ["curl", "-sf", check.url],
+                    capture_output=True, timeout=3,
+                )
+                return result.returncode == 0
+            elif check.type == "command" and check.command:
+                result = sp.run(
+                    ["bash", "-c", check.command],
+                    capture_output=True, timeout=5,
+                )
+                return result.returncode == 0
+        except Exception:
+            pass
+        return False
+
+    def _start_services_legacy(self, snapshot: SnapshotSpec) -> None:
+        """Fallback: generate ephemeral ServiceSpecs from topology host names.
+
+        Used when ``snapshot.services`` is empty (old snapshots or manually
+        constructed specs).  Delegates to :func:`generate_service_specs`
+        from the service manifest module.
+        """
+        from open_range.builder.service_manifest import generate_service_specs
 
         topology = snapshot.topology if isinstance(snapshot.topology, dict) else {}
         hosts = topology.get("hosts", [])
@@ -560,71 +675,26 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
             logger.info("No hosts in topology — skipping service provisioning")
             return
 
-        # Normalize host names (may be strings or dicts)
-        host_names: list[str] = []
-        for h in hosts:
-            if isinstance(h, str):
-                host_names.append(h)
-            elif isinstance(h, dict):
-                host_names.append(h.get("name", h.get("hostname", "")))
+        compose = snapshot.compose if isinstance(snapshot.compose, dict) else {}
+        specs = generate_service_specs(compose=compose, topology=topology)
 
-        # Create log directories
-        os.makedirs("/var/log/siem/consolidated", exist_ok=True)
+        if specs:
+            logger.info(
+                "Generated %d ephemeral service specs from topology (legacy path)",
+                len(specs),
+            )
+            self._start_services_from_specs(specs)
+        else:
+            logger.info("No service specs generated from topology")
 
-        started = []
-        for host in host_names:
-            entry = self._HOST_SERVICE_MAP.get(host)
-            if entry is None:
-                logger.debug("Host '%s' has no mapped service (agent-only)", host)
-                continue
-
-            start_cmds, readiness_check = entry
-            logger.info("Starting service for host: %s", host)
-
-            for cmd in start_cmds:
-                try:
-                    result = sp.run(cmd, capture_output=True, timeout=30, text=True)
-                    if result.returncode != 0 and result.stderr:
-                        logger.debug("Service cmd stderr for %s: %s", host, result.stderr[:200])
-                except Exception as exc:
-                    logger.warning("Failed to start service for %s: %s", host, exc)
-
-            # Wait for readiness
-            if readiness_check:
-                ready = False
-                for attempt in range(30):
-                    try:
-                        check = sp.run(readiness_check, capture_output=True, timeout=3)
-                        if check.returncode == 0:
-                            logger.info("  %s: ready (%ds)", host, attempt + 1)
-                            ready = True
-                            break
-                    except Exception:
-                        pass
-                    time.sleep(1)
-                if not ready:
-                    logger.warning("  %s: readiness timeout", host)
-            else:
-                logger.info("  %s: started (no readiness check)", host)
-
-            started.append(host)
-
-        # Start SSH if any non-agent hosts exist
-        non_agent_hosts = [h for h in host_names if h not in ("attacker", "siem")]
-        if non_agent_hosts:
-            try:
-                sp.run(
-                    ["bash", "-c", "mkdir -p /var/run/sshd; command -v sshd >/dev/null 2>&1 && /usr/sbin/sshd 2>/dev/null &"],
-                    capture_output=True, timeout=5,
-                )
-                logger.info("  sshd: started")
-            except Exception:
-                pass
-
-        # Capture PIDs of started service processes
+    def _capture_service_pids(self) -> None:
+        """Capture PIDs of running service processes."""
         try:
             result = sp.run(
-                ["bash", "-c", "pgrep -x 'nginx|mysqld|mariadbd|slapd|rsyslogd|smbd|sshd' 2>/dev/null || true"],
+                ["bash", "-c",
+                 "pgrep -x 'nginx|mysqld|mariadbd|slapd|rsyslogd|smbd|sshd"
+                 "|redis-server|postgres|jenkins|prometheus|grafana-server"
+                 "|openvpn' 2>/dev/null || true"],
                 capture_output=True, timeout=5, text=True,
             )
             for line in result.stdout.strip().split("\n"):
@@ -633,8 +703,6 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
                     self._service_pids.append(int(line))
         except Exception:
             pass
-
-        logger.info("Service provisioning complete: %s", ", ".join(started) or "none")
 
     # -----------------------------------------------------------------
     # NPC lifecycle
@@ -1120,8 +1188,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         self._teardown_active_project()
 
         # Stop services from previous episode (subprocess mode)
-        if self._execution_mode == "subprocess" and self._service_pids:
-            self._stop_services()
+        self._stop_services()
 
         # Select snapshot
         self._snapshot = self._select_snapshot(**kwargs)
@@ -1154,11 +1221,13 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         # Runtime-backed episodes boot a fresh project per reset. Manual/mock
         # snapshots still use direct artifact application.
         activated = self._activate_runtime_snapshot(self._snapshot, episode_id=eid)
+
+        # Start services BEFORE applying snapshot data so that daemons
+        # (MySQL, slapd, etc.) are ready to receive SQL / LDIF payloads.
+        self._start_snapshot_services(self._snapshot)
+
         if not activated:
             self._apply_snapshot(self._snapshot)
-
-        # Start services based on snapshot topology (subprocess mode)
-        self._start_snapshot_services(self._snapshot)
 
         # Initialize zone router from topology (subprocess mode)
         if self._execution_mode == "subprocess":
@@ -1486,6 +1555,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         """Release resources (Docker client, NPC manager, episode state)."""
         self._report_episode_result(completed=False)
         self._stop_npcs()
+        self._stop_services()
         self._teardown_active_project()
         if self._docker_client is not None:
             try:

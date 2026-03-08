@@ -13,9 +13,13 @@ FROM python:3.11-slim-bookworm
 ENV DEBIAN_FRONTEND=noninteractive
 
 # ── 1. System packages ───────────────────────────────────────────────────────
-# Install the *superset* of packages that any tier might need.
+# Install base packages that all tiers need.  Higher tiers add extras via
+# the TIER_PACKAGES build arg (tier1, tier2, tier3).
 # The Builder/manifest decides which ones actually run per episode.
 
+ARG TIER_PACKAGES="tier1"
+
+# --- Tier 1 (base) ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # Web
     nginx \
@@ -31,6 +35,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     postfix \
     # SSH
     openssh-server \
+    # SMB client (for agent enumeration)
+    smbclient \
     # Recon & exploitation (available to agents via subprocess)
     nmap \
     netcat-openbsd dnsutils tcpdump curl wget sshpass \
@@ -38,6 +44,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Utilities
     jq procps iproute2 git ca-certificates bash \
     && rm -rf /var/lib/apt/lists/*
+
+# --- Tier 2 (+ VPN, cron) ---
+RUN if echo "${TIER_PACKAGES}" | grep -qE "tier[2-9]"; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            openvpn easy-rsa cron \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# --- Tier 3 (+ Redis, PostgreSQL, CI tooling) ---
+RUN if echo "${TIER_PACKAGES}" | grep -qE "tier[3-9]"; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            redis-server postgresql postgresql-client \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # Python-based security tools (not in Debian repos)
 RUN pip install --no-cache-dir sqlmap
