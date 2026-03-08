@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS patients (
     email VARCHAR(128),
     address VARCHAR(256),
     emergency_contact VARCHAR(128),
+    diagnosis VARCHAR(256),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -85,8 +86,9 @@ CREATE TABLE IF NOT EXISTS secrets (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- Grant privileges to app_user
-GRANT SELECT, INSERT, UPDATE ON referral_db.* TO '{{ db_user | default("app_user") }}'@'%';
-GRANT SELECT ON flags.* TO '{{ db_user | default("app_user") }}'@'%';
+-- Create and grant app_user (used by PHP web app)
+CREATE USER IF NOT EXISTS 'app_user'@'%' IDENTIFIED WITH mysql_native_password BY 'AppUs3r!2024';
+GRANT SELECT, INSERT, UPDATE ON referral_db.* TO 'app_user'@'%';
+GRANT SELECT ON flags.* TO 'app_user'@'%';
 
 FLUSH PRIVILEGES;
