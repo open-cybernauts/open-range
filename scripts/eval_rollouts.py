@@ -19,7 +19,7 @@ from open_range.resources import load_bundled_manifest
 from open_range.runtime import ReferenceDrivenRuntime
 from open_range.runtime_types import EpisodeScore
 from open_range.sim import ReferenceSimPlane
-from open_range.snapshot import RuntimeSnapshot, Snapshot
+from open_range.snapshot import RuntimeSnapshot
 from open_range.store import FileSnapshotStore
 
 
@@ -135,7 +135,7 @@ def _aggregate_pair_reports(pair_reports: list[dict[str, Any]], *, mode: str) ->
         "blue_win_rate": sum(1 for entry in pair_reports if entry["winner"] == "blue") / total if total else 0.0,
     }
 
-def _population_stats(snapshot: Snapshot, episodes: list[dict[str, Any]], *, split: str, novelty: float) -> PopulationStats:
+def _population_stats(snapshot: RuntimeSnapshot, episodes: list[dict[str, Any]], *, split: str, novelty: float) -> PopulationStats:
     total = len(episodes)
     red_wins = sum(1 for episode in episodes if episode["winner"] == "red")
     blue_wins = sum(1 for episode in episodes if episode["winner"] == "blue")

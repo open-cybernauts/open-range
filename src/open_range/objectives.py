@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-import asyncio
 import shlex
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from open_range.async_utils import run_async
 from open_range.predicate_expr import parse_predicate
 
 
@@ -262,7 +262,14 @@ def evaluate_objective_grader_live(
             return False
         if grader.objective_tag in {"unauthorized_admin_login", "privilege_escalation"}:
             realizations = _relevant_realizations(snapshot, grader)
-            return _probe_realizations(pods, realizations, expected_ref=grader.expected_ref) if realizations else True
+            if _matches_effect_output(grader, combined_output):
+                return True
+            return _probe_realizations(
+                pods,
+                realizations,
+                expected_ref=grader.expected_ref,
+                require_nonempty=True,
+            )
         return True
     if grader.grader_kind == "service_health":
         health = service_health.get(grader.service_id or grader.target_id, 1.0)
@@ -273,7 +280,7 @@ def evaluate_objective_grader_live(
         command = f"test -f {shlex.quote(grader.path)}"
         if grader.expected_ref:
             command += f" && grep -q {shlex.quote(grader.expected_ref)} {shlex.quote(grader.path)}"
-        result = asyncio.run(pods.exec(grader.service_id, command, timeout=10.0))
+        result = run_async(pods.exec(grader.service_id, command, timeout=10.0))
         return result.ok and (grader.expected_ref in combined_output or bool(linked_events))
     if grader.grader_kind == "db_row_read":
         query = (
@@ -284,7 +291,7 @@ def evaluate_objective_grader_live(
                 "LIMIT 1;"
             )
         )
-        result = asyncio.run(pods.exec(grader.service_id or "svc-db", query, timeout=10.0))
+        result = run_async(pods.exec(grader.service_id or "svc-db", query, timeout=10.0))
         return result.ok and bool(result.stdout.strip()) and (grader.target_id in result.stdout or grader.expected_ref in result.stdout)
     if grader.grader_kind == "db_row_write":
         query = (
@@ -295,13 +302,20 @@ def evaluate_objective_grader_live(
                 "LIMIT 1;"
             )
         )
-        result = asyncio.run(pods.exec(grader.service_id or "svc-db", query, timeout=10.0))
+        result = run_async(pods.exec(grader.service_id or "svc-db", query, timeout=10.0))
         return result.ok and result.stdout.strip() not in {"", "0"}
     if grader.grader_kind == "outbound_request":
-        if not linked_events or not combined_output.strip():
+        if not linked_events:
             return False
         realizations = _relevant_realizations(snapshot, grader)
-        return _probe_realizations(pods, realizations, expected_ref=grader.expected_ref) if realizations else True
+        if _matches_effect_output(grader, combined_output):
+            return True
+        return _probe_realizations(
+            pods,
+            realizations,
+            expected_ref=grader.expected_ref,
+            require_nonempty=True,
+        )
     return False
 
 
@@ -364,17 +378,76 @@ def _relevant_realizations(snapshot: object, grader: ObjectiveGraderSpec) -> tup
     return tuple(dict.fromkeys(matches))
 
 
-def _probe_realizations(pods: object, realizations: tuple[tuple[str, str], ...], *, expected_ref: str) -> bool:
+def _probe_realizations(
+    pods: object,
+    realizations: tuple[tuple[str, str], ...],
+    *,
+    expected_ref: str,
+    require_nonempty: bool = False,
+) -> bool:
     if not realizations:
         return False
     for service, path in realizations:
         command = f"test -f {shlex.quote(path)}"
         if expected_ref:
             command += f" && grep -q {shlex.quote(expected_ref)} {shlex.quote(path)}"
-        result = asyncio.run(pods.exec(service, command, timeout=10.0))
+        elif require_nonempty:
+            command += f" && test -s {shlex.quote(path)}"
+        result = run_async(pods.exec(service, command, timeout=10.0))
         if result.ok:
             return True
     return False
+
+
+def _matches_effect_output(grader: ObjectiveGraderSpec, combined_output: str) -> bool:
+    text = combined_output.lower()
+    if not text.strip():
+        return False
+    return any(token in text for token in _effect_tokens(grader))
+
+
+def _effect_tokens(grader: ObjectiveGraderSpec) -> tuple[str, ...]:
+    tokens = {
+        token.strip().lower()
+        for token in (
+            grader.expected_ref,
+            grader.target_id,
+            grader.service_id,
+        )
+        if token
+    }
+    if grader.objective_tag == "unauthorized_admin_login":
+        tokens.update(
+            {
+                "admin",
+                "admin_surface",
+                "default_password",
+                "identity_verification",
+                "credential_capture",
+                "impersonate",
+                "openrange-foothold:",
+            }
+        )
+    elif grader.objective_tag == "privilege_escalation":
+        tokens.update(
+            {
+                "privilege",
+                "service_account_scope",
+                "trust_scope",
+                "target_ref",
+                "openrange-foothold:",
+            }
+        )
+    elif grader.objective_tag == "outbound_service":
+        tokens.update(
+            {
+                "http://127.0.0.1",
+                "fetch",
+                "openrange-foothold:",
+                "url",
+            }
+        )
+    return tuple(sorted(tokens))
 
 
 def _event_type(event: object) -> str:

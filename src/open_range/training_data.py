@@ -12,7 +12,7 @@ from open_range.build_config import BuildConfig
 from open_range.episode_config import EpisodeConfig
 from open_range.objectives import StandardAttackObjective
 from open_range.runtime_types import Action, Observation, RuntimeEvent
-from open_range.snapshot import Snapshot
+from open_range.snapshot import RuntimeSnapshot
 
 
 TraceSource = Literal["runtime", "sim"]
@@ -100,7 +100,7 @@ class TraceDatasetReport(_StrictModel):
     lineage_roots: tuple[str, ...] = Field(default_factory=tuple)
 
 
-def normalize_trace_action(snapshot: Snapshot, action: Action) -> Action:
+def normalize_trace_action(snapshot: RuntimeSnapshot, action: Action) -> Action:
     """Keep exported control semantics honest for non-service-native mitigations."""
 
     if action.kind != "control":
@@ -296,7 +296,7 @@ def _visible_event_lines(events: tuple[RuntimeEvent, ...]) -> str:
     )
 
 
-def trace_weaknesses(snapshot: Snapshot) -> tuple[TraceWeakness, ...]:
+def trace_weaknesses(snapshot: RuntimeSnapshot) -> tuple[TraceWeakness, ...]:
     return tuple(
         TraceWeakness(
             weakness_id=weakness.id,
@@ -310,12 +310,12 @@ def trace_weaknesses(snapshot: Snapshot) -> tuple[TraceWeakness, ...]:
     )
 
 
-def trace_benchmark_tags(snapshot: Snapshot) -> tuple[str, ...]:
+def trace_benchmark_tags(snapshot: RuntimeSnapshot) -> tuple[str, ...]:
     tags = {tag for weakness in snapshot.world.weaknesses for tag in weakness.benchmark_tags}
     return tuple(sorted(tags))
 
 
-def _supports_service_native_patch(snapshot: Snapshot, target: str) -> bool:
+def _supports_service_native_patch(snapshot: RuntimeSnapshot, target: str) -> bool:
     return any(
         weakness.target == target
         and (

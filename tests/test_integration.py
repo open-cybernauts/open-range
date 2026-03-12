@@ -161,7 +161,7 @@ def test_live_backend_integration_carries_logs_from_runtime_events(tmp_path: Pat
             if built_world is not None and built_world.world_id == snapshot_id:
                 world = built_world
             else:
-                world = store.load(snapshot_id).world
+                world = store.load_world(snapshot_id)
             pod_ids = {service.id: f"ns/{service.id}-pod" for service in world.services}
             pod_ids["sandbox-red"] = "ns/sandbox-red-pod"
             pod_ids["sandbox-blue"] = "ns/sandbox-blue-pod"

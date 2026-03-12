@@ -57,7 +57,7 @@ def test_model_rollout_helpers_build_prompt_and_candidates(tmp_path: Path) -> No
     runtime.reset(snapshot, mod.EpisodeConfig(mode="red_only", scheduler_mode="strict_turns", opponent_blue="scripted"))
     decision = runtime.next_decision()
 
-    candidates = mod.red_candidates(runtime, snapshot)
+    candidates = mod.red_candidates(runtime, snapshot, decision.obs)
     prompt = mod.build_prompt(snapshot, decision.obs, candidates, 0)
 
     assert "candidate_actions:" in prompt

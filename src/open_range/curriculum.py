@@ -135,11 +135,11 @@ class FrontierMutationPolicy:
         stats_by_snapshot = {entry.snapshot_id: entry for entry in population}
         children: list[WorldIR] = []
         for rank, score in enumerate(self.score_parents(population)[:child_count], start=1):
-            snapshot = store.load(score.snapshot_id)
-            child_seed = _stable_seed(snapshot.world.world_id, score.snapshot_id, rank)
+            world = store.load_world(score.snapshot_id)
+            child_seed = _stable_seed(world.world_id, score.snapshot_id, rank)
             children.append(
                 self.mutate(
-                    snapshot.world,
+                    world,
                     parent_stats=stats_by_snapshot.get(score.snapshot_id),
                     child_seed=child_seed,
                 )

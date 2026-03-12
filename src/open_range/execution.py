@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import shlex
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import urlencode
 
+from open_range.async_utils import run_async
 from open_range.cluster import BootedRelease
 from open_range.code_web import code_web_cleanup_commands, code_web_guard_path
 from open_range.runtime_events import action_target
 from open_range.runtime_types import Action
-from open_range.snapshot import Snapshot
+from open_range.snapshot import RuntimeSnapshot
 from open_range.world_ir import ServiceSpec, WeaknessSpec
 
 
@@ -31,7 +31,7 @@ class ActionExecution:
 
 
 class ActionBackend(Protocol):
-    def bind(self, snapshot: Snapshot, release: BootedRelease) -> None: ...
+    def bind(self, snapshot: RuntimeSnapshot, release: BootedRelease) -> None: ...
     def clear(self) -> None: ...
     def execute(self, action: Action) -> ActionExecution: ...
     def service_health(self) -> dict[str, float]: ...
@@ -42,11 +42,11 @@ class PodActionBackend:
     """Execute runtime actions against live actor sandboxes and service pods."""
 
     def __init__(self) -> None:
-        self._snapshot: Snapshot | None = None
+        self._snapshot: RuntimeSnapshot | None = None
         self._release: BootedRelease | None = None
         self._service_by_id: dict[str, ServiceSpec] = {}
 
-    def bind(self, snapshot: Snapshot, release: BootedRelease) -> None:
+    def bind(self, snapshot: RuntimeSnapshot, release: BootedRelease) -> None:
         self._snapshot = snapshot
         self._release = release
         self._service_by_id = {service.id: service for service in snapshot.world.services}
@@ -74,7 +74,7 @@ class PodActionBackend:
             sort_keys=True,
         )
         cmd = f"printf '%s\\n' {shlex.quote(payload)} >> /srv/http/siem/all.log"
-        asyncio.run(self._release.pods.exec("svc-siem", cmd, timeout=5.0))
+        run_async(self._release.pods.exec("svc-siem", cmd, timeout=5.0))
 
     def execute(self, action: Action) -> ActionExecution:
         if self._release is None or self._snapshot is None:
@@ -101,7 +101,7 @@ class PodActionBackend:
         if self._release is None:
             return {}
         return {
-            service_id: 1.0 if asyncio.run(self._release.pods.is_healthy(service_id)) else 0.0
+            service_id: 1.0 if run_async(self._release.pods.is_healthy(service_id)) else 0.0
             for service_id in sorted(self._service_by_id)
         }
 
@@ -121,7 +121,7 @@ class PodActionBackend:
             command = self._patch_command_for(target)
         else:
             command = "touch /tmp/openrange-contained"
-        result = asyncio.run(self._release.pods.exec(target, command, timeout=action.timeout_s))
+        result = run_async(self._release.pods.exec(target, command, timeout=action.timeout_s))
         return ActionExecution(
             stdout=result.stdout.strip(),
             stderr=result.stderr.strip(),
@@ -155,7 +155,7 @@ class PodActionBackend:
                     service_health=self.service_health(),
                 )
         runner = self._runner_for(action)
-        result = asyncio.run(self._release.pods.exec(runner, command, timeout=action.timeout_s))
+        result = run_async(self._release.pods.exec(runner, command, timeout=action.timeout_s))
         return ActionExecution(
             stdout=result.stdout.strip(),
             stderr=result.stderr.strip(),
@@ -238,7 +238,7 @@ class PodActionBackend:
 
     def _is_contained(self, target: str) -> bool:
         assert self._release is not None
-        result = asyncio.run(
+        result = run_async(
             self._release.pods.exec(target, "test ! -f /tmp/openrange-contained", timeout=5.0)
         )
         return not result.ok
@@ -247,7 +247,7 @@ class PodActionBackend:
         assert self._release is not None
         weakness = self._weakness_for(target)
         if weakness is not None and weakness.family == "code_web":
-            result = asyncio.run(
+            result = run_async(
                 self._release.pods.exec(
                     target,
                     f"test ! -f {shlex.quote(code_web_guard_path(weakness))}",
@@ -255,7 +255,7 @@ class PodActionBackend:
                 )
             )
             return not result.ok
-        result = asyncio.run(
+        result = run_async(
             self._release.pods.exec(target, "test ! -f /tmp/openrange-patched", timeout=5.0)
         )
         return not result.ok

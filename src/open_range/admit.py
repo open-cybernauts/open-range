@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import shutil
 import subprocess
@@ -18,6 +17,7 @@ from open_range.admission import (
     ValidatorStageReport,
     ReferenceBundle,
 )
+from open_range.async_utils import run_async
 from open_range.build_config import BuildConfig, DEFAULT_BUILD_CONFIG
 from open_range.cluster import KindBackend, LiveBackend
 from open_range.counterfactuals import clear_runtime_markers, remediation_command
@@ -196,7 +196,7 @@ class LocalAdmissionController:
             unhealthy = [
                 service_id
                 for service_id in sorted(expected_services & discovered)
-                if not asyncio.run(release.pods.is_healthy(service_id))
+                if not run_async(release.pods.is_healthy(service_id))
             ]
             checks.append(
                 ValidatorCheckReport(
@@ -718,6 +718,7 @@ def _ephemeral_snapshot(world: WorldIR, artifacts: KindArtifacts, reference_bund
         artifacts_dir=artifacts.render_dir,
         image_digests=artifacts.pinned_image_digests,
         state_seed_dir=artifacts.render_dir,
+        world_path=f"{artifacts.render_dir}/world.json",
         reference_bundle_path=f"{artifacts.render_dir}/reference_bundle.json",
         validator_report_path=f"{artifacts.render_dir}/validator_report.json",
         world=world,
@@ -744,7 +745,7 @@ def _live_service_smoke_check(world: WorldIR, release) -> ValidatorCheckReport:
     failures: list[str] = []
     for service in world.services:
         runner, cmd = commands.get(service.id, ("sandbox-blue", "true"))
-        result = asyncio.run(release.pods.exec(runner, cmd, timeout=10.0))
+        result = run_async(release.pods.exec(runner, cmd, timeout=10.0))
         if not result.ok:
             failures.append(f"{service.id}:{result.stderr or result.stdout or 'smoke failed'}")
     return ValidatorCheckReport(
@@ -826,7 +827,7 @@ def _live_blue_reference_check(snapshot: RuntimeSnapshot, backend: PodActionBack
 
 
 def _live_siem_ingest_check(release) -> ValidatorCheckReport:
-    result = asyncio.run(
+    result = run_async(
         release.pods.exec("svc-siem", "grep -q 'InitialAccess' /srv/http/siem/all.log", timeout=10.0)
     )
     return ValidatorCheckReport(
@@ -922,7 +923,7 @@ def _live_necessity_check(snapshot: RuntimeSnapshot, release, backend: PodAction
             },
             error="weakness remediation is not executable",
         )
-    apply_result = asyncio.run(release.pods.exec(target_weakness.target, command, timeout=10.0))
+    apply_result = run_async(release.pods.exec(target_weakness.target, command, timeout=10.0))
     trace_index = next((idx for idx, _trace, weak in trace_bindings if weak.id == target_weakness.id), 0)
     score, _events, _health, outputs = run_red_reference(
         snapshot,
@@ -930,7 +931,7 @@ def _live_necessity_check(snapshot: RuntimeSnapshot, release, backend: PodAction
         episode_seed=snapshot.world.seed,
         trace_index=trace_index,
     )
-    asyncio.run(
+    run_async(
         release.pods.exec(
             target_weakness.target,
             "rm -f /tmp/openrange-contained /tmp/openrange-patched",
@@ -971,11 +972,11 @@ def _live_shortcut_probe_check(snapshot: RuntimeSnapshot, release) -> ValidatorC
     unexpected: list[str] = []
     for service_id in protected_targets:
         service = service_by_id[service_id]
-        result = asyncio.run(release.pods.exec("sandbox-red", _service_probe_command(service), timeout=10.0))
+        result = run_async(release.pods.exec("sandbox-red", _service_probe_command(service), timeout=10.0))
         if result.ok:
             unexpected.append(f"direct_external_access:{service_id}")
     if "svc-idp" in service_by_id:
-        admin_probe = asyncio.run(release.pods.exec("sandbox-red", _service_probe_command(service_by_id["svc-idp"]), timeout=10.0))
+        admin_probe = run_async(release.pods.exec("sandbox-red", _service_probe_command(service_by_id["svc-idp"]), timeout=10.0))
         if admin_probe.ok:
             unexpected.append("direct_admin_access:svc-idp")
     unexpected.extend(_web_shortcut_findings(snapshot, release, public_services))
@@ -1007,7 +1008,7 @@ def _web_shortcut_findings(snapshot: RuntimeSnapshot, release, public_services: 
         for kind, path, query in _shortcut_web_route_probes():
             if kind in seeded_kinds:
                 continue
-            result = asyncio.run(
+            result = run_async(
                 release.pods.exec("sandbox-red", _http_probe_command(service, path, query), timeout=10.0)
             )
             if _looks_like_shortcut_payload(result.stdout):
@@ -1015,7 +1016,7 @@ def _web_shortcut_findings(snapshot: RuntimeSnapshot, release, public_services: 
         for asset in snapshot.world.assets:
             if asset.confidentiality not in {"high", "critical"}:
                 continue
-            result = asyncio.run(
+            result = run_async(
                 release.pods.exec(
                     "sandbox-red",
                     _http_probe_command(service, f"/content/{asset.id}.txt"),

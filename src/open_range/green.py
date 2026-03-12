@@ -9,11 +9,11 @@ from typing import Any, Protocol
 
 from open_range.episode_config import EpisodeConfig
 from open_range.runtime_types import Action, RuntimeEvent
-from open_range.snapshot import Snapshot
+from open_range.snapshot import RuntimeSnapshot
 
 
 class GreenScheduler(Protocol):
-    def reset(self, snapshot: Snapshot, episode_config: EpisodeConfig) -> None: ...
+    def reset(self, snapshot: RuntimeSnapshot, episode_config: EpisodeConfig) -> None: ...
     def advance_until(self, sim_time: float) -> None: ...
     def pop_ready_actions(self) -> tuple[Action, ...]: ...
     def record_event(self, event: RuntimeEvent) -> None: ...
@@ -23,7 +23,7 @@ class ScriptedGreenScheduler:
     """Deterministic routine and branch scheduling owned by the runtime."""
 
     def __init__(self) -> None:
-        self._snapshot: Snapshot | None = None
+        self._snapshot: RuntimeSnapshot | None = None
         self._episode_config = EpisodeConfig()
         self._seed = 0
         self._last_advanced_slot = -1
@@ -31,7 +31,7 @@ class ScriptedGreenScheduler:
         self._scheduled_reactions: set[tuple[int, str, str]] = set()
         self._ready_actions: deque[Action] = deque()
 
-    def reset(self, snapshot: Snapshot, episode_config: EpisodeConfig) -> None:
+    def reset(self, snapshot: RuntimeSnapshot, episode_config: EpisodeConfig) -> None:
         self._snapshot = snapshot
         self._episode_config = episode_config
         self._seed = snapshot.world.seed

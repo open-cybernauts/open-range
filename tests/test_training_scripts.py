@@ -30,6 +30,8 @@ def test_tiny_sft_helpers_are_deterministic() -> None:
     assert len(train_rows) >= 3
     assert len(eval_rows) >= 3
     assert module.example_to_text(train_rows[0]).startswith("<system>")
+    assert "/openrange-trace-train-data-runtime/seed-7/" in str(data_path)
+    assert {row["trace_source"] for row in rows} == {"runtime"}
 
 
 def test_tiny_sft_limit_applies_after_role_filtering() -> None:

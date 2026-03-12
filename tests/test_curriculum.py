@@ -102,13 +102,14 @@ def test_mutated_child_is_admitted_and_can_live_in_eval_pool(tmp_path: Path):
     pipeline = BuildPipeline(store=store)
     parent_candidate = pipeline.build(_manifest_payload(), tmp_path / "parent-render", OFFLINE_BUILD_CONFIG)
     parent_snapshot = pipeline.admit(parent_candidate, split="train")
+    parent_world = store.load_world(parent_snapshot.snapshot_id)
 
     policy = FrontierMutationPolicy()
     child_world = policy.mutate(
-        parent_snapshot.world,
+        parent_world,
         parent_stats=PopulationStats(
             snapshot_id=parent_snapshot.snapshot_id,
-            world_id=parent_snapshot.world.world_id,
+            world_id=parent_world.world_id,
             split="train",
             episodes=6,
             red_win_rate=0.55,
@@ -121,7 +122,7 @@ def test_mutated_child_is_admitted_and_can_live_in_eval_pool(tmp_path: Path):
     )
     child_snapshot = pipeline.admit_child(child_world, tmp_path / "child-render", split="eval", build_config=OFFLINE_BUILD_CONFIG)
 
-    assert child_snapshot.parent_world_id == parent_snapshot.world.world_id
+    assert child_snapshot.parent_world_id == parent_world.world_id
     assert child_snapshot.validator_report.admitted is True
     assert len(store.list(split="train")) == 1
     assert len(store.list(split="eval")) == 1
@@ -135,12 +136,13 @@ def test_propose_mutations_loads_best_parent_from_store(tmp_path: Path):
         pipeline.build(_manifest_payload(), tmp_path / "render", OFFLINE_BUILD_CONFIG),
         split="train",
     )
+    parent_world = store.load_world(parent_snapshot.snapshot_id)
 
     children = propose_mutations(
         [
             PopulationStats(
                 snapshot_id=parent_snapshot.snapshot_id,
-                world_id=parent_snapshot.world.world_id,
+                world_id=parent_world.world_id,
                 split="train",
                 episodes=5,
                 red_win_rate=0.5,
@@ -154,7 +156,7 @@ def test_propose_mutations_loads_best_parent_from_store(tmp_path: Path):
     )
 
     assert len(children) == 1
-    assert children[0].lineage.parent_world_id == parent_snapshot.world.world_id
+    assert children[0].lineage.parent_world_id == parent_world.world_id
 
 
 def test_mutation_added_weakness_carries_target_metadata():

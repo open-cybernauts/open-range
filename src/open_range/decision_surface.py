@@ -6,7 +6,7 @@ import json
 
 from open_range.probe_planner import runtime_action
 from open_range.runtime_types import Action, Observation
-from open_range.snapshot import Snapshot
+from open_range.snapshot import RuntimeSnapshot
 from open_range.training_data import TraceCandidate, normalize_trace_action, render_action_text
 
 
@@ -16,14 +16,14 @@ def expected_step(steps, index: int):
     return steps[index]
 
 
-def teacher_action(snapshot: Snapshot, actor: str, expected) -> Action:
+def teacher_action(snapshot: RuntimeSnapshot, actor: str, expected) -> Action:
     if expected is None:
         return Action(actor_id=actor, role=actor, kind="sleep", payload={})
     return normalize_trace_action(snapshot, runtime_action(actor, expected))
 
 
 def candidate_actions(
-    snapshot: Snapshot,
+    snapshot: RuntimeSnapshot,
     *,
     actor: str,
     observation: Observation,
@@ -98,7 +98,7 @@ def scripted_choice(
     return by_label.get("teacher", candidates[0]).action
 
 
-def reference_trace_pairs(snapshot: Snapshot, mode: str) -> tuple[tuple[int, int], ...]:
+def reference_trace_pairs(snapshot: RuntimeSnapshot, mode: str) -> tuple[tuple[int, int], ...]:
     attack_count = max(1, len(snapshot.reference_bundle.reference_attack_traces))
     defense_count = max(1, len(snapshot.reference_bundle.reference_defense_traces))
     if mode == "red_only":
@@ -109,7 +109,7 @@ def reference_trace_pairs(snapshot: Snapshot, mode: str) -> tuple[tuple[int, int
     return tuple((idx % attack_count, idx % defense_count) for idx in range(count))
 
 
-def trace_actions(snapshot: Snapshot, actor: str, *, trace_index: int) -> list[Action]:
+def trace_actions(snapshot: RuntimeSnapshot, actor: str, *, trace_index: int) -> list[Action]:
     trace = (
         snapshot.reference_bundle.reference_attack_traces[trace_index]
         if actor == "red"
@@ -193,7 +193,7 @@ def _red_alternatives(expected_action: Action) -> list[TraceCandidate]:
 
 
 def _blue_alternatives(
-    snapshot: Snapshot,
+    snapshot: RuntimeSnapshot,
     observation: Observation,
     expected_action: Action,
     remaining_targets: set[str],
@@ -272,7 +272,7 @@ def _blue_alternatives(
     return alternatives
 
 
-def _service_not_in(snapshot: Snapshot, *, excluded: set[str]) -> str:
+def _service_not_in(snapshot: RuntimeSnapshot, *, excluded: set[str]) -> str:
     for preferred in ("svc-email", "svc-web", "svc-idp", "svc-fileshare", "svc-db", "svc-siem"):
         if preferred not in excluded and any(service.id == preferred for service in snapshot.world.services):
             return preferred

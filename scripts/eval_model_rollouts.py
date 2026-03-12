@@ -96,14 +96,14 @@ def build_prompt(snapshot: RuntimeSnapshot, observation, candidates, decision_in
     )
 
 
-def red_candidates(runtime: ReferenceDrivenRuntime, snapshot: RuntimeSnapshot):
-    expected = runtime._next_red_step()
+def red_candidates(runtime: ReferenceDrivenRuntime, snapshot: RuntimeSnapshot, observation):
+    expected = runtime.reference_step("red")
     return candidate_actions(
         snapshot,
         actor="red",
-        observation=runtime._build_observation("red"),
+        observation=observation,
         expected_action=teacher_action(snapshot, "red", expected),
-        remaining_targets=runtime._remaining_red_targets(),
+        remaining_targets=runtime.remaining_red_targets(),
     )
 
 
@@ -215,13 +215,13 @@ def evaluate_model_rollouts(
                         if runtime.state().done:
                             break
                         raise
-                    expected = runtime._next_red_step()
+                    expected = runtime.reference_step("red")
                     candidates = candidate_actions(
                         snapshot,
                         actor="red",
                         observation=decision.obs,
                         expected_action=teacher_action(snapshot, "red", expected),
-                        remaining_targets=runtime._remaining_red_targets(),
+                        remaining_targets=runtime.remaining_red_targets(),
                     )
                     prompt = build_prompt(snapshot, decision.obs, candidates, turns)
                     ranked = score_candidates(model, tokenizer, prompt, candidates)

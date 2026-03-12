@@ -20,7 +20,7 @@ from open_range.decision_surface import (
 from open_range.episode_config import EpisodeConfig
 from open_range.pipeline import BuildPipeline
 from open_range.runtime import ReferenceDrivenRuntime
-from open_range.snapshot import RuntimeSnapshot, Snapshot
+from open_range.snapshot import RuntimeSnapshot
 from open_range.store import FileSnapshotStore
 from open_range.training_data import (
     TraceDatasetReport,
@@ -252,7 +252,7 @@ class TraceDatasetGenerator:
                 actor=actor,
                 observation=decision.obs,
                 expected_action=teacher_choice,
-                remaining_targets=runtime._remaining_red_targets(),
+                remaining_targets=runtime.remaining_red_targets(),
             )
             if teacher_source == "scripted_runtime":
                 chosen_action = scripted_choice(
@@ -265,7 +265,7 @@ class TraceDatasetGenerator:
             else:
                 chosen_action = teacher_choice
             result = runtime.act(actor, chosen_action)
-            if expected is not None and runtime._matches_step(chosen_action, expected, result.stdout):
+            if expected is not None and runtime.matches_reference_step(chosen_action, expected, result.stdout):
                 teacher_progress[actor] += 1
             actor_decisions[actor] += 1
             rows.append(
@@ -375,7 +375,7 @@ def _seed_manifest_copy(manifest: dict[str, Any], root_idx: int) -> dict[str, An
     return payload
 
 
-def _parent_stats(snapshot: Snapshot, *, root_idx: int, mutation_idx: int, attempt_idx: int = 1) -> PopulationStats:
+def _parent_stats(snapshot: RuntimeSnapshot, *, root_idx: int, mutation_idx: int, attempt_idx: int = 1) -> PopulationStats:
     offset = mutation_idx + attempt_idx - 1
     parity = (root_idx + offset) % 2
     return PopulationStats(

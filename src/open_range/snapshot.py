@@ -34,9 +34,9 @@ class Snapshot(_StrictModel):
     artifacts_dir: str
     image_digests: dict[str, str] = Field(default_factory=dict)
     state_seed_dir: str
+    world_path: str
     reference_bundle_path: str
     validator_report_path: str
-    world: WorldIR
     artifacts: KindArtifacts
     db_seed_state: dict[str, Any] = Field(default_factory=dict)
     mail_state: dict[str, Any] = Field(default_factory=dict)
@@ -51,6 +51,7 @@ class Snapshot(_StrictModel):
 class RuntimeSnapshot(Snapshot):
     """Internal runtime/admission snapshot hydrated with private references."""
 
+    world: WorldIR
     reference_bundle: ReferenceBundle
 
 

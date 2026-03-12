@@ -150,3 +150,9 @@ The immediate branch-native learning path is:
 3. train small models on that branch-native data
 4. evaluate in-loop on admitted snapshots and mutations
 5. only then consider larger-scale RL
+
+Default tiny-train behavior:
+
+- default on-the-fly dataset generation is `runtime`-only
+- generated corpora should be regenerated from the current code/runtime contract,
+  not silently reused from stale cache directories

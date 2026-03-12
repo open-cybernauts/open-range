@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from open_range.tracegen import generate_trace_dataset
 
 DEFAULT_MODEL = "HuggingFaceTB/SmolLM2-360M-Instruct"
 TRACE_BUILD_CONFIG = BuildConfig(validation_profile="graph_only")
+DEFAULT_TRACESET_ROOT = Path("/tmp/openrange-trace-train-data-runtime")
 
 
 def _tool_call_text(tool_calls: list[dict[str, Any]]) -> str:
@@ -205,7 +207,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-eval-samples", type=int, default=8)
     parser.add_argument("--roles", default="red", help="Comma-separated role filter for branch-native datasets.")
     parser.add_argument("--modes", default="", help="Optional comma-separated runtime-mode filter.")
-    parser.add_argument("--trace-sources", default="runtime,sim", help="Comma-separated trace-source filter.")
+    parser.add_argument("--trace-sources", default="runtime", help="Comma-separated trace-source filter.")
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--epochs", type=float, default=1.0)
     parser.add_argument("--max-steps", type=int, default=24)
@@ -220,10 +222,9 @@ def parse_args() -> argparse.Namespace:
 def resolve_data_path(data: str | None, *, seed: int) -> Path:
     if data:
         return Path(data)
-    generated_root = Path("/tmp/openrange-trace-train-data")
-    decision_path = generated_root / "decision_sft.jsonl"
-    if decision_path.exists():
-        return decision_path
+    generated_root = DEFAULT_TRACESET_ROOT / f"seed-{seed}"
+    if generated_root.exists():
+        shutil.rmtree(generated_root)
     report = generate_trace_dataset(
         load_bundled_manifest("tier1_basic.yaml"),
         generated_root,
@@ -231,7 +232,7 @@ def resolve_data_path(data: str | None, *, seed: int) -> Path:
         build_config=TRACE_BUILD_CONFIG,
         roots=2,
         mutations_per_root=1,
-        include_sim=True,
+        include_sim=False,
         include_joint_pool=False,
     )
     return Path(report.decision_sft_path)

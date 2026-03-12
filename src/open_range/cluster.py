@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import shutil
 import subprocess
@@ -12,6 +11,8 @@ from pathlib import Path
 from typing import Protocol
 
 import yaml
+
+from open_range.async_utils import run_async
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +274,7 @@ class KindBackend:
             still_pending: list[str] = []
             for service in pending:
                 try:
-                    healthy = asyncio.run(release.pods.is_healthy(service))
+                    healthy = run_async(release.pods.is_healthy(service))
                 except Exception:
                     healthy = False
                 if not healthy:

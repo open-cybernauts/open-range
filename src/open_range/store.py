@@ -29,6 +29,7 @@ class SnapshotStore(Protocol):
         split: PoolSplit = "train",
     ) -> Snapshot: ...
     def load(self, snapshot_id: str) -> Snapshot: ...
+    def load_world(self, snapshot_id: str) -> WorldIR: ...
     def load_runtime(self, snapshot_id: str) -> RuntimeSnapshot: ...
     def list(self, *, split: PoolSplit | None = None) -> tuple[Snapshot, ...]: ...
     def sample(
@@ -87,8 +88,10 @@ class FileSnapshotStore:
         snapshot_id = f"{world.world_id}-{world_hash(world)[:8]}"
         snap_dir = self.store_dir / snapshot_id
         snap_dir.mkdir(parents=True, exist_ok=True)
+        world_path = snap_dir / "world.json"
         reference_bundle_path = snap_dir / "reference_bundle.json"
         validator_report_path = snap_dir / "validator_report.json"
+        world_path.write_text(world.model_dump_json(indent=2), encoding="utf-8")
         reference_bundle_path.write_text(wb.model_dump_json(indent=2), encoding="utf-8")
         validator_report_path.write_text(vr.model_dump_json(indent=2), encoding="utf-8")
         snapshot = Snapshot(
@@ -98,9 +101,9 @@ class FileSnapshotStore:
             artifacts_dir=artifacts.render_dir,
             image_digests=artifacts.pinned_image_digests,
             state_seed_dir=state_seed_dir,
+            world_path=str(world_path),
             reference_bundle_path=str(reference_bundle_path),
             validator_report_path=str(validator_report_path),
-            world=world,
             artifacts=artifacts,
             db_seed_state=db_seed_state,
             mail_state=mail_state,
@@ -136,12 +139,20 @@ class FileSnapshotStore:
             raise FileNotFoundError(snapshot_id)
         return Snapshot.model_validate_json(path.read_text(encoding="utf-8"))
 
+    def load_world(self, snapshot_id: str) -> WorldIR:
+        snapshot = self.load(snapshot_id)
+        world_path = Path(snapshot.world_path)
+        return WorldIR.model_validate_json(world_path.read_text(encoding="utf-8"))
+
     def hydrate(self, snapshot: Snapshot) -> RuntimeSnapshot:
+        world_path = Path(snapshot.world_path)
+        world = WorldIR.model_validate_json(world_path.read_text(encoding="utf-8"))
         reference_path = Path(snapshot.reference_bundle_path)
         reference_bundle = ReferenceBundle.model_validate_json(reference_path.read_text(encoding="utf-8"))
         return RuntimeSnapshot.model_validate(
             {
                 **snapshot.model_dump(mode="json"),
+                "world": world.model_dump(mode="json"),
                 "reference_bundle": reference_bundle.model_dump(mode="json"),
             }
         )

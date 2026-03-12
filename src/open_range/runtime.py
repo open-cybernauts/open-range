@@ -215,6 +215,18 @@ class ReferenceDrivenRuntime:
     def export_events(self) -> tuple[RuntimeEvent, ...]:
         return tuple(self._events)
 
+    def reference_step(self, actor: ExternalRole):
+        if actor == "red":
+            return self._next_red_step()
+        return self._next_blue_step()
+
+    def remaining_red_targets(self) -> set[str]:
+        return set(self._remaining_red_targets())
+
+    @staticmethod
+    def matches_reference_step(action: Action, expected, live_stdout: str) -> bool:
+        return ReferenceDrivenRuntime._matches_step(action, expected, live_stdout)
+
     def _apply_prefix_start(self) -> None:
         if self._snapshot is None:
             return

@@ -282,6 +282,7 @@ def _config_identity_content(world: WorldIR, weakness: WeaknessSpec) -> str:
         "weakness_id": weakness.id,
         "kind": weakness.kind,
         "target": weakness.target,
+        "target_ref": weakness.target_ref,
         "mfa_required": False,
         "privileged_scope_validation": False,
     }

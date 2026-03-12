@@ -98,7 +98,7 @@ def admit_cmd(manifest: str, output: str, store_dir: str, split: str, validation
 
     click.echo(f"Admitted snapshot written to {snapshot_path}")
     click.echo(f"  Snapshot ID: {snapshot.snapshot_id}")
-    click.echo(f"  World ID: {snapshot.world.world_id}")
+    click.echo(f"  World ID: {snapshot.world_id}")
     click.echo(f"  Split: {split}")
     click.echo(f"  Parent World: {snapshot.parent_world_id or 'root'}")
 

@@ -219,6 +219,14 @@ Rules:
 - [x] Strengthen benchmark-aligned live objective grading for event-backed objectives beyond pure linked-event checks
 - [x] Exercise multiple reference traces in the user-facing eval/demo surfaces instead of always using the first path
 
+## Phase 25 - Contract Integrity Hardening
+
+- [x] Keep exact world structure off the public `Snapshot` model and hydrate it only for runtime/admission code
+- [x] Replace training/eval dependencies on runtime private methods with stable public runtime hooks
+- [x] Make the default tiny train/eval path regenerate a fresh runtime-first corpus instead of silently reusing stale mixed-source data
+- [x] Remove direct `asyncio.run(...)` call sites from sync admission/objective/live-exec code paths
+- [x] Strengthen the weaker benchmark-aligned live objective graders beyond pure event proxies
+
 ## Phase 24 - Codebase Simplification
 
 - [x] Add shared build-config presets for offline structural and offline reference workflows

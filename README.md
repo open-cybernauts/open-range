@@ -83,10 +83,13 @@ The tiny SFT path can also generate a small branch-native dataset on the fly if
 
 The tiny train/eval scripts are role-correct by default:
 - `--roles red`
-- `--trace-sources runtime,sim`
+- `--trace-sources runtime`
 
 That keeps the small adapter aligned with the current red-only model probe
 instead of mixing red and blue decision rows into one tiny run.
+If `--data` is omitted, the tiny train/eval scripts regenerate a fresh
+runtime-only corpus under `/tmp/openrange-trace-train-data-runtime/seed-<seed>`
+instead of reusing a stale cached dataset.
 
 Train:
 

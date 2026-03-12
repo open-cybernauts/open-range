@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-eval-samples", type=int, default=8)
     parser.add_argument("--roles", default="red", help="Comma-separated role filter for branch-native datasets.")
     parser.add_argument("--modes", default="", help="Optional comma-separated runtime-mode filter.")
-    parser.add_argument("--trace-sources", default="runtime,sim", help="Comma-separated trace-source filter.")
+    parser.add_argument("--trace-sources", default="runtime", help="Comma-separated trace-source filter.")
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--max-new-tokens", type=int, default=96)
     parser.add_argument("--out", default="/tmp/openrange-sft-eval.json", help="Where to write eval metrics.")
