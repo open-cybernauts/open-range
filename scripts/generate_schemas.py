@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from open_range.admission import ValidatorReport, WitnessBundle
+from open_range.admission import ValidatorReport, ReferenceBundle
 from open_range.manifest import EnterpriseSaaSManifest
 
 
@@ -21,7 +21,7 @@ def main() -> None:
     payloads = {
         "manifest.schema.json": EnterpriseSaaSManifest.model_json_schema(),
         "validator_report.schema.json": ValidatorReport.model_json_schema(),
-        "witness_bundle.schema.json": WitnessBundle.model_json_schema(),
+        "reference_bundle.schema.json": ReferenceBundle.model_json_schema(),
     }
     for name, payload in payloads.items():
         _write_schema(schema_dir / name, payload)

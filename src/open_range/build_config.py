@@ -24,8 +24,8 @@ class BuildConfig(BaseModel):
     green_artifacts_enabled: bool = True
     topology_scale: Literal["small", "medium", "large"] = "medium"
     validation_profile: Literal["full", "no_necessity", "graph_plus_live", "graph_only"] = "full"
-    red_witness_count: int = Field(default=1, ge=1)
-    blue_witness_count: int = Field(default=1, ge=1)
+    red_reference_count: int = Field(default=1, ge=1)
+    blue_reference_count: int = Field(default=1, ge=1)
 
 
 DEFAULT_BUILD_CONFIG = BuildConfig()

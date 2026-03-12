@@ -29,7 +29,7 @@ def test_decision_prompt_and_completion_are_structured() -> None:
         weaknesses=(),
         benchmark_tags=("cve_bench",),
         trace_source="runtime",
-        teacher_source="witness_runtime",
+        teacher_source="reference_runtime",
         split="train",
         prompt_mode="zero_day",
     )
@@ -62,7 +62,7 @@ def test_decision_prompt_can_optionally_include_hidden_context() -> None:
         weaknesses=(),
         benchmark_tags=("cve_bench",),
         trace_source="runtime",
-        teacher_source="witness_runtime",
+        teacher_source="reference_runtime",
         split="train",
         prompt_mode="one_day",
         include_hidden_context=True,

@@ -17,7 +17,7 @@ from open_range.snapshot import Snapshot
 
 TraceSource = Literal["runtime", "sim"]
 TraceSplit = Literal["train", "val", "test"]
-TeacherSource = Literal["witness_runtime", "witness_sim"]
+TeacherSource = Literal["reference_runtime", "reference_sim"]
 CounterfactualLabel = Literal[
     "teacher",
     "alternative",

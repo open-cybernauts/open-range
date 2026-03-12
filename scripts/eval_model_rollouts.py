@@ -20,7 +20,7 @@ from typing import Any
 
 from open_range import BuildPipeline, EpisodeConfig, FileSnapshotStore, FrontierMutationPolicy, PopulationStats, load_bundled_manifest
 from open_range.probe_planner import runtime_action
-from open_range.runtime import WitnessDrivenRuntime
+from open_range.runtime import ReferenceDrivenRuntime
 from open_range.runtime_types import Action, Observation
 from open_range.snapshot import Snapshot
 from open_range.training_data import (
@@ -89,7 +89,7 @@ def build_prompt(snapshot: Snapshot, observation: Observation, candidates: tuple
             weaknesses=trace_weaknesses(snapshot),
             benchmark_tags=trace_benchmark_tags(snapshot),
             trace_source="runtime",
-            teacher_source="witness_runtime",
+            teacher_source="reference_runtime",
             split="test",
             prompt_mode="zero_day",
         )
@@ -97,7 +97,7 @@ def build_prompt(snapshot: Snapshot, observation: Observation, candidates: tuple
     )
 
 
-def red_candidates(runtime: WitnessDrivenRuntime, snapshot: Snapshot) -> tuple[TraceCandidate, ...]:
+def red_candidates(runtime: ReferenceDrivenRuntime, snapshot: Snapshot) -> tuple[TraceCandidate, ...]:
     expected = runtime._next_red_step()  # bounded eval probe: candidate set includes the exact next witness action
     if expected is None:
         sleep = Action(actor_id="red", role="red", kind="sleep", payload={})
@@ -235,7 +235,7 @@ def evaluate_model_rollouts(
         red_wins = 0
 
         for snapshot in snapshots:
-            runtime = WitnessDrivenRuntime()
+            runtime = ReferenceDrivenRuntime()
             runtime.reset(
                 snapshot,
                 EpisodeConfig(mode="red_only", scheduler_mode="strict_turns", opponent_blue="scripted"),

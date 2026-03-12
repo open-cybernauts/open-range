@@ -94,11 +94,6 @@
       "title": "Blue Signal Points",
       "type": "integer"
     },
-    "blue_witness_ok": {
-      "default": false,
-      "title": "Blue Witness Ok",
-      "type": "boolean"
-    },
     "boot_ok": {
       "default": false,
       "title": "Boot Ok",
@@ -168,9 +163,14 @@
       "title": "Red Path Depth",
       "type": "integer"
     },
-    "red_witness_ok": {
+    "reference_attack_ok": {
       "default": false,
-      "title": "Red Witness Ok",
+      "title": "Reference Attack Ok",
+      "type": "boolean"
+    },
+    "reference_defense_ok": {
+      "default": false,
+      "title": "Reference Defense Ok",
       "type": "boolean"
     },
     "rejection_reasons": {

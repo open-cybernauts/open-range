@@ -1,4 +1,4 @@
-"""Witness-driven runtime with simulated time and internal green progression."""
+"""Reference-driven runtime with simulated time and internal green progression."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from open_range.episode_config import DEFAULT_EPISODE_CONFIG, EpisodeConfig
 from open_range.execution import ActionBackend, ActionExecution
 from open_range.green import GreenScheduler, ScriptedGreenScheduler
 from open_range.predicates import PredicateEngine
-from open_range.probe_planner import runtime_action as witness_runtime_action
+from open_range.probe_planner import runtime_action as reference_runtime_action
 from open_range.rewards import RewardEngine
 from open_range.runtime_types import (
     Action,
@@ -27,7 +27,7 @@ from open_range.runtime_types import (
 from open_range.snapshot import Snapshot
 
 
-class WitnessDrivenRuntime:
+class ReferenceDrivenRuntime:
     """Runtime for admitted snapshots with actor-specific decisions."""
 
     def __init__(
@@ -206,22 +206,22 @@ class WitnessDrivenRuntime:
         if self._episode_config.start_state == "prefix_delivery":
             if not any(
                 step.payload.get("action") in {"deliver_phish", "deliver_lure"}
-                for step in self._snapshot.witness_bundle.red_witnesses[0].steps
+                for step in self._snapshot.reference_bundle.reference_attack_traces[0].steps
             ):
                 return
         if self._episode_config.start_state == "prefix_click":
             if not any(
                 step.payload.get("action") == "click_lure"
-                for step in self._snapshot.witness_bundle.red_witnesses[0].steps
+                for step in self._snapshot.reference_bundle.reference_attack_traces[0].steps
             ):
                 return
-        for _ in range(len(self._snapshot.witness_bundle.red_witnesses[0].steps)):
+        for _ in range(len(self._snapshot.reference_bundle.reference_attack_traces[0].steps)):
             step = self._next_red_step()
             if step is None or self._state.done:
                 break
             due = max(self._state.sim_time, self._next_due_time["red"])
             self._advance_time(due)
-            emitted = self._act_red(witness_runtime_action("red", step), internal=True).emitted_events
+            emitted = self._act_red(reference_runtime_action("red", step), internal=True).emitted_events
             self._advance_due_time("red")
             self._check_terminal_conditions()
             if self._prefix_satisfied(
@@ -769,7 +769,7 @@ class WitnessDrivenRuntime:
     def _next_red_step(self):
         if self._snapshot is None:
             return None
-        trace = self._snapshot.witness_bundle.red_witnesses[0]
+        trace = self._snapshot.reference_bundle.reference_attack_traces[0]
         if self._red_progress >= len(trace.steps):
             return None
         return trace.steps[self._red_progress]
@@ -777,7 +777,7 @@ class WitnessDrivenRuntime:
     def _next_blue_step(self):
         if self._snapshot is None:
             return None
-        trace = self._snapshot.witness_bundle.blue_witnesses[0]
+        trace = self._snapshot.reference_bundle.reference_defense_traces[0]
         if self._blue_internal_progress >= len(trace.steps):
             return None
         return trace.steps[self._blue_internal_progress]
@@ -839,7 +839,7 @@ class WitnessDrivenRuntime:
     def _remaining_red_targets(self) -> set[str]:
         if self._snapshot is None:
             return set()
-        trace = self._snapshot.witness_bundle.red_witnesses[0]
+        trace = self._snapshot.reference_bundle.reference_attack_traces[0]
         return {step.target for step in trace.steps[self._red_progress:]}
 
     def _path_block_reason(self, target: str) -> str:
@@ -1084,7 +1084,7 @@ class WitnessDrivenRuntime:
         step = self._next_red_step()
         if step is None:
             return Action(actor_id="red", role="red", kind="sleep", payload={})
-        return witness_runtime_action("red", step)
+        return reference_runtime_action("red", step)
 
     def _internal_blue_action(self) -> Action:
         mode = self._resolved_opponent_mode("blue")
@@ -1094,7 +1094,7 @@ class WitnessDrivenRuntime:
             step = self._next_blue_step()
             if step is None:
                 return Action(actor_id="blue", role="blue", kind="sleep", payload={})
-            return witness_runtime_action("blue", step)
+            return reference_runtime_action("blue", step)
         for event in self._visible_events("blue"):
             if event.malicious and event.id not in self._detected_event_ids:
                 return Action(

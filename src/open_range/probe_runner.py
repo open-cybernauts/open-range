@@ -1,33 +1,33 @@
-"""Witness execution helpers for admission."""
+"""Reference-trace execution helpers for admission."""
 
 from __future__ import annotations
 
 from open_range.episode_config import EpisodeConfig
 from open_range.execution import PodActionBackend
 from open_range.probe_planner import runtime_action
-from open_range.runtime import WitnessDrivenRuntime
+from open_range.runtime import ReferenceDrivenRuntime
 from open_range.runtime_types import Action
 from open_range.snapshot import Snapshot
 
 
-def run_red_witness(
+def run_red_reference(
     snapshot: Snapshot,
     backend: PodActionBackend | None = None,
     *,
     episode_seed: int,
 ):
     del episode_seed
-    runtime = WitnessDrivenRuntime(action_backend=backend)
+    runtime = ReferenceDrivenRuntime(action_backend=backend)
     runtime.reset(
         snapshot,
         EpisodeConfig(
             mode="red_only",
             opponent_blue="none",
-            episode_horizon_minutes=max(5, len(snapshot.witness_bundle.red_witnesses[0].steps) + 2),
+            episode_horizon_minutes=max(5, len(snapshot.reference_bundle.reference_attack_traces[0].steps) + 2),
         ),
     )
     outputs: list[str] = []
-    red_steps = list(snapshot.witness_bundle.red_witnesses[0].steps)
+    red_steps = list(snapshot.reference_bundle.reference_attack_traces[0].steps)
     step_idx = 0
     while not runtime.state().done and step_idx < len(red_steps):
         try:
@@ -47,17 +47,17 @@ def run_red_witness(
     health = tuple(sorted(runtime.state().service_health.items()))
     return score, events, health, outputs
 
-def run_blue_witness(snapshot: Snapshot, backend: PodActionBackend | None = None):
-    runtime = WitnessDrivenRuntime(action_backend=backend)
+def run_blue_reference(snapshot: Snapshot, backend: PodActionBackend | None = None):
+    runtime = ReferenceDrivenRuntime(action_backend=backend)
     runtime.reset(
         snapshot,
         EpisodeConfig(
             mode="blue_only_live",
-            episode_horizon_minutes=max(6, len(snapshot.witness_bundle.blue_witnesses[0].steps) + 3),
+            episode_horizon_minutes=max(6, len(snapshot.reference_bundle.reference_defense_traces[0].steps) + 3),
         ),
     )
     outputs: list[str] = []
-    blue_steps = list(snapshot.witness_bundle.blue_witnesses[0].steps)
+    blue_steps = list(snapshot.reference_bundle.reference_defense_traces[0].steps)
     step_idx = 0
     while not runtime.state().done:
         try:

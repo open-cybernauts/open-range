@@ -16,8 +16,8 @@ from open_range import (
     FrontierMutationPolicy,
     PopulationStats,
     ScriptedRuntimeAgent,
-    WitnessSimPlane,
-    WitnessDrivenRuntime,
+    ReferenceSimPlane,
+    ReferenceDrivenRuntime,
     load_bundled_manifest,
 )
 from open_range.probe_planner import runtime_action
@@ -44,7 +44,7 @@ def _load_manifest(source: str | Path | None) -> dict[str, Any]:
 
 
 def _actions_for(snapshot: Snapshot, actor: str) -> list[Action]:
-    trace = snapshot.witness_bundle.red_witnesses[0] if actor == "red" else snapshot.witness_bundle.blue_witnesses[0]
+    trace = snapshot.reference_bundle.reference_attack_traces[0] if actor == "red" else snapshot.reference_bundle.reference_defense_traces[0]
     actions = [runtime_action(actor, step) for step in trace.steps]
     if actions:
         return actions
@@ -56,7 +56,7 @@ def _scripted_agent(snapshot: Snapshot, actor: str) -> ScriptedRuntimeAgent:
 
 
 def _run_mode(snapshot: Snapshot, episode_config: EpisodeConfig) -> dict[str, Any]:
-    runtime = WitnessDrivenRuntime()
+    runtime = ReferenceDrivenRuntime()
     red_agent = _scripted_agent(snapshot, "red")
     blue_agent = _scripted_agent(snapshot, "blue")
     state = runtime.reset(snapshot, episode_config)
@@ -125,7 +125,7 @@ def evaluate_rollouts(
     quiet: bool = False,
 ) -> dict[str, Any]:
     payload = _load_manifest(manifest)
-    sim_plane = WitnessSimPlane()
+    sim_plane = ReferenceSimPlane()
     mutation_policy = FrontierMutationPolicy()
 
     mode_plan = (

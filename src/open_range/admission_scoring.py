@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from open_range.admission import ValidatorCheckReport, ValidatorStageReport, WitnessBundle
+from open_range.admission import ValidatorCheckReport, ValidatorStageReport, ReferenceBundle
 from open_range.predicates import PredicateEngine
 from open_range.world_ir import WorldIR
 
@@ -11,10 +11,10 @@ def report_summary(
     *,
     world: WorldIR,
     stages: tuple[ValidatorStageReport, ...],
-    witness_bundle: WitnessBundle,
+    reference_bundle: ReferenceBundle,
     health_info: dict[str, object],
 ) -> dict[str, object]:
-    del witness_bundle
+    del reference_bundle
     engine = PredicateEngine(world)
     checks = {check.name: check for stage in stages for check in stage.checks}
     rejection_reasons = tuple(
@@ -74,14 +74,14 @@ def report_summary(
             for name in ("siem_ingest", "live_siem_ingest")
             if name in checks
         ),
-        "red_witness_ok": all(
+        "reference_attack_ok": all(
             checks.get(name, ValidatorCheckReport(name=name, passed=False)).passed
-            for name in ("red_witness", "live_red_witness")
+            for name in ("red_reference", "live_red_reference")
             if name in checks
         ),
-        "blue_witness_ok": all(
+        "reference_defense_ok": all(
             checks.get(name, ValidatorCheckReport(name=name, passed=False)).passed
-            for name in ("blue_witness", "live_blue_witness")
+            for name in ("blue_reference", "live_blue_reference")
             if name in checks
         ),
         "necessity_ok": all(

@@ -7,7 +7,7 @@ from pathlib import Path
 from open_range.cluster import BootedRelease, LiveBackend
 from open_range.episode_config import DEFAULT_EPISODE_CONFIG, EpisodeConfig
 from open_range.execution import ActionBackend, PodActionBackend
-from open_range.runtime import WitnessDrivenRuntime
+from open_range.runtime import ReferenceDrivenRuntime
 from open_range.runtime_types import Action, ActionResult, Decision, EpisodeScore, EpisodeState
 from open_range.store import FileSnapshotStore, PoolSplit
 
@@ -19,12 +19,12 @@ class OpenRange:
         self,
         *,
         store: FileSnapshotStore | None = None,
-        runtime: WitnessDrivenRuntime | None = None,
+        runtime: ReferenceDrivenRuntime | None = None,
         live_backend: LiveBackend | None = None,
         action_backend: ActionBackend | None = None,
     ) -> None:
         self.store = store or FileSnapshotStore()
-        self.runtime = runtime or WitnessDrivenRuntime()
+        self.runtime = runtime or ReferenceDrivenRuntime()
         self.live_backend = live_backend
         self.action_backend = action_backend or PodActionBackend()
         self._active_snapshot_id = ""

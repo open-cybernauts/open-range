@@ -5,7 +5,7 @@ from pathlib import Path
 from open_range.admit import LocalAdmissionController
 from open_range.compiler import EnterpriseSaaSManifestCompiler
 from open_range.render import EnterpriseSaaSKindRenderer
-from open_range.sim import WitnessSimPlane
+from open_range.sim import ReferenceSimPlane
 from open_range.store import FileSnapshotStore
 from open_range.synth import EnterpriseSaaSWorldSynthesizer
 from open_range.weaknesses import CatalogWeaknessSeeder
@@ -81,13 +81,13 @@ def _snapshot(tmp_path: Path):
     world = CatalogWeaknessSeeder().apply(EnterpriseSaaSManifestCompiler().compile(_manifest_payload()))
     synth = EnterpriseSaaSWorldSynthesizer().synthesize(world, tmp_path / "synth")
     artifacts = EnterpriseSaaSKindRenderer().render(world, synth, tmp_path / "rendered")
-    witness_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
-    return FileSnapshotStore(tmp_path / "snapshots").create(world, artifacts, witness_bundle, report, synth=synth)
+    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
+    return FileSnapshotStore(tmp_path / "snapshots").create(world, artifacts, reference_bundle, report, synth=synth)
 
 
-def test_witness_sim_plane_generates_deterministic_bootstrap_trace(tmp_path: Path):
+def test_reference_sim_plane_generates_deterministic_bootstrap_trace(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
-    plane = WitnessSimPlane()
+    plane = ReferenceSimPlane()
 
     trace_a = plane.generate_bootstrap_trace(snapshot, episode_seed=7)
     trace_b = plane.generate_bootstrap_trace(snapshot, episode_seed=7)

@@ -120,7 +120,7 @@ def test_service_proxies_runtime_decisions_and_actions(tmp_path: Path):
     service.reset(train_snapshot.snapshot_id, EpisodeConfig(mode="joint_pool", green_enabled=False))
 
     decision = service.next_decision()
-    red_step = train_snapshot.witness_bundle.red_witnesses[0].steps[0]
+    red_step = train_snapshot.reference_bundle.reference_attack_traces[0].steps[0]
     result = service.act(
         "red",
         Action(actor_id="red", role="red", kind=red_step.kind, payload={"target": red_step.target, **red_step.payload}),

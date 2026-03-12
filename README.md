@@ -163,7 +163,7 @@ manifest
 
 ## What is implemented
 
-- strict manifest, `WorldIR`, `WitnessBundle`, and `ValidatorReport` models
+- strict manifest, `WorldIR`, `ReferenceBundle`, and `ValidatorReport` models
 - deterministic `enterprise_saas_v1` compiler
 - deterministic bounded synthesis for seeded business artifacts
 - deterministic weakness seeding from an allowed-family catalog, including the full required non-code kind set for `config_identity`, `secret_exposure`, `workflow_abuse`, and `telemetry_blindspot`

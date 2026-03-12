@@ -60,14 +60,14 @@ class BuildPipeline:
         return CandidateWorld(world=world, synth=synth, artifacts=artifacts, build_config=build_config)
 
     def admit(self, candidate: CandidateWorld, *, split: PoolSplit = "train") -> Snapshot:
-        witness_bundle, report = self.admission.admit(
+        reference_bundle, report = self.admission.admit(
             candidate.world,
             candidate.artifacts,
             candidate.build_config,
         )
         if not report.admitted:
             raise ValueError(f"candidate world {candidate.world.world_id} was not admitted")
-        return self.store.create(candidate.world, candidate.artifacts, witness_bundle, report, split=split, synth=candidate.synth)
+        return self.store.create(candidate.world, candidate.artifacts, reference_bundle, report, split=split, synth=candidate.synth)
 
     def admit_child(
         self,

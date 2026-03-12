@@ -1,4 +1,4 @@
-"""admission, witness, and validator reporting models."""
+"""Admission, reference-bundle, and validator reporting models."""
 
 from __future__ import annotations
 
@@ -11,24 +11,24 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-WitnessRole = Literal["red", "blue"]
+ReferenceRole = Literal["red", "blue"]
 ProbeKind = Literal["smoke", "shortcut", "determinism", "necessity"]
 ReportMode = Literal["fail_fast", "analysis"]
 
 
-class WitnessAction(_StrictModel):
-    actor: WitnessRole
+class ReferenceAction(_StrictModel):
+    actor: ReferenceRole
     kind: str = Field(min_length=1)
     target: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-class WitnessTrace(_StrictModel):
+class ReferenceTrace(_StrictModel):
     id: str = Field(min_length=1)
-    role: WitnessRole
+    role: ReferenceRole
     objective_ids: tuple[str, ...] = Field(default_factory=tuple)
     expected_events: tuple[str, ...] = Field(default_factory=tuple)
-    steps: tuple[WitnessAction, ...] = Field(default_factory=tuple)
+    steps: tuple[ReferenceAction, ...] = Field(default_factory=tuple)
 
 
 class ProbeSpec(_StrictModel):
@@ -61,8 +61,8 @@ class ValidatorReport(_StrictModel):
     boot_ok: bool = False
     workflow_ok: bool = False
     telemetry_ok: bool = False
-    red_witness_ok: bool = False
-    blue_witness_ok: bool = False
+    reference_attack_ok: bool = False
+    reference_defense_ok: bool = False
     necessity_ok: bool = False
     shortcut_risk: Literal["low", "medium", "high"] = "high"
     determinism_score: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -82,9 +82,9 @@ class ValidatorReport(_StrictModel):
     stages: tuple[ValidatorStageReport, ...] = Field(default_factory=tuple)
 
 
-class WitnessBundle(_StrictModel):
-    red_witnesses: tuple[WitnessTrace, ...] = Field(default_factory=tuple)
-    blue_witnesses: tuple[WitnessTrace, ...] = Field(default_factory=tuple)
+class ReferenceBundle(_StrictModel):
+    reference_attack_traces: tuple[ReferenceTrace, ...] = Field(default_factory=tuple)
+    reference_defense_traces: tuple[ReferenceTrace, ...] = Field(default_factory=tuple)
     smoke_tests: tuple[ProbeSpec, ...] = Field(default_factory=tuple)
     shortcut_probes: tuple[ProbeSpec, ...] = Field(default_factory=tuple)
     determinism_probes: tuple[ProbeSpec, ...] = Field(default_factory=tuple)

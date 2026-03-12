@@ -52,8 +52,8 @@ def run_demo(
         candidate = pipeline.build(payload, root / "rendered")
         snapshot = pipeline.admit(candidate, split="train")
 
-        red_steps = snapshot.witness_bundle.red_witnesses[0].steps
-        blue_steps = snapshot.witness_bundle.blue_witnesses[0].steps
+        red_steps = snapshot.reference_bundle.reference_attack_traces[0].steps
+        blue_steps = snapshot.reference_bundle.reference_defense_traces[0].steps
         red_agent = ScriptedRuntimeAgent(
             [
                 Action(

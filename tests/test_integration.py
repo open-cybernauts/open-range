@@ -105,8 +105,8 @@ def test_end_to_end_pipeline_store_reset_and_tandem_episode(tmp_path: Path):
     runtime_service.reset(snapshot.snapshot_id, EpisodeConfig(mode="joint_pool", green_enabled=True))
     runtime_service.close()
 
-    red_steps = snapshot.witness_bundle.red_witnesses[0].steps
-    blue_steps = snapshot.witness_bundle.blue_witnesses[0].steps
+    red_steps = snapshot.reference_bundle.reference_attack_traces[0].steps
+    blue_steps = snapshot.reference_bundle.reference_defense_traces[0].steps
     red_agent = ScriptedRuntimeAgent(
         [
             Action(
@@ -247,7 +247,7 @@ def test_live_backend_integration_carries_logs_from_runtime_events(tmp_path: Pat
     service = OpenRange(store=store, live_backend=backend)
     service.reset(snapshot.snapshot_id, EpisodeConfig(mode="joint_pool", green_enabled=False))
 
-    red_first = snapshot.witness_bundle.red_witnesses[0].steps[0]
+    red_first = snapshot.reference_bundle.reference_attack_traces[0].steps[0]
     decision = service.next_decision()
     assert decision.actor == "red"
     service.act(
@@ -270,7 +270,7 @@ def test_green_reactive_branches_flow_through_runtime_between_external_decisions
     service = OpenRange(store=store)
     service.reset(snapshot.snapshot_id, EpisodeConfig(mode="joint_pool", green_enabled=True))
 
-    red_steps = snapshot.witness_bundle.red_witnesses[0].steps
+    red_steps = snapshot.reference_bundle.reference_attack_traces[0].steps
     credential_index = next(
         idx
         for idx, step in enumerate(red_steps)

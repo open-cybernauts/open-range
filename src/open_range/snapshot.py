@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from open_range.admission import ValidatorReport, WitnessBundle
+from open_range.admission import ValidatorReport, ReferenceBundle
 from open_range.world_ir import WorldIR
 
 
@@ -34,7 +34,7 @@ class Snapshot(_StrictModel):
     artifacts_dir: str
     image_digests: dict[str, str] = Field(default_factory=dict)
     state_seed_dir: str
-    witness_bundle_path: str
+    reference_bundle_path: str
     validator_report_path: str
     world: WorldIR
     artifacts: KindArtifacts
@@ -43,7 +43,7 @@ class Snapshot(_StrictModel):
     file_assets: dict[str, str] = Field(default_factory=dict)
     identity_seed: dict[str, Any] = Field(default_factory=dict)
     validator_report: ValidatorReport
-    witness_bundle: WitnessBundle
+    reference_bundle: ReferenceBundle
     world_hash: str
     parent_snapshot_id: str | None = None
     parent_world_id: str | None = None

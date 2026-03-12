@@ -6,9 +6,9 @@ from open_range.admission import (
     ValidatorCheckReport,
     ValidatorReport,
     ValidatorStageReport,
-    WitnessAction,
-    WitnessBundle,
-    WitnessTrace,
+    ReferenceAction,
+    ReferenceBundle,
+    ReferenceTrace,
 )
 from open_range.build_config import BuildConfig, DEFAULT_BUILD_CONFIG
 from open_range.cluster import BootedRelease, ExecResult, KindBackend, LiveBackend, PodSet, resolve_kubectl_cmd
@@ -62,7 +62,7 @@ from open_range.resources import (
     resource_root,
 )
 from open_range.rewards import RewardEngine
-from open_range.runtime import WitnessDrivenRuntime
+from open_range.runtime import ReferenceDrivenRuntime
 from open_range.runtime_types import (
     Action,
     ActionResult,
@@ -76,7 +76,7 @@ from open_range.runtime_types import (
     ServiceHealth,
 )
 from open_range.service import OpenRange
-from open_range.sim import SimPlane, SimTrace, SimTurn, WitnessSimPlane
+from open_range.sim import SimPlane, SimTrace, SimTurn, ReferenceSimPlane
 from open_range.snapshot import KindArtifacts, Snapshot, world_hash
 from open_range.store import FileSnapshotStore, PoolSplit, SnapshotStore
 from open_range.synth import EnterpriseSaaSWorldSynthesizer, SynthArtifacts, SynthFile, WorldSynthesizer
@@ -232,12 +232,12 @@ __all__ = [
     "WeaknessSeeder",
     "WeaknessTargetKind",
     "WorkflowAbuseKind",
-    "WitnessSimPlane",
+    "ReferenceSimPlane",
     "WorldSynthesizer",
-    "WitnessAction",
-    "WitnessBundle",
-    "WitnessDrivenRuntime",
-    "WitnessTrace",
+    "ReferenceAction",
+    "ReferenceBundle",
+    "ReferenceDrivenRuntime",
+    "ReferenceTrace",
     "WorkflowSpec",
     "WorkflowStepSpec",
     "WorldIR",

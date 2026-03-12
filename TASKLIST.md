@@ -195,6 +195,14 @@ Rules:
 - [x] Narrow `one_day` briefings to high-level risky surfaces instead of exact `family:kind@target` disclosure
 - [x] Make the benchmark-aligned objective library part of the public manifest contract instead of a purely internal annotation layer
 
+## Phase 21 - Reference Bundle Rename
+
+- [x] Rename `WitnessBundle` to `ReferenceBundle`
+- [x] Rename witness trace/action models and bundle fields to reference-oriented names
+- [x] Rename snapshot/schema/resource paths from `witness_bundle` to `reference_bundle`
+- [x] Rename runtime/sim helper classes and execution helpers from witness-oriented names to reference-oriented names
+- [x] Regenerate checked-in schemas and re-verify the full suite
+
 ## Audit notes
 
 Current status against `spec_final.md`:

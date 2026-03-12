@@ -36,7 +36,7 @@ strict manifest
 ## Bootstrap traces
 
 - optional bootstrap or warm-start traces come from the sim plane, not the core runtime contract
-- `WitnessSimPlane` replays private witnesses through the public decision loop to generate cheap deterministic traces
+- `ReferenceSimPlane` replays private witnesses through the public decision loop to generate cheap deterministic traces
 - this keeps training warmup logic separate from the environment surface while preserving the old synthetic-bootstrap idea as a tooling layer
 
 ## Training data

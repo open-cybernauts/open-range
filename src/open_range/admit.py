@@ -14,15 +14,15 @@ from open_range.admission import (
     ValidatorCheckReport,
     ValidatorReport,
     ValidatorStageReport,
-    WitnessBundle,
+    ReferenceBundle,
 )
 from open_range.build_config import BuildConfig, DEFAULT_BUILD_CONFIG
 from open_range.cluster import LiveBackend
 from open_range.counterfactuals import clear_runtime_markers, remediation_command
 from open_range.execution import PodActionBackend
 from open_range.predicates import PredicateEngine
-from open_range.probe_planner import build_witness_bundle
-from open_range.probe_runner import run_blue_witness, run_red_witness
+from open_range.probe_planner import build_reference_bundle
+from open_range.probe_runner import run_blue_reference, run_red_reference
 from open_range.snapshot import KindArtifacts, Snapshot, world_hash
 from open_range.world_ir import ServiceSpec, WorldIR
 
@@ -33,10 +33,10 @@ class AdmissionController(Protocol):
         world: WorldIR,
         artifacts: KindArtifacts,
         build_config: BuildConfig = DEFAULT_BUILD_CONFIG,
-    ) -> tuple[WitnessBundle, ValidatorReport]: ...
+    ) -> tuple[ReferenceBundle, ValidatorReport]: ...
 
 
-CheckFunc = Callable[[WorldIR, KindArtifacts, WitnessBundle | None], ValidatorCheckReport]
+CheckFunc = Callable[[WorldIR, KindArtifacts, ReferenceBundle | None], ValidatorCheckReport]
 
 
 @dataclass(frozen=True)
@@ -59,8 +59,8 @@ class LocalAdmissionController:
         world: WorldIR,
         artifacts: KindArtifacts,
         build_config: BuildConfig = DEFAULT_BUILD_CONFIG,
-    ) -> tuple[WitnessBundle, ValidatorReport]:
-        witness_bundle: WitnessBundle | None = None
+    ) -> tuple[ReferenceBundle, ValidatorReport]:
+        reference_bundle: ReferenceBundle | None = None
         stages: list[ValidatorStageReport] = []
         continue_running = True
         health_info: dict[str, object] = {"render_dir": artifacts.render_dir}
@@ -70,9 +70,9 @@ class LocalAdmissionController:
             for check in stage.checks:
                 if not continue_running:
                     break
-                if witness_bundle is None and stage.name in {"red_witness", "blue_witness", "necessity", "shortcut", "determinism"}:
-                    witness_bundle = build_witness_bundle(world, build_config)
-                result = check(world, artifacts, witness_bundle)
+                if reference_bundle is None and stage.name in {"red_reference", "blue_reference", "necessity", "shortcut", "determinism"}:
+                    reference_bundle = build_reference_bundle(world, build_config)
+                result = check(world, artifacts, reference_bundle)
                 checks.append(result)
                 if self.mode == "fail_fast" and not result.passed and not result.advisory:
                     continue_running = False
@@ -87,7 +87,7 @@ class LocalAdmissionController:
             if self.mode == "fail_fast" and not stage_passed:
                 break
 
-        final_bundle = witness_bundle or build_witness_bundle(world, build_config)
+        final_bundle = reference_bundle or build_reference_bundle(world, build_config)
 
         if continue_running and self.live_backend is not None:
             live_stage, live_info = self._run_live_backend_checks(world, artifacts, final_bundle)
@@ -100,7 +100,7 @@ class LocalAdmissionController:
         summary_fields = report_summary(
             world=world,
             stages=tuple(stages),
-            witness_bundle=final_bundle,
+            reference_bundle=final_bundle,
             health_info=health_info,
         )
         report = ValidatorReport(
@@ -139,8 +139,8 @@ class LocalAdmissionController:
             ),
         )
         witness_stages = (
-            _Stage("red_witness", (_check_red_witness,)),
-            _Stage("blue_witness", (_check_blue_witness,)),
+            _Stage("red_reference", (_check_red_reference,)),
+            _Stage("blue_reference", (_check_blue_reference,)),
         )
         advanced_stages = (
             _Stage("necessity", (_check_necessity,)),
@@ -172,7 +172,7 @@ class LocalAdmissionController:
         self,
         world: WorldIR,
         artifacts: KindArtifacts,
-        witness_bundle: WitnessBundle,
+        reference_bundle: ReferenceBundle,
     ) -> tuple[ValidatorStageReport, dict[str, object]]:
         assert self.live_backend is not None
         checks: list[ValidatorCheckReport] = []
@@ -213,15 +213,15 @@ class LocalAdmissionController:
                     error="" if not unhealthy else "one or more live services failed readiness",
                 )
             )
-            snapshot = _ephemeral_snapshot(world, artifacts, witness_bundle)
+            snapshot = _ephemeral_snapshot(world, artifacts, reference_bundle)
             backend = PodActionBackend()
             backend.bind(snapshot, release)
             checks.append(_live_service_smoke_check(world, release))
             clear_runtime_markers(release, world)
-            checks.append(_live_red_witness_check(snapshot, backend))
+            checks.append(_live_red_reference_check(snapshot, backend))
             checks.append(_live_siem_ingest_check(release))
             clear_runtime_markers(release, world)
-            checks.append(_live_blue_witness_check(snapshot, backend))
+            checks.append(_live_blue_reference_check(snapshot, backend))
             clear_runtime_markers(release, world)
             checks.append(_live_determinism_check(snapshot, backend))
             clear_runtime_markers(release, world)
@@ -256,7 +256,7 @@ class LocalAdmissionController:
         return stage, live_info
 
 
-def _check_manifest_compliance(world: WorldIR, _artifacts: KindArtifacts, _wb: WitnessBundle | None) -> ValidatorCheckReport:
+def _check_manifest_compliance(world: WorldIR, _artifacts: KindArtifacts, _wb: ReferenceBundle | None) -> ValidatorCheckReport:
     allowed = {"web_app", "email", "idp", "fileshare", "db", "siem"}
     invalid = sorted(service.kind for service in world.services if service.kind not in allowed)
     passed = world.world_family == "enterprise_saas_v1" and not invalid
@@ -268,7 +268,7 @@ def _check_manifest_compliance(world: WorldIR, _artifacts: KindArtifacts, _wb: W
     )
 
 
-def _check_graph_consistency(world: WorldIR, _artifacts: KindArtifacts, _wb: WitnessBundle | None) -> ValidatorCheckReport:
+def _check_graph_consistency(world: WorldIR, _artifacts: KindArtifacts, _wb: ReferenceBundle | None) -> ValidatorCheckReport:
     host_ids = {host.id for host in world.hosts}
     service_ids = {service.id for service in world.services}
     asset_ids = {asset.id for asset in world.assets}
@@ -313,7 +313,7 @@ def _check_graph_consistency(world: WorldIR, _artifacts: KindArtifacts, _wb: Wit
     )
 
 
-def _check_path_solvability(world: WorldIR, _artifacts: KindArtifacts, _wb: WitnessBundle | None) -> ValidatorCheckReport:
+def _check_path_solvability(world: WorldIR, _artifacts: KindArtifacts, _wb: ReferenceBundle | None) -> ValidatorCheckReport:
     predicates = PredicateEngine(world)
     starts = {service.id for service in world.services if predicates.is_public_service(service)}
     unreachable = []
@@ -329,7 +329,7 @@ def _check_path_solvability(world: WorldIR, _artifacts: KindArtifacts, _wb: Witn
     )
 
 
-def _check_objective_grounding(world: WorldIR, _artifacts: KindArtifacts, _wb: WitnessBundle | None) -> ValidatorCheckReport:
+def _check_objective_grounding(world: WorldIR, _artifacts: KindArtifacts, _wb: ReferenceBundle | None) -> ValidatorCheckReport:
     predicates = PredicateEngine(world)
     issues = []
     graders = {}
@@ -353,7 +353,7 @@ def _check_objective_grounding(world: WorldIR, _artifacts: KindArtifacts, _wb: W
     )
 
 
-def _check_workflow_consistency(world: WorldIR, _artifacts: KindArtifacts, _wb: WitnessBundle | None) -> ValidatorCheckReport:
+def _check_workflow_consistency(world: WorldIR, _artifacts: KindArtifacts, _wb: ReferenceBundle | None) -> ValidatorCheckReport:
     service_ids = {service.id for service in world.services}
     asset_ids = {asset.id for asset in world.assets}
     issues = []
@@ -371,7 +371,7 @@ def _check_workflow_consistency(world: WorldIR, _artifacts: KindArtifacts, _wb: 
     )
 
 
-def _check_render_outputs(_world: WorldIR, artifacts: KindArtifacts, _wb: WitnessBundle | None) -> ValidatorCheckReport:
+def _check_render_outputs(_world: WorldIR, artifacts: KindArtifacts, _wb: ReferenceBundle | None) -> ValidatorCheckReport:
     missing = [path for path in artifacts.rendered_files if not Path(path).exists()]
     return ValidatorCheckReport(
         name="render_outputs",
@@ -381,7 +381,7 @@ def _check_render_outputs(_world: WorldIR, artifacts: KindArtifacts, _wb: Witnes
     )
 
 
-def _check_service_health_contract(world: WorldIR, artifacts: KindArtifacts, _wb: WitnessBundle | None) -> ValidatorCheckReport:
+def _check_service_health_contract(world: WorldIR, artifacts: KindArtifacts, _wb: ReferenceBundle | None) -> ValidatorCheckReport:
     rendered = artifacts.chart_values.get("services", {})
     missing = [service.id for service in world.services if service.id not in rendered]
     passed = not missing and len(rendered) == len(world.services)
@@ -393,7 +393,7 @@ def _check_service_health_contract(world: WorldIR, artifacts: KindArtifacts, _wb
     )
 
 
-def _check_siem_ingest(world: WorldIR, _artifacts: KindArtifacts, _wb: WitnessBundle | None) -> ValidatorCheckReport:
+def _check_siem_ingest(world: WorldIR, _artifacts: KindArtifacts, _wb: ReferenceBundle | None) -> ValidatorCheckReport:
     telemetry_targets = {edge.target for edge in world.telemetry_edges}
     actual_sources = {edge.source for edge in world.telemetry_edges}
     expected_sources = {service.id for service in world.services if service.id != "svc-siem"}
@@ -406,7 +406,7 @@ def _check_siem_ingest(world: WorldIR, _artifacts: KindArtifacts, _wb: WitnessBu
     )
 
 
-def _check_isolation(world: WorldIR, _artifacts: KindArtifacts, _wb: WitnessBundle | None) -> ValidatorCheckReport:
+def _check_isolation(world: WorldIR, _artifacts: KindArtifacts, _wb: ReferenceBundle | None) -> ValidatorCheckReport:
     issues = []
     host_by_id = {host.id: host for host in world.hosts}
     for service in world.services:
@@ -421,7 +421,7 @@ def _check_isolation(world: WorldIR, _artifacts: KindArtifacts, _wb: WitnessBund
     )
 
 
-def _check_difficulty_envelope(world: WorldIR, _artifacts: KindArtifacts, _wb: WitnessBundle | None) -> ValidatorCheckReport:
+def _check_difficulty_envelope(world: WorldIR, _artifacts: KindArtifacts, _wb: ReferenceBundle | None) -> ValidatorCheckReport:
     predicates = PredicateEngine(world)
     red_depth = predicates.red_path_depth()
     lower = max(1, world.target_red_path_depth - 2)
@@ -441,17 +441,17 @@ def _check_difficulty_envelope(world: WorldIR, _artifacts: KindArtifacts, _wb: W
     )
 
 
-def _check_red_witness(_world: WorldIR, _artifacts: KindArtifacts, wb: WitnessBundle | None) -> ValidatorCheckReport:
-    if wb is None or not wb.red_witnesses:
+def _check_red_reference(_world: WorldIR, _artifacts: KindArtifacts, wb: ReferenceBundle | None) -> ValidatorCheckReport:
+    if wb is None or not wb.reference_attack_traces:
         return ValidatorCheckReport(
-            name="red_witness",
+            name="red_reference",
             passed=False,
             details={"trace_id": "", "step_count": 0},
             error="no valid red witness",
         )
     snapshot = _ephemeral_snapshot(_world, _artifacts, wb)
-    score, events, health, outputs = run_red_witness(snapshot, None, episode_seed=_world.seed)
-    trace = wb.red_witnesses[0]
+    score, events, health, outputs = run_red_reference(snapshot, None, episode_seed=_world.seed)
+    trace = wb.reference_attack_traces[0]
     predicates = PredicateEngine(_world)
     satisfied = predicates.evaluate_red_objectives(
         snapshot=snapshot,
@@ -460,7 +460,7 @@ def _check_red_witness(_world: WorldIR, _artifacts: KindArtifacts, wb: WitnessBu
     )
     passed = score.winner == "red" and score.done and predicates.red_terminal_satisfied(satisfied)
     return ValidatorCheckReport(
-        name="red_witness",
+        name="red_reference",
         passed=passed,
         details={
             "trace_id": trace.id,
@@ -474,20 +474,20 @@ def _check_red_witness(_world: WorldIR, _artifacts: KindArtifacts, wb: WitnessBu
     )
 
 
-def _check_blue_witness(world: WorldIR, _artifacts: KindArtifacts, wb: WitnessBundle | None) -> ValidatorCheckReport:
-    if wb is None or not wb.blue_witnesses:
+def _check_blue_reference(world: WorldIR, _artifacts: KindArtifacts, wb: ReferenceBundle | None) -> ValidatorCheckReport:
+    if wb is None or not wb.reference_defense_traces:
         return ValidatorCheckReport(
-            name="blue_witness",
+            name="blue_reference",
             passed=False,
             details={"trace_id": "", "step_count": 0},
             error="no valid blue witness",
         )
     snapshot = _ephemeral_snapshot(world, _artifacts, wb)
-    score, outputs = run_blue_witness(snapshot, None)
-    trace = wb.blue_witnesses[0]
+    score, outputs = run_blue_reference(snapshot, None)
+    trace = wb.reference_defense_traces[0]
     passed = score.winner == "blue" and score.done and len(trace.objective_ids) <= len(world.blue_objectives)
     return ValidatorCheckReport(
-        name="blue_witness",
+        name="blue_reference",
         passed=passed,
         details={
             "trace_id": trace.id,
@@ -499,8 +499,8 @@ def _check_blue_witness(world: WorldIR, _artifacts: KindArtifacts, wb: WitnessBu
     )
 
 
-def _check_necessity(world: WorldIR, _artifacts: KindArtifacts, wb: WitnessBundle | None) -> ValidatorCheckReport:
-    red_trace = wb.red_witnesses[0] if wb and wb.red_witnesses else None
+def _check_necessity(world: WorldIR, _artifacts: KindArtifacts, wb: ReferenceBundle | None) -> ValidatorCheckReport:
+    red_trace = wb.reference_attack_traces[0] if wb and wb.reference_attack_traces else None
     weaknesses = PredicateEngine(world).active_weaknesses()
     observability_sources = {edge.source for edge in world.telemetry_edges}
     executable_targets = {weak.target for weak in weaknesses if remediation_command(weak)}
@@ -523,7 +523,7 @@ def _check_necessity(world: WorldIR, _artifacts: KindArtifacts, wb: WitnessBundl
         counterfactual_world = world.model_copy(
             update={"weaknesses": tuple(weak for weak in world.weaknesses if weak.id != witness_weakness.id)}
         )
-        score, _events, _health, outputs = run_red_witness(
+        score, _events, _health, outputs = run_red_reference(
             _ephemeral_snapshot(counterfactual_world, _artifacts, wb),
             None,
             episode_seed=counterfactual_world.seed,
@@ -545,7 +545,7 @@ def _check_necessity(world: WorldIR, _artifacts: KindArtifacts, wb: WitnessBundl
     )
 
 
-def _check_shortcut_probes(world: WorldIR, _artifacts: KindArtifacts, wb: WitnessBundle | None) -> ValidatorCheckReport:
+def _check_shortcut_probes(world: WorldIR, _artifacts: KindArtifacts, wb: ReferenceBundle | None) -> ValidatorCheckReport:
     probes = wb.shortcut_probes if wb else ()
     predicates = PredicateEngine(world)
     public_services = {service.id for service in world.services if predicates.is_public_service(service)}
@@ -565,17 +565,17 @@ def _check_shortcut_probes(world: WorldIR, _artifacts: KindArtifacts, wb: Witnes
     )
 
 
-def _check_determinism(world: WorldIR, _artifacts: KindArtifacts, wb: WitnessBundle | None) -> ValidatorCheckReport:
-    regenerated = build_witness_bundle(
+def _check_determinism(world: WorldIR, _artifacts: KindArtifacts, wb: ReferenceBundle | None) -> ValidatorCheckReport:
+    regenerated = build_reference_bundle(
         world,
         BuildConfig(
-            red_witness_count=len(wb.red_witnesses) if wb else 1,
-            blue_witness_count=len(wb.blue_witnesses) if wb else 1,
+            red_reference_count=len(wb.reference_attack_traces) if wb else 1,
+            blue_reference_count=len(wb.reference_defense_traces) if wb else 1,
         ),
     )
     snapshot = _ephemeral_snapshot(world, _artifacts, wb or regenerated)
-    first_score, first_events, first_health, _first_outputs = run_red_witness(snapshot, None, episode_seed=world.seed)
-    second_score, second_events, second_health, _second_outputs = run_red_witness(snapshot, None, episode_seed=world.seed)
+    first_score, first_events, first_health, _first_outputs = run_red_reference(snapshot, None, episode_seed=world.seed)
+    second_score, second_events, second_health, _second_outputs = run_red_reference(snapshot, None, episode_seed=world.seed)
     passed = (
         wb is not None
         and regenerated.model_dump(mode="json") == wb.model_dump(mode="json")
@@ -606,7 +606,7 @@ def _witness_weakness_id(trace) -> str:
     return ""
 
 
-def _ephemeral_snapshot(world: WorldIR, artifacts: KindArtifacts, witness_bundle: WitnessBundle) -> Snapshot:
+def _ephemeral_snapshot(world: WorldIR, artifacts: KindArtifacts, reference_bundle: ReferenceBundle) -> Snapshot:
     predicates = PredicateEngine(world)
     db_seed_state = {"services": [service.id for service in world.services if service.kind == "db"]}
     mail_state = {"mailboxes": [persona.mailbox for persona in world.green_personas if persona.mailbox]}
@@ -618,8 +618,8 @@ def _ephemeral_snapshot(world: WorldIR, artifacts: KindArtifacts, witness_bundle
         boot_ok=True,
         workflow_ok=True,
         telemetry_ok=True,
-        red_witness_ok=True,
-        blue_witness_ok=True,
+        reference_attack_ok=True,
+        reference_defense_ok=True,
         necessity_ok=True,
         shortcut_risk="low",
         determinism_score=1.0,
@@ -640,7 +640,7 @@ def _ephemeral_snapshot(world: WorldIR, artifacts: KindArtifacts, witness_bundle
         artifacts_dir=artifacts.render_dir,
         image_digests=artifacts.pinned_image_digests,
         state_seed_dir=artifacts.render_dir,
-        witness_bundle_path=f"{artifacts.render_dir}/witness_bundle.json",
+        reference_bundle_path=f"{artifacts.render_dir}/reference_bundle.json",
         validator_report_path=f"{artifacts.render_dir}/validator_report.json",
         world=world,
         artifacts=artifacts,
@@ -649,7 +649,7 @@ def _ephemeral_snapshot(world: WorldIR, artifacts: KindArtifacts, witness_bundle
         file_assets=file_assets,
         identity_seed=identity_seed,
         validator_report=report,
-        witness_bundle=witness_bundle,
+        reference_bundle=reference_bundle,
         world_hash=world_hash(world),
     )
 
@@ -677,8 +677,8 @@ def _live_service_smoke_check(world: WorldIR, release) -> ValidatorCheckReport:
     )
 
 
-def _live_red_witness_check(snapshot: Snapshot, backend: PodActionBackend) -> ValidatorCheckReport:
-    score, events, health, outputs = run_red_witness(snapshot, backend, episode_seed=snapshot.world.seed)
+def _live_red_reference_check(snapshot: Snapshot, backend: PodActionBackend) -> ValidatorCheckReport:
+    score, events, health, outputs = run_red_reference(snapshot, backend, episode_seed=snapshot.world.seed)
     predicates = PredicateEngine(snapshot.world)
     satisfied = predicates.evaluate_red_objectives(
         snapshot=snapshot,
@@ -687,7 +687,7 @@ def _live_red_witness_check(snapshot: Snapshot, backend: PodActionBackend) -> Va
     )
     passed = score.winner == "red" and score.done and predicates.red_terminal_satisfied(satisfied)
     return ValidatorCheckReport(
-        name="live_red_witness",
+        name="live_red_reference",
         passed=passed,
         details={
             "winner": score.winner,
@@ -699,11 +699,11 @@ def _live_red_witness_check(snapshot: Snapshot, backend: PodActionBackend) -> Va
     )
 
 
-def _live_blue_witness_check(snapshot: Snapshot, backend: PodActionBackend) -> ValidatorCheckReport:
-    score, outputs = run_blue_witness(snapshot, backend)
+def _live_blue_reference_check(snapshot: Snapshot, backend: PodActionBackend) -> ValidatorCheckReport:
+    score, outputs = run_blue_reference(snapshot, backend)
     passed = score.winner == "blue" and score.done
     return ValidatorCheckReport(
-        name="live_blue_witness",
+        name="live_blue_reference",
         passed=passed,
         details={"winner": score.winner, "terminal_reason": score.terminal_reason, "outputs": outputs},
         error="" if passed else "live blue witness did not validate detect-and-contain path",
@@ -723,12 +723,12 @@ def _live_siem_ingest_check(release) -> ValidatorCheckReport:
 
 
 def _live_determinism_check(snapshot: Snapshot, backend: PodActionBackend) -> ValidatorCheckReport:
-    first_score, first_events, first_health, _first_outputs = run_red_witness(
+    first_score, first_events, first_health, _first_outputs = run_red_reference(
         snapshot,
         backend,
         episode_seed=snapshot.world.seed,
     )
-    second_score, second_events, second_health, _second_outputs = run_red_witness(
+    second_score, second_events, second_health, _second_outputs = run_red_reference(
         snapshot,
         backend,
         episode_seed=snapshot.world.seed,
@@ -752,7 +752,7 @@ def _live_determinism_check(snapshot: Snapshot, backend: PodActionBackend) -> Va
 
 
 def _live_necessity_check(snapshot: Snapshot, release, backend: PodActionBackend) -> ValidatorCheckReport:
-    red_targets = {step.target for step in snapshot.witness_bundle.red_witnesses[0].steps}
+    red_targets = {step.target for step in snapshot.reference_bundle.reference_attack_traces[0].steps}
     candidate_weaknesses = sorted(
         (
             weak
@@ -761,7 +761,7 @@ def _live_necessity_check(snapshot: Snapshot, release, backend: PodActionBackend
         ),
         key=lambda weak: (
             0 if weak.instantiation_mode == "exact_code" else 1,
-            0 if weak.target == snapshot.witness_bundle.red_witnesses[0].steps[0].target else 1,
+            0 if weak.target == snapshot.reference_bundle.reference_attack_traces[0].steps[0].target else 1,
             weak.id,
         ),
     )
@@ -786,7 +786,7 @@ def _live_necessity_check(snapshot: Snapshot, release, backend: PodActionBackend
             error="weakness remediation is not executable",
         )
     apply_result = asyncio.run(release.pods.exec(target_weakness.target, command, timeout=10.0))
-    score, _events, _health, outputs = run_red_witness(
+    score, _events, _health, outputs = run_red_reference(
         snapshot,
         backend,
         episode_seed=snapshot.world.seed,

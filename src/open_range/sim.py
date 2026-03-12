@@ -7,7 +7,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from open_range.episode_config import EpisodeConfig
-from open_range.runtime import WitnessDrivenRuntime
+from open_range.runtime import ReferenceDrivenRuntime
 from open_range.runtime_types import Action
 from open_range.snapshot import Snapshot
 
@@ -35,24 +35,24 @@ class SimPlane(Protocol):
     def generate_bootstrap_trace(self, snapshot: Snapshot, *, episode_seed: int) -> SimTrace: ...
 
 
-class WitnessSimPlane:
-    """Replay hidden witnesses through the public decision loop."""
+class ReferenceSimPlane:
+    """Replay hidden reference traces through the public decision loop."""
 
     def generate_bootstrap_trace(self, snapshot: Snapshot, *, episode_seed: int) -> SimTrace:
-        runtime = WitnessDrivenRuntime()
+        runtime = ReferenceDrivenRuntime()
         runtime.reset(
             snapshot,
             EpisodeConfig(
                 mode="joint_pool",
                 scheduler_mode="strict_turns",
-                episode_horizon_minutes=max(6, len(snapshot.witness_bundle.red_witnesses[0].steps) + 3),
+                episode_horizon_minutes=max(6, len(snapshot.reference_bundle.reference_attack_traces[0].steps) + 3),
             ),
         )
         turns: list[SimTurn] = []
         red_idx = 0
         blue_idx = 0
-        red_steps = snapshot.witness_bundle.red_witnesses[0].steps
-        blue_steps = snapshot.witness_bundle.blue_witnesses[0].steps
+        red_steps = snapshot.reference_bundle.reference_attack_traces[0].steps
+        blue_steps = snapshot.reference_bundle.reference_defense_traces[0].steps
 
         while not runtime.state().done:
             decision = runtime.next_decision()

@@ -147,23 +147,23 @@ def test_admission_controller_admits_seeded_world(tmp_path: Path):
     world = _build_seeded_world()
     artifacts = EnterpriseSaaSKindRenderer().render(world, _synth(world, tmp_path), tmp_path / "rendered")
 
-    witness_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
+    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
 
     assert report.admitted is True
     assert report.graph_ok is True
-    assert report.red_witness_ok is True
+    assert report.reference_attack_ok is True
     assert report.blue_signal_points == len({edge.source for edge in world.telemetry_edges})
     assert report.benchmark_tags_covered
     assert report.stages[-1].name == "determinism"
     objective_grounding = next(stage for stage in report.stages if stage.name == "static").checks[3]
     assert objective_grounding.name == "objective_grounding"
     assert objective_grounding.details["graders"]
-    red_witness = next(stage for stage in report.stages if stage.name == "red_witness").checks[0]
-    assert sorted(red_witness.details["satisfied_predicates"]) == sorted(
+    red_reference = next(stage for stage in report.stages if stage.name == "red_reference").checks[0]
+    assert sorted(red_reference.details["satisfied_predicates"]) == sorted(
         objective.predicate for objective in world.red_objectives if objective.terminal
     )
-    assert witness_bundle.red_witnesses
-    assert witness_bundle.blue_witnesses
+    assert reference_bundle.reference_attack_traces
+    assert reference_bundle.reference_defense_traces
 
 
 def test_admission_controller_offline_witness_can_ground_pinned_non_code_weakness(tmp_path: Path):
@@ -175,16 +175,16 @@ def test_admission_controller_offline_witness_can_ground_pinned_non_code_weaknes
     world = CatalogWeaknessSeeder().apply(EnterpriseSaaSManifestCompiler().compile(payload))
     artifacts = EnterpriseSaaSKindRenderer().render(world, _synth(world, tmp_path), tmp_path / "rendered-non-code")
 
-    witness_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
+    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
 
     assert report.admitted is True
-    assert report.red_witness_ok is True
+    assert report.reference_attack_ok is True
     assert report.necessity_ok is True
     assert len(world.weaknesses) == 1
     assert world.weaknesses[0].family == "secret_exposure"
     assert any(
         step.payload.get("action") == "collect_secret" and step.payload.get("weakness_id") == world.weaknesses[0].id
-        for step in witness_bundle.red_witnesses[0].steps
+        for step in reference_bundle.reference_attack_traces[0].steps
     )
 
 
@@ -265,12 +265,12 @@ def test_admission_controller_can_run_optional_live_backend(tmp_path: Path):
         def teardown(self, release) -> None:
             calls.append(f"down:{release.release_name}")
 
-    witness_bundle, report = LocalAdmissionController(
+    reference_bundle, report = LocalAdmissionController(
         mode="fail_fast",
         live_backend=FakeBackend(),
     ).admit(world, artifacts)
 
-    assert witness_bundle.red_witnesses
+    assert reference_bundle.reference_attack_traces
     assert report.admitted is True
     assert any(stage.name == "kind_live" for stage in report.stages)
     assert calls[0].startswith("boot:")
@@ -343,10 +343,10 @@ def test_snapshot_store_persists_v1_snapshot(tmp_path: Path):
     world = _build_seeded_world()
     synth = _synth(world, tmp_path)
     artifacts = EnterpriseSaaSKindRenderer().render(world, synth, tmp_path / "rendered")
-    witness_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
+    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
     store = FileSnapshotStore(tmp_path / "snapshots")
 
-    snapshot = store.create(world, artifacts, witness_bundle, report, synth=synth)
+    snapshot = store.create(world, artifacts, reference_bundle, report, synth=synth)
     loaded = store.load(snapshot.snapshot_id)
 
     assert loaded.snapshot_id == snapshot.snapshot_id
@@ -354,6 +354,6 @@ def test_snapshot_store_persists_v1_snapshot(tmp_path: Path):
     assert loaded.seed == world.seed
     assert loaded.world.world_id == world.world_id
     assert loaded.validator_report.admitted is True
-    assert Path(loaded.witness_bundle_path).exists()
+    assert Path(loaded.reference_bundle_path).exists()
     assert Path(loaded.validator_report_path).exists()
     assert "mailboxes" in loaded.identity_seed

@@ -20,8 +20,8 @@ from open_range import (
     FileSnapshotStore,
     ScriptedRuntimeAgent,
     TandemEpisodeDriver,
-    WitnessSimPlane,
-    WitnessDrivenRuntime,
+    ReferenceSimPlane,
+    ReferenceDrivenRuntime,
     load_bundled_manifest,
 )
 
@@ -45,8 +45,8 @@ def _load_manifest(source: str | Path | None) -> dict[str, Any]:
 
 
 def _scripted_agents(snapshot):
-    red_steps = snapshot.witness_bundle.red_witnesses[0].steps
-    blue_steps = snapshot.witness_bundle.blue_witnesses[0].steps
+    red_steps = snapshot.reference_bundle.reference_attack_traces[0].steps
+    blue_steps = snapshot.reference_bundle.reference_defense_traces[0].steps
     red_agent = ScriptedRuntimeAgent(
         [
             Action(
@@ -92,10 +92,10 @@ def run_bootstrap_demo(
         candidate = pipeline.build(payload, root / "rendered")
         snapshot = pipeline.admit(candidate, split="train")
 
-        sim_plane = WitnessSimPlane()
+        sim_plane = ReferenceSimPlane()
         bootstrap_trace = sim_plane.generate_bootstrap_trace(snapshot, episode_seed=seed)
 
-        runtime = WitnessDrivenRuntime()
+        runtime = ReferenceDrivenRuntime()
         driver = TandemEpisodeDriver(runtime)
         red_agent, blue_agent = _scripted_agents(snapshot)
         episode = driver.run_episode(

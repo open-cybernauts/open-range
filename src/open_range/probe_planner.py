@@ -1,11 +1,11 @@
-"""Private witness and probe planning for admission."""
+"""Private reference-trace and probe planning for admission."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import shlex
 
-from open_range.admission import ProbeSpec, WitnessAction, WitnessBundle, WitnessTrace
+from open_range.admission import ProbeSpec, ReferenceAction, ReferenceBundle, ReferenceTrace
 from open_range.build_config import BuildConfig, DEFAULT_BUILD_CONFIG
 from open_range.code_web import code_web_payload
 from open_range.predicates import PredicateEngine
@@ -15,14 +15,14 @@ from open_range.world_ir import WorldIR
 
 @dataclass(frozen=True, slots=True)
 class ProbePlanner:
-    """Construct bounded private witnesses and probes for one world."""
+    """Construct bounded private reference traces and probes for one world."""
 
     world: WorldIR
     build_config: BuildConfig = DEFAULT_BUILD_CONFIG
 
-    def build(self) -> WitnessBundle:
-        red_trace = self.build_red_witness()
-        blue_trace = self.build_blue_witness(red_trace)
+    def build(self) -> ReferenceBundle:
+        red_trace = self.build_red_reference()
+        blue_trace = self.build_blue_reference(red_trace)
         smoke_tests = tuple(
             ProbeSpec(
                 id=f"smoke-{service.id}",
@@ -51,24 +51,24 @@ class ProbePlanner:
             )
             for weak in engine.active_weaknesses()
         )
-        red_witnesses = tuple(
+        reference_attack_traces = tuple(
             red_trace.model_copy(update={"id": f"{red_trace.id}-{idx}"})
-            for idx in range(1, self.build_config.red_witness_count + 1)
+            for idx in range(1, self.build_config.red_reference_count + 1)
         )
-        blue_witnesses = tuple(
+        reference_defense_traces = tuple(
             blue_trace.model_copy(update={"id": f"{blue_trace.id}-{idx}"})
-            for idx in range(1, self.build_config.blue_witness_count + 1)
+            for idx in range(1, self.build_config.blue_reference_count + 1)
         )
-        return WitnessBundle(
-            red_witnesses=red_witnesses,
-            blue_witnesses=blue_witnesses,
+        return ReferenceBundle(
+            reference_attack_traces=reference_attack_traces,
+            reference_defense_traces=reference_defense_traces,
             smoke_tests=smoke_tests,
             shortcut_probes=shortcut_probes,
             determinism_probes=determinism_probes,
             necessity_probes=necessity_probes,
         )
 
-    def build_red_witness(self) -> WitnessTrace:
+    def build_red_reference(self) -> ReferenceTrace:
         engine = PredicateEngine(self.world)
         start = next(
             (service.id for service in self.world.services if engine.is_public_service(service)),
@@ -77,14 +77,14 @@ class ProbePlanner:
         weaknesses = engine.active_weaknesses()
         exploit = _primary_red_weakness(start, weaknesses)
         satisfied_predicates: set[str] = set()
-        steps: list[WitnessAction] = []
+        steps: list[ReferenceAction] = []
         current = start
         if exploit is not None:
             exploit_steps, current, satisfied_predicates = _weakness_red_steps(self.world, engine, start, exploit)
             steps.extend(exploit_steps)
         if not steps:
             steps.append(
-                WitnessAction(
+                ReferenceAction(
                     actor="red",
                     kind="api",
                     target=start,
@@ -98,7 +98,7 @@ class ProbePlanner:
             path = engine.shortest_path(current, target)
             for service_id in path[1:]:
                 steps.append(
-                    WitnessAction(
+                    ReferenceAction(
                         actor="red",
                         kind="api",
                         target=service_id,
@@ -107,7 +107,7 @@ class ProbePlanner:
                 )
             asset = engine.objective_target_asset(objective.predicate)
             steps.append(
-                WitnessAction(
+                ReferenceAction(
                     actor="red",
                     kind="api",
                     target=target,
@@ -125,7 +125,7 @@ class ProbePlanner:
             if weak is None:
                 continue
             events.extend(weak.expected_event_signatures)
-        return WitnessTrace(
+        return ReferenceTrace(
             id=f"red-{self.world.world_id}",
             role="red",
             objective_ids=tuple(objective.id for objective in self.world.red_objectives),
@@ -133,7 +133,7 @@ class ProbePlanner:
             steps=tuple(steps),
         )
 
-    def build_blue_witness(self, red_trace: WitnessTrace) -> WitnessTrace:
+    def build_blue_reference(self, red_trace: ReferenceTrace) -> ReferenceTrace:
         detect_step = next(
             (
                 step
@@ -144,24 +144,24 @@ class ProbePlanner:
         )
         detect_target = detect_step.target if detect_step is not None else "svc-web"
         contain_target = red_trace.steps[-1].target if red_trace.steps else "svc-siem"
-        return WitnessTrace(
+        return ReferenceTrace(
             id=f"blue-{self.world.world_id}",
             role="blue",
             objective_ids=tuple(objective.id for objective in self.world.blue_objectives),
             expected_events=("DetectionAlertRaised", "ContainmentApplied"),
             steps=(
-                WitnessAction(actor="blue", kind="shell", target="svc-siem", payload={"action": "observe_events"}),
-                WitnessAction(actor="blue", kind="submit_finding", target=detect_target, payload={"event": "InitialAccess"}),
-                WitnessAction(actor="blue", kind="control", target=contain_target, payload={"action": "contain"}),
+                ReferenceAction(actor="blue", kind="shell", target="svc-siem", payload={"action": "observe_events"}),
+                ReferenceAction(actor="blue", kind="submit_finding", target=detect_target, payload={"event": "InitialAccess"}),
+                ReferenceAction(actor="blue", kind="control", target=contain_target, payload={"action": "contain"}),
             ),
         )
 
 
-def build_witness_bundle(world: WorldIR, build_config: BuildConfig = DEFAULT_BUILD_CONFIG) -> WitnessBundle:
+def build_reference_bundle(world: WorldIR, build_config: BuildConfig = DEFAULT_BUILD_CONFIG) -> ReferenceBundle:
     return ProbePlanner(world=world, build_config=build_config).build()
 
 
-def runtime_action(actor: str, step: WitnessAction) -> Action:
+def runtime_action(actor: str, step: ReferenceAction) -> Action:
     payload = dict(step.payload)
     if step.target:
         payload.setdefault("target", step.target)
@@ -194,21 +194,21 @@ def _weakness_red_steps(
     engine: PredicateEngine,
     start: str,
     weakness,
-) -> tuple[list[WitnessAction], str, set[str]]:
-    steps: list[WitnessAction] = []
+) -> tuple[list[ReferenceAction], str, set[str]]:
+    steps: list[ReferenceAction] = []
     satisfied: set[str] = set()
     current = start
     if weakness.family == "code_web":
         payload = {"action": "initial_access", "weakness_id": weakness.id, "weakness": weakness.id}
         payload.update(code_web_payload(world, weakness))
-        steps.append(WitnessAction(actor="red", kind="api", target=weakness.target, payload=payload))
+        steps.append(ReferenceAction(actor="red", kind="api", target=weakness.target, payload=payload))
         return steps, weakness.target, satisfied
 
     if weakness.family == "workflow_abuse" and weakness.kind in {"phishing_credential_capture", "internal_request_impersonation"}:
         mailbox_path = _first_realization_path(weakness, kind="mailbox")
         mailbox = _mailbox_from_path(mailbox_path) if mailbox_path else "user@corp.local"
         steps.append(
-            WitnessAction(
+            ReferenceAction(
                 actor="red",
                 kind="mail",
                 target="svc-email",
@@ -224,7 +224,7 @@ def _weakness_red_steps(
         )
         if mailbox_path:
             steps.append(
-                WitnessAction(
+                ReferenceAction(
                     actor="red",
                     kind="shell",
                     target="svc-email",
@@ -241,7 +241,7 @@ def _weakness_red_steps(
     else:
         if current != weakness.target:
             steps.append(
-                WitnessAction(
+                ReferenceAction(
                     actor="red",
                     kind="api",
                     target=current,
@@ -251,7 +251,7 @@ def _weakness_red_steps(
             path = engine.shortest_path(current, weakness.target)
             for service_id in path[1:]:
                 steps.append(
-                    WitnessAction(
+                    ReferenceAction(
                         actor="red",
                         kind="api",
                         target=service_id,
@@ -274,7 +274,7 @@ def _weakness_red_steps(
             payload["asset"] = weakness.target_ref
             payload["objective"] = _target_ref_objective(world, weakness.target_ref)
             satisfied.add(_target_ref_objective(world, weakness.target_ref))
-        steps.append(WitnessAction(actor="red", kind="shell", target=weakness.target, payload=payload))
+        steps.append(ReferenceAction(actor="red", kind="shell", target=weakness.target, payload=payload))
         return steps, weakness.target, satisfied
 
     if weakness.family == "config_identity":
@@ -290,7 +290,7 @@ def _weakness_red_steps(
         if objective is not None:
             payload["objective"] = objective
             satisfied.add(objective)
-        steps.append(WitnessAction(actor="red", kind="shell", target=weakness.target, payload=payload))
+        steps.append(ReferenceAction(actor="red", kind="shell", target=weakness.target, payload=payload))
         return steps, weakness.target, satisfied
 
     if weakness.family == "workflow_abuse":
@@ -306,11 +306,11 @@ def _weakness_red_steps(
         if objective is not None:
             payload["objective"] = objective
             satisfied.add(objective)
-        steps.append(WitnessAction(actor="red", kind="shell", target=weakness.target, payload=payload))
+        steps.append(ReferenceAction(actor="red", kind="shell", target=weakness.target, payload=payload))
         return steps, weakness.target, satisfied
 
     steps.append(
-        WitnessAction(
+        ReferenceAction(
             actor="red",
             kind="api",
             target=current,

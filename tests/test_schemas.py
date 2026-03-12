@@ -6,11 +6,11 @@ from pathlib import Path
 from open_range import (
     EnterpriseSaaSManifest,
     ValidatorReport,
-    WitnessBundle,
+    ReferenceBundle,
     WorldIR,
     validate_manifest,
 )
-from open_range.admission import ProbeSpec, ValidatorCheckReport, ValidatorStageReport, WitnessAction, WitnessTrace
+from open_range.admission import ProbeSpec, ValidatorCheckReport, ValidatorStageReport, ReferenceAction, ReferenceTrace
 from open_range.world_ir import (
     GreenWorkloadSpec,
     HostSpec,
@@ -189,7 +189,7 @@ def test_world_ir_serializes_minimal_core_objects():
     assert payload["phishing_surface_enabled"] is False
 
 
-def test_validator_report_and_witness_bundle_round_trip():
+def test_validator_report_and_reference_bundle_round_trip():
     report = ValidatorReport(
         admitted=True,
         world_id="world-001",
@@ -202,15 +202,15 @@ def test_validator_report_and_witness_bundle_round_trip():
             ),
         ),
     )
-    bundle = WitnessBundle(
-        red_witnesses=(
-            WitnessTrace(
+    bundle = ReferenceBundle(
+        reference_attack_traces=(
+            ReferenceTrace(
                 id="red-1",
                 role="red",
-                steps=(WitnessAction(actor="red", kind="shell", target="web-1"),),
+                steps=(ReferenceAction(actor="red", kind="shell", target="web-1"),),
             ),
         ),
-        blue_witnesses=(),
+        reference_defense_traces=(),
         smoke_tests=(ProbeSpec(id="smoke-1", kind="smoke", description="web boot"),),
         shortcut_probes=(),
         determinism_probes=(),
@@ -218,15 +218,15 @@ def test_validator_report_and_witness_bundle_round_trip():
     )
 
     assert ValidatorReport.model_validate(report.model_dump()) == report
-    assert WitnessBundle.model_validate(bundle.model_dump()) == bundle
+    assert ReferenceBundle.model_validate(bundle.model_dump()) == bundle
 
 
 def test_generated_schema_files_exist_and_match_titles():
     root = Path(__file__).resolve().parent.parent
     manifest_schema = json.loads((root / "schemas" / "manifest.schema.json").read_text(encoding="utf-8"))
     report_schema = json.loads((root / "schemas" / "validator_report.schema.json").read_text(encoding="utf-8"))
-    bundle_schema = json.loads((root / "schemas" / "witness_bundle.schema.json").read_text(encoding="utf-8"))
+    bundle_schema = json.loads((root / "schemas" / "reference_bundle.schema.json").read_text(encoding="utf-8"))
 
     assert manifest_schema["title"] == "EnterpriseSaaSManifest"
     assert report_schema["title"] == "ValidatorReport"
-    assert bundle_schema["title"] == "WitnessBundle"
+    assert bundle_schema["title"] == "ReferenceBundle"

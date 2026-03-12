@@ -42,7 +42,7 @@
       "title": "ProbeSpec",
       "type": "object"
     },
-    "WitnessAction": {
+    "ReferenceAction": {
       "additionalProperties": false,
       "properties": {
         "actor": {
@@ -73,10 +73,10 @@
         "actor",
         "kind"
       ],
-      "title": "WitnessAction",
+      "title": "ReferenceAction",
       "type": "object"
     },
-    "WitnessTrace": {
+    "ReferenceTrace": {
       "additionalProperties": false,
       "properties": {
         "expected_events": {
@@ -108,7 +108,7 @@
         },
         "steps": {
           "items": {
-            "$ref": "#/$defs/WitnessAction"
+            "$ref": "#/$defs/ReferenceAction"
           },
           "title": "Steps",
           "type": "array"
@@ -118,19 +118,12 @@
         "id",
         "role"
       ],
-      "title": "WitnessTrace",
+      "title": "ReferenceTrace",
       "type": "object"
     }
   },
   "additionalProperties": false,
   "properties": {
-    "blue_witnesses": {
-      "items": {
-        "$ref": "#/$defs/WitnessTrace"
-      },
-      "title": "Blue Witnesses",
-      "type": "array"
-    },
     "determinism_probes": {
       "items": {
         "$ref": "#/$defs/ProbeSpec"
@@ -145,11 +138,18 @@
       "title": "Necessity Probes",
       "type": "array"
     },
-    "red_witnesses": {
+    "reference_attack_traces": {
       "items": {
-        "$ref": "#/$defs/WitnessTrace"
+        "$ref": "#/$defs/ReferenceTrace"
       },
-      "title": "Red Witnesses",
+      "title": "Reference Attack Traces",
+      "type": "array"
+    },
+    "reference_defense_traces": {
+      "items": {
+        "$ref": "#/$defs/ReferenceTrace"
+      },
+      "title": "Reference Defense Traces",
       "type": "array"
     },
     "shortcut_probes": {
@@ -167,6 +167,6 @@
       "type": "array"
     }
   },
-  "title": "WitnessBundle",
+  "title": "ReferenceBundle",
   "type": "object"
 }

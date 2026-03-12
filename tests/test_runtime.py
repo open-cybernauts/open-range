@@ -12,7 +12,7 @@ from open_range.compiler import EnterpriseSaaSManifestCompiler
 from open_range.episode_config import EpisodeConfig
 from open_range.execution import PodActionBackend
 from open_range.render import EnterpriseSaaSKindRenderer
-from open_range.runtime import WitnessDrivenRuntime
+from open_range.runtime import ReferenceDrivenRuntime
 from open_range.runtime_types import Action
 from open_range.store import FileSnapshotStore
 from open_range.synth import EnterpriseSaaSWorldSynthesizer
@@ -94,8 +94,8 @@ def _snapshot(tmp_path: Path):
     world = CatalogWeaknessSeeder().apply(EnterpriseSaaSManifestCompiler().compile(_manifest_payload()))
     synth = EnterpriseSaaSWorldSynthesizer().synthesize(world, tmp_path / "synth")
     artifacts = EnterpriseSaaSKindRenderer().render(world, synth, tmp_path / "rendered")
-    witness_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
-    return FileSnapshotStore(tmp_path / "snapshots").create(world, artifacts, witness_bundle, report, synth=synth)
+    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
+    return FileSnapshotStore(tmp_path / "snapshots").create(world, artifacts, reference_bundle, report, synth=synth)
 
 
 def _code_web_response(snapshot, cmd: str, patched_services: set[str]) -> ExecResult | None:
@@ -111,7 +111,7 @@ def _code_web_response(snapshot, cmd: str, patched_services: set[str]) -> ExecRe
 
 def test_joint_pool_next_decision_returns_actor_specific_observations(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
-    runtime = WitnessDrivenRuntime()
+    runtime = ReferenceDrivenRuntime()
     state = runtime.reset(
         snapshot,
         EpisodeConfig(mode="joint_pool", green_enabled=False),
@@ -121,7 +121,7 @@ def test_joint_pool_next_decision_returns_actor_specific_observations(tmp_path: 
     assert state.controls_blue is True
     assert state.next_actor == "red"
 
-    first_red = snapshot.witness_bundle.red_witnesses[0].steps[0]
+    first_red = snapshot.reference_bundle.reference_attack_traces[0].steps[0]
     red_decision = runtime.next_decision()
     assert red_decision.actor == "red"
     assert red_decision.obs.actor_id == "red"
@@ -144,13 +144,13 @@ def test_joint_pool_next_decision_returns_actor_specific_observations(tmp_path: 
 
 def test_runtime_keeps_green_internal_and_never_exposes_green_decisions(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
-    runtime = WitnessDrivenRuntime()
+    runtime = ReferenceDrivenRuntime()
     runtime.reset(
         snapshot,
         EpisodeConfig(mode="joint_pool", green_enabled=True),
     )
 
-    red_step = snapshot.witness_bundle.red_witnesses[0].steps[0]
+    red_step = snapshot.reference_bundle.reference_attack_traces[0].steps[0]
     decision = runtime.next_decision()
     assert decision.actor == "red"
     runtime.act(
@@ -164,7 +164,7 @@ def test_runtime_keeps_green_internal_and_never_exposes_green_decisions(tmp_path
 
 def test_one_day_prompt_mode_exposes_high_level_risky_surfaces(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
-    runtime = WitnessDrivenRuntime()
+    runtime = ReferenceDrivenRuntime()
     runtime.reset(
         snapshot,
         EpisodeConfig(mode="red_only", prompt_mode="one_day", green_enabled=False),
@@ -181,7 +181,7 @@ def test_one_day_prompt_mode_exposes_high_level_risky_surfaces(tmp_path: Path):
 
 def test_blue_only_from_prefix_starts_blue_after_compromise_prefix(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
-    runtime = WitnessDrivenRuntime()
+    runtime = ReferenceDrivenRuntime()
     state = runtime.reset(
         snapshot,
         EpisodeConfig(
@@ -201,7 +201,7 @@ def test_blue_only_from_prefix_starts_blue_after_compromise_prefix(tmp_path: Pat
 def test_blue_only_from_prefix_delivery_and_click_do_not_collapse_without_matching_witness_steps(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
 
-    delivery_runtime = WitnessDrivenRuntime()
+    delivery_runtime = ReferenceDrivenRuntime()
     delivery_runtime.reset(
         snapshot,
         EpisodeConfig(
@@ -214,7 +214,7 @@ def test_blue_only_from_prefix_delivery_and_click_do_not_collapse_without_matchi
     assert delivery_decision.actor == "blue"
     assert not any(event.event_type == "InitialAccess" for event in delivery_decision.obs.visible_events)
 
-    click_runtime = WitnessDrivenRuntime()
+    click_runtime = ReferenceDrivenRuntime()
     click_runtime.reset(
         snapshot,
         EpisodeConfig(
@@ -230,13 +230,13 @@ def test_blue_only_from_prefix_delivery_and_click_do_not_collapse_without_matchi
 
 def test_blue_only_live_can_win_by_detect_and_contain(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
-    runtime = WitnessDrivenRuntime()
+    runtime = ReferenceDrivenRuntime()
     runtime.reset(
         snapshot,
         EpisodeConfig(mode="blue_only_live", green_enabled=False),
     )
 
-    blue_steps = snapshot.witness_bundle.blue_witnesses[0].steps
+    blue_steps = snapshot.reference_bundle.reference_defense_traces[0].steps
     decision = runtime.next_decision()
     assert decision.actor == "blue"
     detect = runtime.act(
@@ -268,7 +268,7 @@ def test_blue_only_live_can_win_by_detect_and_contain(tmp_path: Path):
 
 def test_runtime_hard_done_rejects_more_decisions_and_actions(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
-    runtime = WitnessDrivenRuntime()
+    runtime = ReferenceDrivenRuntime()
     runtime.reset(
         snapshot,
         EpisodeConfig(mode="joint_pool", green_enabled=False, episode_horizon_minutes=0.1),
@@ -287,7 +287,7 @@ def test_runtime_matching_rejects_extra_api_path_when_witness_has_no_path() -> N
     expected = SimpleNamespace(kind="api", target="svc-web", payload={"action": "traverse"})
     action = Action(actor_id="red", role="red", kind="api", payload={"target": "svc-web", "path": "/"})
 
-    assert WitnessDrivenRuntime._matches_step(action, expected, "ok") is False
+    assert ReferenceDrivenRuntime._matches_step(action, expected, "ok") is False
 
 
 def test_runtime_live_containment_blocks_future_red_step(tmp_path: Path):
@@ -331,14 +331,14 @@ def test_runtime_live_containment_blocks_future_red_step(tmp_path: Path):
 
     backend = PodActionBackend()
     backend.bind(snapshot, SimpleNamespace(release_name="or-test", pods=FakePods(pod_ids)))
-    runtime = WitnessDrivenRuntime(action_backend=backend)
+    runtime = ReferenceDrivenRuntime(action_backend=backend)
     runtime.reset(
         snapshot,
         EpisodeConfig(mode="joint_pool", green_enabled=False),
     )
 
-    first_step = snapshot.witness_bundle.red_witnesses[0].steps[0]
-    second_step = snapshot.witness_bundle.red_witnesses[0].steps[1]
+    first_step = snapshot.reference_bundle.reference_attack_traces[0].steps[0]
+    second_step = snapshot.reference_bundle.reference_attack_traces[0].steps[1]
 
     red_decision = runtime.next_decision()
     assert red_decision.actor == "red"
@@ -401,14 +401,14 @@ def test_runtime_live_patch_blocks_future_red_step_and_emits_patch_event(tmp_pat
 
     backend = PodActionBackend()
     backend.bind(snapshot, SimpleNamespace(release_name="or-test", pods=FakePods(pod_ids)))
-    runtime = WitnessDrivenRuntime(action_backend=backend)
+    runtime = ReferenceDrivenRuntime(action_backend=backend)
     runtime.reset(
         snapshot,
         EpisodeConfig(mode="joint_pool", green_enabled=False),
     )
 
-    first_step = snapshot.witness_bundle.red_witnesses[0].steps[0]
-    second_step = snapshot.witness_bundle.red_witnesses[0].steps[1]
+    first_step = snapshot.reference_bundle.reference_attack_traces[0].steps[0]
+    second_step = snapshot.reference_bundle.reference_attack_traces[0].steps[1]
 
     assert runtime.next_decision().actor == "red"
     runtime.act(
@@ -486,13 +486,13 @@ def test_runtime_live_patch_can_disable_exact_web_handler(tmp_path: Path):
 
     backend = PodActionBackend()
     backend.bind(snapshot, SimpleNamespace(release_name="or-test", pods=FakePods(pod_ids)))
-    runtime = WitnessDrivenRuntime(action_backend=backend)
+    runtime = ReferenceDrivenRuntime(action_backend=backend)
     runtime.reset(
         snapshot,
         EpisodeConfig(mode="joint_pool", green_enabled=False),
     )
 
-    first_step = snapshot.witness_bundle.red_witnesses[0].steps[0]
+    first_step = snapshot.reference_bundle.reference_attack_traces[0].steps[0]
 
     assert runtime.next_decision().actor == "red"
     runtime.act(
@@ -523,14 +523,14 @@ def test_runtime_live_patch_can_disable_exact_web_handler(tmp_path: Path):
 
 def test_runtime_accepts_mitigate_as_patch_alias(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
-    runtime = WitnessDrivenRuntime()
+    runtime = ReferenceDrivenRuntime()
     runtime.reset(
         snapshot,
         EpisodeConfig(mode="joint_pool", green_enabled=False),
     )
 
-    first_step = snapshot.witness_bundle.red_witnesses[0].steps[0]
-    second_step = snapshot.witness_bundle.red_witnesses[0].steps[1]
+    first_step = snapshot.reference_bundle.reference_attack_traces[0].steps[0]
+    second_step = snapshot.reference_bundle.reference_attack_traces[0].steps[1]
 
     assert runtime.next_decision().actor == "red"
     runtime.act(
@@ -550,23 +550,23 @@ def test_runtime_accepts_mitigate_as_patch_alias(tmp_path: Path):
 
 def test_internal_blue_controller_modes_are_not_aliases(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
-    first_step = snapshot.witness_bundle.red_witnesses[0].steps[0]
+    first_step = snapshot.reference_bundle.reference_attack_traces[0].steps[0]
 
-    witness_runtime = WitnessDrivenRuntime()
-    witness_runtime.reset(
+    reference_runtime = ReferenceDrivenRuntime()
+    reference_runtime.reset(
         snapshot,
         EpisodeConfig(mode="red_only", opponent_blue="witness", green_enabled=False),
     )
-    assert witness_runtime.next_decision().actor == "red"
-    witness_runtime.act(
+    assert reference_runtime.next_decision().actor == "red"
+    reference_runtime.act(
         "red",
         Action(actor_id="red", role="red", kind=first_step.kind, payload={"target": first_step.target, **first_step.payload}),
     )
-    assert witness_runtime.next_decision().actor == "red"
-    witness_blue_events = [event.event_type for event in witness_runtime.export_events() if event.actor == "blue"]
+    assert reference_runtime.next_decision().actor == "red"
+    witness_blue_events = [event.event_type for event in reference_runtime.export_events() if event.actor == "blue"]
     assert "DetectionAlertRaised" not in witness_blue_events
 
-    scripted_runtime = WitnessDrivenRuntime()
+    scripted_runtime = ReferenceDrivenRuntime()
     scripted_runtime.reset(
         snapshot,
         EpisodeConfig(mode="red_only", opponent_blue="scripted", green_enabled=False),
@@ -583,7 +583,7 @@ def test_internal_blue_controller_modes_are_not_aliases(tmp_path: Path):
 
 def test_next_decision_raises_done_after_internal_terminal_progress(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
-    runtime = WitnessDrivenRuntime()
+    runtime = ReferenceDrivenRuntime()
     runtime.reset(
         snapshot,
         EpisodeConfig(mode="red_only", opponent_blue="scripted", green_enabled=False),
@@ -603,9 +603,9 @@ def test_next_decision_raises_done_after_internal_terminal_progress(tmp_path: Pa
 
 def test_green_branch_backends_are_not_aliases(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
-    first_step = snapshot.witness_bundle.red_witnesses[0].steps[0]
+    first_step = snapshot.reference_bundle.reference_attack_traces[0].steps[0]
 
-    scripted_runtime = WitnessDrivenRuntime()
+    scripted_runtime = ReferenceDrivenRuntime()
     scripted_runtime.reset(
         snapshot,
         EpisodeConfig(
@@ -625,7 +625,7 @@ def test_green_branch_backends_are_not_aliases(tmp_path: Path):
     assert scripted_runtime.next_decision().actor == "red"
     scripted_green_events = [event for event in scripted_runtime.export_events() if event.actor == "green"]
 
-    orchestrated_runtime = WitnessDrivenRuntime()
+    orchestrated_runtime = ReferenceDrivenRuntime()
     orchestrated_runtime.reset(
         snapshot,
         EpisodeConfig(

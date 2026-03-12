@@ -8,7 +8,7 @@ from pathlib import Path
 from random import Random
 from typing import Literal, Protocol
 
-from open_range.admission import ValidatorReport, WitnessBundle
+from open_range.admission import ValidatorReport, ReferenceBundle
 from open_range.snapshot import KindArtifacts, Snapshot, world_hash
 from open_range.synth import SynthArtifacts
 from open_range.world_ir import WorldIR
@@ -22,7 +22,7 @@ class SnapshotStore(Protocol):
         self,
         world: WorldIR,
         artifacts: KindArtifacts,
-        wb: WitnessBundle,
+        wb: ReferenceBundle,
         vr: ValidatorReport,
         synth: SynthArtifacts | None = None,
         *,
@@ -50,7 +50,7 @@ class FileSnapshotStore:
         self,
         world: WorldIR,
         artifacts: KindArtifacts,
-        wb: WitnessBundle,
+        wb: ReferenceBundle,
         vr: ValidatorReport,
         synth: SynthArtifacts | None = None,
         *,
@@ -79,9 +79,9 @@ class FileSnapshotStore:
         snapshot_id = f"{world.world_id}-{world_hash(world)[:8]}"
         snap_dir = self.store_dir / snapshot_id
         snap_dir.mkdir(parents=True, exist_ok=True)
-        witness_bundle_path = snap_dir / "witness_bundle.json"
+        reference_bundle_path = snap_dir / "reference_bundle.json"
         validator_report_path = snap_dir / "validator_report.json"
-        witness_bundle_path.write_text(wb.model_dump_json(indent=2), encoding="utf-8")
+        reference_bundle_path.write_text(wb.model_dump_json(indent=2), encoding="utf-8")
         validator_report_path.write_text(vr.model_dump_json(indent=2), encoding="utf-8")
         snapshot = Snapshot(
             snapshot_id=snapshot_id,
@@ -90,7 +90,7 @@ class FileSnapshotStore:
             artifacts_dir=artifacts.render_dir,
             image_digests=artifacts.pinned_image_digests,
             state_seed_dir=state_seed_dir,
-            witness_bundle_path=str(witness_bundle_path),
+            reference_bundle_path=str(reference_bundle_path),
             validator_report_path=str(validator_report_path),
             world=world,
             artifacts=artifacts,
@@ -99,7 +99,7 @@ class FileSnapshotStore:
             file_assets=file_assets,
             identity_seed=identity_seed,
             validator_report=vr,
-            witness_bundle=wb,
+            reference_bundle=wb,
             world_hash=world_hash(world),
             parent_snapshot_id=None,
             parent_world_id=world.lineage.parent_world_id,

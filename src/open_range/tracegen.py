@@ -12,7 +12,7 @@ from open_range.curriculum import FrontierMutationPolicy, PopulationStats
 from open_range.episode_config import EpisodeConfig
 from open_range.pipeline import BuildPipeline
 from open_range.probe_planner import runtime_action
-from open_range.runtime import WitnessDrivenRuntime
+from open_range.runtime import ReferenceDrivenRuntime
 from open_range.runtime_types import Action, Observation
 from open_range.snapshot import Snapshot
 from open_range.store import FileSnapshotStore
@@ -118,7 +118,7 @@ class TraceDatasetGenerator:
                             snapshot,
                             EpisodeConfig(mode="joint_pool", scheduler_mode="strict_turns"),
                             trace_source="sim",
-                            teacher_source="witness_sim",
+                            teacher_source="reference_sim",
                             split=dataset_split,
                             lineage_root=lineage_root,
                         )
@@ -129,7 +129,7 @@ class TraceDatasetGenerator:
                             snapshot,
                             _episode_config_for(mode),
                             trace_source="runtime",
-                            teacher_source="witness_runtime",
+                            teacher_source="reference_runtime",
                             split=dataset_split,
                             lineage_root=lineage_root,
                         )
@@ -140,7 +140,7 @@ class TraceDatasetGenerator:
                             snapshot,
                             EpisodeConfig(mode="joint_pool", scheduler_mode="strict_turns"),
                             trace_source="runtime",
-                            teacher_source="witness_runtime",
+                            teacher_source="reference_runtime",
                             split=dataset_split,
                             lineage_root=lineage_root,
                         )
@@ -179,11 +179,11 @@ class TraceDatasetGenerator:
         split: str,
         lineage_root: str,
     ) -> list[TraceDecisionRow]:
-        runtime = WitnessDrivenRuntime()
+        runtime = ReferenceDrivenRuntime()
         runtime.reset(snapshot, episode_config)
         teacher_steps = {
-            "red": list(snapshot.witness_bundle.red_witnesses[0].steps),
-            "blue": list(snapshot.witness_bundle.blue_witnesses[0].steps),
+            "red": list(snapshot.reference_bundle.reference_attack_traces[0].steps),
+            "blue": list(snapshot.reference_bundle.reference_defense_traces[0].steps),
         }
         teacher_progress = {"red": 0, "blue": 0}
         rows: list[TraceDecisionRow] = []

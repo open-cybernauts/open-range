@@ -7,7 +7,7 @@ from open_range.compiler import EnterpriseSaaSManifestCompiler
 from open_range.driver import ScriptedRuntimeAgent, TandemEpisodeDriver
 from open_range.episode_config import EpisodeConfig
 from open_range.render import EnterpriseSaaSKindRenderer
-from open_range.runtime import WitnessDrivenRuntime
+from open_range.runtime import ReferenceDrivenRuntime
 from open_range.runtime_types import Action
 from open_range.store import FileSnapshotStore
 from open_range.synth import EnterpriseSaaSWorldSynthesizer
@@ -84,16 +84,16 @@ def _snapshot(tmp_path: Path):
     world = CatalogWeaknessSeeder().apply(EnterpriseSaaSManifestCompiler().compile(_manifest_payload()))
     synth = EnterpriseSaaSWorldSynthesizer().synthesize(world, tmp_path / "synth")
     artifacts = EnterpriseSaaSKindRenderer().render(world, synth, tmp_path / "rendered")
-    witness_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
-    return FileSnapshotStore(tmp_path / "snapshots").create(world, artifacts, witness_bundle, report, synth=synth)
+    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
+    return FileSnapshotStore(tmp_path / "snapshots").create(world, artifacts, reference_bundle, report, synth=synth)
 
 
 def test_tandem_driver_runs_joint_pool_episode(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
-    runtime = WitnessDrivenRuntime()
+    runtime = ReferenceDrivenRuntime()
     driver = TandemEpisodeDriver(runtime)
 
-    red_trace = snapshot.witness_bundle.red_witnesses[0].steps
+    red_trace = snapshot.reference_bundle.reference_attack_traces[0].steps
     blue_target = red_trace[1].target
     red_agent = ScriptedRuntimeAgent(
         [
@@ -128,10 +128,10 @@ def test_tandem_driver_runs_joint_pool_episode(tmp_path: Path):
 
 def test_driver_can_run_blue_only_prefix_episode(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
-    runtime = WitnessDrivenRuntime()
+    runtime = ReferenceDrivenRuntime()
     driver = TandemEpisodeDriver(runtime)
 
-    red_trace = snapshot.witness_bundle.red_witnesses[0].steps
+    red_trace = snapshot.reference_bundle.reference_attack_traces[0].steps
     red_agent = ScriptedRuntimeAgent([Action(actor_id="red", role="red", kind="sleep", payload={})])
     blue_agent = ScriptedRuntimeAgent(
         [
@@ -140,7 +140,7 @@ def test_driver_can_run_blue_only_prefix_episode(tmp_path: Path):
                 actor_id="blue",
                 role="blue",
                 kind="control",
-                payload={"target": snapshot.witness_bundle.blue_witnesses[0].steps[2].target, "action": "contain"},
+                payload={"target": snapshot.reference_bundle.reference_defense_traces[0].steps[2].target, "action": "contain"},
             ),
         ]
     )

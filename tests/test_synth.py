@@ -139,9 +139,9 @@ def test_synthesizer_realizes_exact_code_web_templates_and_witness_routes(tmp_pa
         web_payloads = synth.service_payloads["svc-web"]
         assert any(file.mount_path == route and file.content.startswith("<?php") for file in web_payloads)
         artifacts = EnterpriseSaaSKindRenderer().render(world, synth, tmp_path / f"{kind}-render")
-        witness_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
+        reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
         assert report.admitted is True
-        first_step = witness_bundle.red_witnesses[0].steps[0]
+        first_step = reference_bundle.reference_attack_traces[0].steps[0]
         assert first_step.payload["path"] == route.removeprefix("/var/www/html")
         assert first_step.payload["query"]
         assert first_step.payload["expect_contains"].startswith("OPENRANGE-FOOTHOLD:")
