@@ -34,10 +34,10 @@ V1 should not claim:
 
 Already in place:
 
-- exact `code_web` flaw library with concrete handlers and witnessable routes
+- exact `code_web` flaw library with concrete handlers and referenceable routes
 - exact weakness instances with `kind`, `benchmark_tags`, and instantiation metadata
 - exact non-code weakness catalog coverage for the required `config_identity`, `secret_exposure`, `workflow_abuse`, and `telemetry_blindspot` kinds, with distinct config/file/workflow/mailbox realizations
-- private witness bundle and validator-gated admission
+- private reference bundle and validator-gated admission
 - blue terminal win condition
 - runtime-owned green activity
 - async-capable runtime with separate red/blue session state

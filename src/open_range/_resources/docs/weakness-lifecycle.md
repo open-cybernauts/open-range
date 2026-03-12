@@ -76,7 +76,7 @@ Weaknesses are not metadata-only.
 
 The synthesizer MUST realize every weakness into one or more concrete files or configs inside the rendered business:
 
-- `code_web` -> exact web flaw template tied to a required `code_flaw_kind`, including concrete PHP handlers and seeded support files that the witness can reach through real HTTP routes
+- `code_web` -> exact web flaw template tied to a required `code_flaw_kind`, including concrete PHP handlers and seeded support files that the reference trace can reach through real HTTP routes
 - `workflow_abuse` -> exact workflow policy/config, plus mailbox artifacts for email-borne phishing and impersonation variants
 - `config_identity` -> exact identity/auth policy config with kind-specific policy deltas
 - `telemetry_blindspot` -> exact telemetry routing/config with kind-specific log suppression or delay behavior
@@ -88,15 +88,15 @@ The renderer MUST carry the realized weaknesses into the deployment artifacts so
 
 Admission has two levels:
 
-- deterministic admission validates graph consistency, objective grounding, witness construction, necessity metadata, shortcuts, and determinism
-- optional live admission validates boot, witness replay, SIEM ingest, necessity via remediation, and shortcut probes
+- deterministic admission validates graph consistency, objective grounding, reference construction, necessity metadata, shortcuts, and determinism
+- optional live admission validates boot, reference replay, SIEM ingest, necessity via remediation, and shortcut probes
 
 Admission invariants:
 
-- at least one seeded weakness MUST overlap the red witness path
-- at least one witness-relevant weakness MUST have executable remediation for live necessity
-- applying the remediation for a witness-relevant weakness MUST break the witness path in live mode
-- live checks MUST run from a clean marker state between witness replays
+- at least one seeded weakness MUST overlap the red reference path
+- at least one reference-relevant weakness MUST have executable remediation for live necessity
+- applying the remediation for a reference-relevant weakness MUST break the reference path in live mode
+- live checks MUST run from a clean marker state between reference replays
 
 ## Runtime Semantics
 

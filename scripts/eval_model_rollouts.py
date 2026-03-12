@@ -3,7 +3,7 @@
 
 This is intentionally scoped:
 - red only
-- witness-conditioned candidate action set
+- reference-conditioned candidate action set
 - model scores candidate continuations instead of free-form action generation
 
 It is a bridge from tiny SFT adapters to runtime evaluation, not the final
@@ -98,7 +98,7 @@ def build_prompt(snapshot: Snapshot, observation: Observation, candidates: tuple
 
 
 def red_candidates(runtime: ReferenceDrivenRuntime, snapshot: Snapshot) -> tuple[TraceCandidate, ...]:
-    expected = runtime._next_red_step()  # bounded eval probe: candidate set includes the exact next witness action
+    expected = runtime._next_red_step()  # bounded eval probe: candidate set includes the exact next reference action
     if expected is None:
         sleep = Action(actor_id="red", role="red", kind="sleep", payload={})
         return (

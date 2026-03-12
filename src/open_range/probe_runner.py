@@ -15,19 +15,22 @@ def run_red_reference(
     backend: PodActionBackend | None = None,
     *,
     episode_seed: int,
+    trace_index: int = 0,
 ):
     del episode_seed
+    trace = snapshot.reference_bundle.reference_attack_traces[trace_index]
     runtime = ReferenceDrivenRuntime(action_backend=backend)
     runtime.reset(
         snapshot,
         EpisodeConfig(
             mode="red_only",
             opponent_blue="none",
-            episode_horizon_minutes=max(5, len(snapshot.reference_bundle.reference_attack_traces[0].steps) + 2),
+            episode_horizon_minutes=max(5, len(trace.steps) + 2),
         ),
+        reference_attack_index=trace_index,
     )
     outputs: list[str] = []
-    red_steps = list(snapshot.reference_bundle.reference_attack_traces[0].steps)
+    red_steps = list(trace.steps)
     step_idx = 0
     while not runtime.state().done and step_idx < len(red_steps):
         try:
@@ -47,17 +50,27 @@ def run_red_reference(
     health = tuple(sorted(runtime.state().service_health.items()))
     return score, events, health, outputs
 
-def run_blue_reference(snapshot: Snapshot, backend: PodActionBackend | None = None):
+def run_blue_reference(
+    snapshot: Snapshot,
+    backend: PodActionBackend | None = None,
+    *,
+    trace_index: int = 0,
+):
+    trace = snapshot.reference_bundle.reference_defense_traces[trace_index]
+    attack_index = trace_index % max(1, len(snapshot.reference_bundle.reference_attack_traces))
     runtime = ReferenceDrivenRuntime(action_backend=backend)
     runtime.reset(
         snapshot,
         EpisodeConfig(
             mode="blue_only_live",
-            episode_horizon_minutes=max(6, len(snapshot.reference_bundle.reference_defense_traces[0].steps) + 3),
+            opponent_red="reference",
+            episode_horizon_minutes=max(6, len(trace.steps) + 3),
         ),
+        reference_attack_index=attack_index,
+        reference_defense_index=trace_index,
     )
     outputs: list[str] = []
-    blue_steps = list(snapshot.reference_bundle.reference_defense_traces[0].steps)
+    blue_steps = list(trace.steps)
     step_idx = 0
     while not runtime.state().done:
         try:

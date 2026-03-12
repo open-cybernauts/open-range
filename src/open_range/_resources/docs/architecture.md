@@ -10,7 +10,7 @@ strict manifest
   -> deterministic synth + weakness seeding
   -> Kind renderer
   -> predicate engine + probe planning
-  -> deterministic admission + private witnesses
+  -> deterministic admission + private references
   -> immutable snapshot store
   -> explicit green/red/blue runtime
 ```
@@ -30,13 +30,13 @@ strict manifest
 - the env advances internal green activity until the next external decision point
 - `next_decision()` exposes only externally controlled red/blue actors
 - red and blue have separate observations and separate session state
-- admission uses private witness traces rather than a public golden path
+- admission uses private reference traces rather than a public golden path
 - admission is internally split into shared predicate logic, probe planning, probe execution, counterfactual remediation checks, and report scoring
 
 ## Bootstrap traces
 
 - optional bootstrap or warm-start traces come from the sim plane, not the core runtime contract
-- `ReferenceSimPlane` replays private witnesses through the public decision loop to generate cheap deterministic traces
+- `ReferenceSimPlane` replays private references through the public decision loop to generate cheap deterministic traces
 - this keeps training warmup logic separate from the environment surface while preserving the old synthetic-bootstrap idea as a tooling layer
 
 ## Training data
@@ -53,7 +53,7 @@ strict manifest
 - red objectives compile with derived offensive objective tags where possible
 - admission builds deterministic service-native grader specs for grounded red objectives
 - prompt exposure is controlled by `EpisodeConfig.prompt_mode` with `zero_day` and `one_day`
-- private witnesses remain the hidden oracle; prompt modes never expose exploit steps
+- private references remain the hidden oracle; prompt modes never expose exploit steps
 
 ## Non-goals
 

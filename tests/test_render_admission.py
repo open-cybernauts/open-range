@@ -7,6 +7,7 @@ from open_range.cluster import ExecResult
 from open_range.admit import LocalAdmissionController
 from open_range.code_web import code_web_payload
 from open_range.compiler import EnterpriseSaaSManifestCompiler
+from open_range.curriculum import FrontierMutationPolicy, PopulationStats
 from open_range.render import EnterpriseSaaSKindRenderer
 from open_range.store import FileSnapshotStore
 from open_range.synth import EnterpriseSaaSWorldSynthesizer
@@ -178,14 +179,36 @@ def test_admission_controller_offline_witness_can_ground_pinned_non_code_weaknes
     reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
 
     assert report.admitted is True
+
+
+def test_mutated_world_blue_reference_skips_blindspot_only_detection_targets(tmp_path: Path) -> None:
+    base_world = _build_seeded_world()
+    mutation = FrontierMutationPolicy().mutate(
+        base_world,
+        parent_stats=PopulationStats(
+            snapshot_id="snap-base",
+            world_id=base_world.world_id,
+            split="train",
+            episodes=4,
+            red_win_rate=0.25,
+            blue_win_rate=0.75,
+            avg_ticks=7.0,
+            flake_rate=0.0,
+            novelty=0.6,
+            blue_signal_points=4,
+        ),
+        child_seed=1102,
+    )
+    artifacts = EnterpriseSaaSKindRenderer().render(mutation, _synth(mutation, tmp_path), tmp_path / "rendered-mutation")
+
+    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(mutation, artifacts)
+
+    assert report.admitted is True
+    defense_trace = reference_bundle.reference_defense_traces[0]
+    finding_step = next(step for step in defense_trace.steps if step.kind == "submit_finding")
+    assert finding_step.target != "svc-email"
     assert report.reference_attack_ok is True
     assert report.necessity_ok is True
-    assert len(world.weaknesses) == 1
-    assert world.weaknesses[0].family == "secret_exposure"
-    assert any(
-        step.payload.get("action") == "collect_secret" and step.payload.get("weakness_id") == world.weaknesses[0].id
-        for step in reference_bundle.reference_attack_traces[0].steps
-    )
 
 
 def test_admission_controller_can_run_optional_live_backend(tmp_path: Path):

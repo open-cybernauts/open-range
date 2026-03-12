@@ -130,8 +130,8 @@ def evaluate_rollouts(
 
     mode_plan = (
         EpisodeConfig(mode="joint_pool", scheduler_mode="strict_turns"),
-        EpisodeConfig(mode="red_only", scheduler_mode="strict_turns", opponent_blue="witness"),
-        EpisodeConfig(mode="blue_only_live", scheduler_mode="strict_turns", opponent_red="witness"),
+        EpisodeConfig(mode="red_only", scheduler_mode="strict_turns", opponent_blue="reference"),
+        EpisodeConfig(mode="blue_only_live", scheduler_mode="strict_turns", opponent_red="reference"),
         EpisodeConfig(
             mode="blue_only_from_prefix",
             scheduler_mode="strict_turns",
@@ -150,7 +150,12 @@ def evaluate_rollouts(
         snapshots.append(base)
 
         current = base
-        for idx in range(1, mutations + 1):
+        accepted = 0
+        attempts = 0
+        max_attempts = max(mutations * 5, 5)
+        while accepted < mutations and attempts < max_attempts:
+            attempts += 1
+            idx = accepted + 1
             parent_stats = PopulationStats(
                 snapshot_id=current.snapshot_id,
                 world_id=current.world.world_id,
@@ -160,12 +165,24 @@ def evaluate_rollouts(
                 blue_win_rate=0.75 if idx % 2 else 0.35,
                 avg_ticks=6.0 + idx,
                 flake_rate=0.0,
-                novelty=min(0.5 + idx * 0.1, 1.0),
+                novelty=min(0.5 + attempts * 0.1, 1.0),
                 blue_signal_points=current.validator_report.blue_signal_points,
             )
-            child_world = mutation_policy.mutate(current.world, parent_stats=parent_stats)
-            current = pipeline.admit_child(child_world, root / f"rendered-child-{idx}", split="eval")
+            child_world = mutation_policy.mutate(
+                current.world,
+                parent_stats=parent_stats,
+                child_seed=current.seed + attempts,
+            )
+            try:
+                admitted_child = pipeline.admit_child(child_world, root / f"rendered-child-{attempts}", split="eval")
+            except ValueError:
+                continue
+            current = admitted_child
             snapshots.append(current)
+            accepted += 1
+
+        if accepted < mutations:
+            raise ValueError(f"unable to admit {mutations} mutated children after {attempts} attempts")
 
         snapshot_reports: list[dict[str, Any]] = []
         population: list[PopulationStats] = []

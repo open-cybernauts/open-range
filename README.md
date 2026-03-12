@@ -143,9 +143,9 @@ Current implementation points:
 
 - exact `code_web` flaws carry benchmark tags plus benchmark-aligned `objective_tags`
 - red objectives compile with derived offensive objective tags where applicable
-- admission now executes service-native grader checks during red witness validation for grounded red objectives
+- admission now executes service-native grader checks during red reference validation for grounded red objectives
 - `EpisodeConfig.prompt_mode` supports `zero_day` and `one_day`
-- runtime first observations expose prompt-mode-specific briefings without leaking private witnesses or exact flaw inventories
+- runtime first observations expose prompt-mode-specific briefings without leaking private references or exact flaw inventories
 
 ## Current pipeline
 
@@ -167,7 +167,7 @@ manifest
 - deterministic `enterprise_saas_v1` compiler
 - deterministic bounded synthesis for seeded business artifacts
 - deterministic weakness seeding from an allowed-family catalog, including the full required non-code kind set for `config_identity`, `secret_exposure`, `workflow_abuse`, and `telemetry_blindspot`
-- exact `code_web` flaw templates for the required web exploit kinds, rendered as concrete PHP handlers and witnessable routes
+- exact `code_web` flaw templates for the required web exploit kinds, rendered as concrete PHP handlers and referenceable routes
 - benchmark-aligned offensive objective library and service-native grader specs for the supported web-first objective slice
 - exact config/workflow/mailbox realizations for the required non-code weakness kinds, including mailbox-borne phishing and token leakage cases
 - representative service-native mitigations for exact web flaws plus bounded config/file mitigations for non-code weaknesses
@@ -274,7 +274,7 @@ The generator also writes role/source shards such as:
 There is also a bounded red-only probe that loads the tiny LoRA adapter and
 uses it to score a small candidate action set at each runtime decision.
 This is intentionally narrower than a full policy evaluation: it is
-witness-conditioned and red-only because the current tiny bootstrap dataset is
+reference-conditioned and red-only because the current tiny bootstrap dataset is
 not yet a full red/blue runtime-action corpus.
 
 ```bash

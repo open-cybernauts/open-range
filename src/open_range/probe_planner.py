@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import shlex
 
 from open_range.admission import ProbeSpec, ReferenceAction, ReferenceBundle, ReferenceTrace
@@ -21,8 +22,8 @@ class ProbePlanner:
     build_config: BuildConfig = DEFAULT_BUILD_CONFIG
 
     def build(self) -> ReferenceBundle:
-        red_trace = self.build_red_reference()
-        blue_trace = self.build_blue_reference(red_trace)
+        reference_attack_traces = self.build_red_references()
+        reference_defense_traces = self.build_blue_references(reference_attack_traces)
         smoke_tests = tuple(
             ProbeSpec(
                 id=f"smoke-{service.id}",
@@ -40,24 +41,16 @@ class ProbePlanner:
             ProbeSpec(id="shortcut-unlogged", kind="shortcut", description="unlogged critical actions"),
         )
         determinism_probes = (
-            ProbeSpec(id="determinism-red", kind="determinism", description="replay red witness"),
+            ProbeSpec(id="determinism-red", kind="determinism", description="replay red reference"),
         )
         engine = PredicateEngine(self.world)
         necessity_probes = tuple(
             ProbeSpec(
                 id=f"necessity-{weak.id}",
                 kind="necessity",
-                description=f"remove or remediate {weak.id} and require witness degradation",
+                description=f"remove or remediate {weak.id} and require reference degradation",
             )
             for weak in engine.active_weaknesses()
-        )
-        reference_attack_traces = tuple(
-            red_trace.model_copy(update={"id": f"{red_trace.id}-{idx}"})
-            for idx in range(1, self.build_config.red_reference_count + 1)
-        )
-        reference_defense_traces = tuple(
-            blue_trace.model_copy(update={"id": f"{blue_trace.id}-{idx}"})
-            for idx in range(1, self.build_config.blue_reference_count + 1)
         )
         return ReferenceBundle(
             reference_attack_traces=reference_attack_traces,
@@ -68,14 +61,61 @@ class ProbePlanner:
             necessity_probes=necessity_probes,
         )
 
-    def build_red_reference(self) -> ReferenceTrace:
+    def build_red_references(self) -> tuple[ReferenceTrace, ...]:
         engine = PredicateEngine(self.world)
-        start = next(
+        starts = tuple(
+            service.id for service in self.world.services if engine.is_public_service(service)
+        ) or (self.world.services[0].id,)
+        weaknesses = engine.active_weaknesses()
+        ranked = sorted(
+            weaknesses,
+            key=lambda weak: (
+                0 if weak.family == "code_web" else 1,
+                0 if weak.target in starts else 1,
+                weak.id,
+            ),
+        )
+        candidates = [(start, weak) for weak in ranked for start in _starts_for_weakness(starts, weak.target)]
+        if not candidates:
+            candidates = [(starts[0], None)]
+        traces: list[ReferenceTrace] = []
+        seen: set[str] = set()
+        for start, exploit in candidates:
+            trace = self.build_red_reference(start=start, exploit=exploit, ordinal=len(traces) + 1)
+            token = json.dumps(trace.model_dump(mode="json", exclude={"id"}), sort_keys=True)
+            if token in seen:
+                continue
+            seen.add(token)
+            traces.append(trace)
+            if len(traces) >= self.build_config.red_reference_count:
+                break
+        if not traces:
+            traces.append(self.build_red_reference(start=starts[0], exploit=None, ordinal=1))
+        return tuple(traces)
+
+    def build_blue_references(self, attack_traces: tuple[ReferenceTrace, ...]) -> tuple[ReferenceTrace, ...]:
+        if not attack_traces:
+            attack_traces = (self.build_red_reference(ordinal=1),)
+        count = max(1, self.build_config.blue_reference_count)
+        return tuple(
+            self.build_blue_reference(attack_traces[idx % len(attack_traces)], ordinal=idx + 1)
+            for idx in range(count)
+        )
+
+    def build_red_reference(
+        self,
+        *,
+        start: str | None = None,
+        exploit=None,
+        ordinal: int = 1,
+    ) -> ReferenceTrace:
+        engine = PredicateEngine(self.world)
+        start = start or next(
             (service.id for service in self.world.services if engine.is_public_service(service)),
             self.world.services[0].id,
         )
         weaknesses = engine.active_weaknesses()
-        exploit = _primary_red_weakness(start, weaknesses)
+        exploit = exploit or _primary_red_weakness(start, weaknesses)
         satisfied_predicates: set[str] = set()
         steps: list[ReferenceAction] = []
         current = start
@@ -126,32 +166,42 @@ class ProbePlanner:
                 continue
             events.extend(weak.expected_event_signatures)
         return ReferenceTrace(
-            id=f"red-{self.world.world_id}",
+            id=f"red-{self.world.world_id}-{ordinal}",
             role="red",
             objective_ids=tuple(objective.id for objective in self.world.red_objectives),
             expected_events=tuple(dict.fromkeys(events + ["SensitiveAssetRead"])),
             steps=tuple(steps),
         )
 
-    def build_blue_reference(self, red_trace: ReferenceTrace) -> ReferenceTrace:
-        detect_step = next(
+    def build_blue_reference(self, red_trace: ReferenceTrace, *, ordinal: int = 1) -> ReferenceTrace:
+        blindspot_targets = {
+            weak.target
+            for weak in PredicateEngine(self.world).active_weaknesses()
+            if weak.family == "telemetry_blindspot"
+        }
+        detect_index = next(
             (
-                step
-                for step in red_trace.steps
-                if step.payload.get("action") not in {"deliver_phish", "deliver_lure"}
+                index
+                for index, step in enumerate(red_trace.steps)
+                if _step_is_blue_detectable(red_trace, index, blindspot_targets)
             ),
-            red_trace.steps[0] if red_trace.steps else None,
+            0,
         )
-        detect_target = detect_step.target if detect_step is not None else "svc-web"
+        detect_step = red_trace.steps[detect_index] if red_trace.steps else None
+        detect_event, detect_target = _detection_for_red_step(detect_step)
         contain_target = red_trace.steps[-1].target if red_trace.steps else "svc-siem"
+        observe_steps = tuple(
+            ReferenceAction(actor="blue", kind="shell", target="svc-siem", payload={"action": "observe_events"})
+            for _ in range(max(1, detect_index + 1))
+        )
         return ReferenceTrace(
-            id=f"blue-{self.world.world_id}",
+            id=f"blue-{self.world.world_id}-{ordinal}",
             role="blue",
             objective_ids=tuple(objective.id for objective in self.world.blue_objectives),
             expected_events=("DetectionAlertRaised", "ContainmentApplied"),
-            steps=(
-                ReferenceAction(actor="blue", kind="shell", target="svc-siem", payload={"action": "observe_events"}),
-                ReferenceAction(actor="blue", kind="submit_finding", target=detect_target, payload={"event": "InitialAccess"}),
+            steps=observe_steps
+            + (
+                ReferenceAction(actor="blue", kind="submit_finding", target=detect_target, payload={"event": detect_event}),
                 ReferenceAction(actor="blue", kind="control", target=contain_target, payload={"action": "contain"}),
             ),
         )
@@ -187,6 +237,54 @@ def _primary_red_weakness(start: str, weaknesses):
         )
     )
     return ranked[0]
+
+
+def _detection_for_red_step(step: ReferenceAction | None) -> tuple[str, str]:
+    if step is None:
+        return ("InitialAccess", "svc-web")
+    action = str(step.payload.get("action", ""))
+    objective = str(step.payload.get("objective", ""))
+    asset = str(step.payload.get("asset", ""))
+    if action in {"initial_access", "click_lure"}:
+        return ("InitialAccess", step.target)
+    if action == "traverse":
+        return ("CrossZoneTraversal", step.target)
+    if action in {"collect_secret", "abuse_identity"}:
+        target = asset or step.target
+        return ("CredentialObtained" if (asset and ("cred" in asset or "token" in asset)) else "SensitiveAssetRead", target)
+    if action == "abuse_workflow":
+        target = asset or step.target
+        return ("CredentialObtained" if (asset and ("cred" in asset or "token" in asset)) else "SensitiveAssetRead", target)
+    if action == "satisfy_objective" and objective.startswith("credential_obtained("):
+        return ("CredentialObtained", asset or step.target)
+    if action == "satisfy_objective":
+        return ("SensitiveAssetRead", asset or step.target)
+    return ("InitialAccess", step.target or "svc-web")
+
+
+def _step_is_blue_detectable(
+    trace: ReferenceTrace,
+    index: int,
+    blindspot_targets: set[str],
+) -> bool:
+    if index < 0 or index >= len(trace.steps):
+        return False
+    step = trace.steps[index]
+    action = str(step.payload.get("action", ""))
+    if action in {"deliver_phish", "deliver_lure"}:
+        return False
+    source_target = trace.steps[index - 1].target if index > 0 else ""
+    if action in {"initial_access", "click_lure"}:
+        return step.target not in blindspot_targets
+    if action == "traverse":
+        return step.target not in blindspot_targets and source_target not in blindspot_targets
+    return step.target not in blindspot_targets
+
+
+def _starts_for_weakness(starts: tuple[str, ...], target: str) -> tuple[str, ...]:
+    if target in starts:
+        return (target,) + tuple(start for start in starts if start != target)
+    return starts
 
 
 def _weakness_red_steps(

@@ -198,7 +198,7 @@ def test_blue_only_from_prefix_starts_blue_after_compromise_prefix(tmp_path: Pat
     assert any(event.event_type == "InitialAccess" for event in decision.obs.visible_events)
 
 
-def test_blue_only_from_prefix_delivery_and_click_do_not_collapse_without_matching_witness_steps(tmp_path: Path):
+def test_blue_only_from_prefix_delivery_and_click_do_not_collapse_without_matching_reference_steps(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
 
     delivery_runtime = ReferenceDrivenRuntime()
@@ -237,6 +237,8 @@ def test_blue_only_live_can_win_by_detect_and_contain(tmp_path: Path):
     )
 
     blue_steps = snapshot.reference_bundle.reference_defense_traces[0].steps
+    detect_step = next(step for step in blue_steps if step.kind == "submit_finding")
+    contain_step = next(step for step in blue_steps if step.kind == "control")
     decision = runtime.next_decision()
     assert decision.actor == "blue"
     detect = runtime.act(
@@ -244,8 +246,8 @@ def test_blue_only_live_can_win_by_detect_and_contain(tmp_path: Path):
         Action(
             actor_id="blue",
             role="blue",
-            kind=blue_steps[1].kind,
-            payload={"event_type": "InitialAccess", "target": blue_steps[1].target},
+            kind=detect_step.kind,
+            payload={"event_type": str(detect_step.payload["event"]), "target": detect_step.target},
         ),
     )
     assert "validated finding" in detect.stdout
@@ -257,8 +259,8 @@ def test_blue_only_live_can_win_by_detect_and_contain(tmp_path: Path):
         Action(
             actor_id="blue",
             role="blue",
-            kind=blue_steps[2].kind,
-            payload={"target": blue_steps[2].target, "action": "contain"},
+            kind=contain_step.kind,
+            payload={"target": contain_step.target, "action": "contain"},
         ),
     )
 
@@ -283,7 +285,7 @@ def test_runtime_hard_done_rejects_more_decisions_and_actions(tmp_path: Path):
         runtime.act("red", Action(actor_id="red", role="red", kind="sleep", payload={}))
 
 
-def test_runtime_matching_rejects_extra_api_path_when_witness_has_no_path() -> None:
+def test_runtime_matching_rejects_extra_api_path_when_reference_has_no_path() -> None:
     expected = SimpleNamespace(kind="api", target="svc-web", payload={"action": "traverse"})
     action = Action(actor_id="red", role="red", kind="api", payload={"target": "svc-web", "path": "/"})
 
@@ -555,30 +557,42 @@ def test_internal_blue_controller_modes_are_not_aliases(tmp_path: Path):
     reference_runtime = ReferenceDrivenRuntime()
     reference_runtime.reset(
         snapshot,
-        EpisodeConfig(mode="red_only", opponent_blue="witness", green_enabled=False),
+        EpisodeConfig(
+            mode="red_only",
+            opponent_blue="reference",
+            green_enabled=False,
+            telemetry_delay_enabled=False,
+            telemetry_delay_profile="none",
+        ),
     )
     assert reference_runtime.next_decision().actor == "red"
     reference_runtime.act(
         "red",
         Action(actor_id="red", role="red", kind=first_step.kind, payload={"target": first_step.target, **first_step.payload}),
     )
-    assert reference_runtime.next_decision().actor == "red"
-    witness_blue_events = [event.event_type for event in reference_runtime.export_events() if event.actor == "blue"]
-    assert "DetectionAlertRaised" not in witness_blue_events
+    reference_action = reference_runtime._internal_blue_action()
+    assert reference_action.kind == "shell"
+    assert reference_action.payload["action"] == "observe_events"
 
     scripted_runtime = ReferenceDrivenRuntime()
     scripted_runtime.reset(
         snapshot,
-        EpisodeConfig(mode="red_only", opponent_blue="scripted", green_enabled=False),
+        EpisodeConfig(
+            mode="red_only",
+            opponent_blue="scripted",
+            green_enabled=False,
+            telemetry_delay_enabled=False,
+            telemetry_delay_profile="none",
+        ),
     )
     assert scripted_runtime.next_decision().actor == "red"
     scripted_runtime.act(
         "red",
         Action(actor_id="red", role="red", kind=first_step.kind, payload={"target": first_step.target, **first_step.payload}),
     )
-    assert scripted_runtime.next_decision().actor == "red"
-    scripted_blue_events = [event.event_type for event in scripted_runtime.export_events() if event.actor == "blue"]
-    assert "DetectionAlertRaised" in scripted_blue_events
+    scripted_action = scripted_runtime._internal_blue_action()
+    assert scripted_action.kind == "submit_finding"
+    assert scripted_action.payload["target"] == first_step.target
 
 
 def test_next_decision_raises_done_after_internal_terminal_progress(tmp_path: Path):

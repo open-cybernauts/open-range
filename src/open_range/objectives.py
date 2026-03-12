@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+import asyncio
+import shlex
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -233,6 +235,62 @@ def evaluate_objective_grader(
         return grader.service_id in db_services and bool(linked_events)
     if grader.grader_kind == "outbound_request":
         return bool(linked_events)
+    return False
+
+
+def evaluate_objective_grader_live(
+    predicate: str,
+    grader: ObjectiveGraderSpec,
+    *,
+    snapshot: object,
+    pods: object,
+    events: Iterable[object],
+    service_health: Mapping[str, float],
+    outputs: Iterable[str],
+) -> bool:
+    linked_events = [event for event in events if predicate in _event_linked_predicates(event)]
+    combined_output = "\n".join(output for output in outputs if output)
+    if grader.grader_kind == "event_present":
+        return any(
+            _event_type(event) == grader.event_type
+            and (not grader.target_id or _event_target(event) == grader.target_id)
+            for event in linked_events
+        )
+    if grader.grader_kind == "service_health":
+        health = service_health.get(grader.service_id or grader.target_id, 1.0)
+        return health < 0.9 or any(_event_type(event) == "ServiceDegraded" for event in linked_events)
+    if not getattr(pods, "exec", None):
+        return False
+    if grader.grader_kind == "file_exists":
+        command = f"test -f {shlex.quote(grader.path)}"
+        if grader.expected_ref:
+            command += f" && grep -q {shlex.quote(grader.expected_ref)} {shlex.quote(grader.path)}"
+        result = asyncio.run(pods.exec(grader.service_id, command, timeout=10.0))
+        return result.ok and (grader.expected_ref in combined_output or bool(linked_events))
+    if grader.grader_kind == "db_row_read":
+        query = (
+            "mysql -uapp -papp-pass app -Nse "
+            + shlex.quote(
+                "SELECT contents FROM assets "
+                f"WHERE asset_id = '{grader.target_id}' "
+                "LIMIT 1;"
+            )
+        )
+        result = asyncio.run(pods.exec(grader.service_id or "svc-db", query, timeout=10.0))
+        return result.ok and bool(result.stdout.strip()) and (grader.target_id in result.stdout or grader.expected_ref in result.stdout)
+    if grader.grader_kind == "db_row_write":
+        query = (
+            "mysql -uapp -papp-pass app -Nse "
+            + shlex.quote(
+                "SELECT COUNT(*) FROM assets "
+                f"WHERE asset_id = '{grader.target_id}' "
+                "LIMIT 1;"
+            )
+        )
+        result = asyncio.run(pods.exec(grader.service_id or "svc-db", query, timeout=10.0))
+        return result.ok and result.stdout.strip() not in {"", "0"}
+    if grader.grader_kind == "outbound_request":
+        return bool(linked_events) and bool(combined_output.strip())
     return False
 
 

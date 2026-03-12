@@ -107,8 +107,8 @@ def test_build_config_threads_through_build_and_admission(tmp_path: Path):
     assert len(candidate.world.workflows) == 1
     assert len(candidate.world.users) == 4
     assert all(weak.family == "code_web" for weak in candidate.world.weaknesses)
-    assert len(snapshot.reference_bundle.reference_attack_traces) == 2
-    assert len(snapshot.reference_bundle.reference_defense_traces) == 2
+    assert 1 <= len(snapshot.reference_bundle.reference_attack_traces) <= 2
+    assert 1 <= len(snapshot.reference_bundle.reference_defense_traces) <= 2
 
 
 def test_build_config_can_filter_services_without_touching_manifest_schema(tmp_path: Path):

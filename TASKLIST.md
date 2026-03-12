@@ -203,6 +203,14 @@ Rules:
 - [x] Rename runtime/sim helper classes and execution helpers from witness-oriented names to reference-oriented names
 - [x] Regenerate checked-in schemas and re-verify the full suite
 
+## Phase 22 - Higher-Level Review Fixes
+
+- [x] Make multiple reference attack/defense traces meaningfully distinct and consume them across admission, runtime helpers, and trace generation instead of hardcoding the first trace
+- [x] Make the default `full` admission path live-aware by auto-attaching the Kind backend when the local environment can support it, while keeping the report explicit when live checks are unavailable
+- [x] Strengthen benchmark-aligned service-native objective grading by executing live grader checks during live red-reference validation instead of relying only on seeded-state proxies
+- [x] Broaden native trace generation beyond pure reference imitation with additional scripted runtime traces and explicit teacher-source labeling
+- [x] Finish the public rename from `witness` to `reference` in docs and user-facing config language
+
 ## Audit notes
 
 Current status against `spec_final.md`:

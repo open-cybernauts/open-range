@@ -34,7 +34,7 @@ StandardAttackObjective = Literal[
 These tags are not a replacement for public objective predicates. They are the benchmark-aligned offensive vocabulary that links:
 
 - exact weakness instances
-- private exploit witnesses
+- private exploit references
 - service-native objective graders
 - held-out offensive evaluation
 
@@ -44,7 +44,7 @@ For `code_web`, OpenRange must use exact vulnerable behavior rather than generic
 
 - a concrete vulnerable handler or module
 - a realized service-local artifact in the rendered world
-- at least one private exploit witness
+- at least one private exploit reference
 - at least one standard attack objective tag
 
 ### Objective Tags
@@ -72,7 +72,7 @@ Each benchmark-aligned offensive objective must map to a real checker shape:
 - `outbound_service` -> outbound request or equivalent egress effect
 
 In V1, these graders are represented as deterministic `ObjectiveGraderSpec`s owned by the predicate/admission stack.
-They are not report-only metadata: witness validation executes them against frozen snapshot state plus emitted runtime events.
+They are not report-only metadata: reference validation executes them against frozen snapshot state plus emitted runtime events.
 
 ### Prompt Modes
 
@@ -89,7 +89,7 @@ This is an evaluation and training split, not a change to the admitted snapshot 
 
 ### What This Changes
 
-This does not replace OpenRange's existing enterprise objective predicates or private witness bundle. It adds a stronger offensive contract:
+This does not replace OpenRange's existing enterprise objective predicates or private reference bundle. It adds a stronger offensive contract:
 
 - exact web exploit realism for the web slice
 - benchmark-aligned offensive objective tags

@@ -61,17 +61,24 @@ class ReferenceDrivenRuntime:
         self._last_red_target = ""
         self._event_seq = 0
         self._decision_seq = 0
+        self._reset_seq = 0
         self._pending_actor: ExternalRole | Literal[""] = ""
         self._next_due_time = {"red": 0.0, "blue": 0.0}
+        self._reference_attack_index = 0
+        self._reference_defense_index = 0
 
     def reset(
         self,
         snapshot: Snapshot,
         episode_config: EpisodeConfig = DEFAULT_EPISODE_CONFIG,
+        *,
+        reference_attack_index: int | None = None,
+        reference_defense_index: int | None = None,
     ) -> EpisodeState:
         self._snapshot = snapshot
         self._predicates = PredicateEngine(snapshot.world)
         self._episode_config = episode_config
+        self._reset_seq += 1
         self.reward_engine.reset()
         self._events = []
         self._event_visibility = {}
@@ -93,6 +100,15 @@ class ReferenceDrivenRuntime:
         self._decision_seq = 0
         self._pending_actor = ""
         self._next_due_time = _initial_due_times(episode_config)
+        self._reference_attack_index = self._resolve_reference_index(
+            reference_attack_index,
+            len(snapshot.reference_bundle.reference_attack_traces),
+        )
+        self._reference_defense_index = self._resolve_reference_index(
+            reference_defense_index,
+            len(snapshot.reference_bundle.reference_defense_traces),
+            fallback=self._reference_attack_index,
+        )
 
         service_health = {service.id: 1.0 for service in snapshot.world.services}
         if self.action_backend is not None:
@@ -203,19 +219,20 @@ class ReferenceDrivenRuntime:
             return
         if self._episode_config.mode != "blue_only_from_prefix" or self._episode_config.start_state == "clean":
             return
+        attack_trace = self._reference_attack_trace()
         if self._episode_config.start_state == "prefix_delivery":
             if not any(
                 step.payload.get("action") in {"deliver_phish", "deliver_lure"}
-                for step in self._snapshot.reference_bundle.reference_attack_traces[0].steps
+                for step in attack_trace.steps
             ):
                 return
         if self._episode_config.start_state == "prefix_click":
             if not any(
                 step.payload.get("action") == "click_lure"
-                for step in self._snapshot.reference_bundle.reference_attack_traces[0].steps
+                for step in attack_trace.steps
             ):
                 return
-        for _ in range(len(self._snapshot.reference_bundle.reference_attack_traces[0].steps)):
+        for _ in range(len(attack_trace.steps)):
             step = self._next_red_step()
             if step is None or self._state.done:
                 break
@@ -460,7 +477,7 @@ class ReferenceDrivenRuntime:
         emitted: list[RuntimeEvent] = []
         reward_delta = 0.0
         expected_internal = None
-        if internal and self._resolved_opponent_mode("blue") in {"witness", "replay"}:
+        if internal and self._resolved_opponent_mode("blue") in {"reference", "replay"}:
             expected_internal = self._next_blue_step()
         live = self._execute_live_action(action)
         stdout = live.stdout or "blue action applied"
@@ -769,7 +786,7 @@ class ReferenceDrivenRuntime:
     def _next_red_step(self):
         if self._snapshot is None:
             return None
-        trace = self._snapshot.reference_bundle.reference_attack_traces[0]
+        trace = self._reference_attack_trace()
         if self._red_progress >= len(trace.steps):
             return None
         return trace.steps[self._red_progress]
@@ -777,7 +794,7 @@ class ReferenceDrivenRuntime:
     def _next_blue_step(self):
         if self._snapshot is None:
             return None
-        trace = self._snapshot.reference_bundle.reference_defense_traces[0]
+        trace = self._reference_defense_trace()
         if self._blue_internal_progress >= len(trace.steps):
             return None
         return trace.steps[self._blue_internal_progress]
@@ -839,7 +856,7 @@ class ReferenceDrivenRuntime:
     def _remaining_red_targets(self) -> set[str]:
         if self._snapshot is None:
             return set()
-        trace = self._snapshot.reference_bundle.reference_attack_traces[0]
+        trace = self._reference_attack_trace()
         return {step.target for step in trace.steps[self._red_progress:]}
 
     def _path_block_reason(self, target: str) -> str:
@@ -1090,7 +1107,7 @@ class ReferenceDrivenRuntime:
         mode = self._resolved_opponent_mode("blue")
         if mode == "none":
             return Action(actor_id="blue", role="blue", kind="sleep", payload={})
-        if mode in {"witness", "replay"}:
+        if mode in {"reference", "replay"}:
             step = self._next_blue_step()
             if step is None:
                 return Action(actor_id="blue", role="blue", kind="sleep", payload={})
@@ -1115,8 +1132,8 @@ class ReferenceDrivenRuntime:
         if self._snapshot is None:
             return "scripted"
         if actor == "red":
-            return "witness" if self._snapshot.seed % 2 == 0 else "frozen_policy"
-        return "witness" if self._snapshot.seed % 2 == 0 else "scripted"
+            return "reference" if self._snapshot.seed % 2 == 0 else "frozen_policy"
+        return "reference" if self._snapshot.seed % 2 == 0 else "scripted"
 
     def _opponent_cadence(self, actor: ExternalRole) -> float:
         mode = self._resolved_opponent_mode(actor)
@@ -1130,7 +1147,7 @@ class ReferenceDrivenRuntime:
             return 1.0
         if mode == "replay":
             return 0.5
-        if mode == "witness":
+        if mode == "reference":
             return 0.75
         if mode == "frozen_policy":
             return 1.25
@@ -1140,6 +1157,29 @@ class ReferenceDrivenRuntime:
         if self._predicates is None:
             return None
         return next((weakness for weakness in self._predicates.active_weaknesses() if weakness.id == weakness_id), None)
+
+    def _reference_attack_trace(self):
+        assert self._snapshot is not None
+        traces = self._snapshot.reference_bundle.reference_attack_traces
+        return traces[self._reference_attack_index % len(traces)]
+
+    def _reference_defense_trace(self):
+        assert self._snapshot is not None
+        traces = self._snapshot.reference_bundle.reference_defense_traces
+        return traces[self._reference_defense_index % len(traces)]
+
+    def _resolve_reference_index(
+        self,
+        requested: int | None,
+        count: int,
+        *,
+        fallback: int = 0,
+    ) -> int:
+        if count < 1:
+            return 0
+        if requested is not None:
+            return requested % count
+        return (fallback + self._reset_seq - 1) % count
 
 
 def _initial_due_times(config: EpisodeConfig) -> dict[str, float]:

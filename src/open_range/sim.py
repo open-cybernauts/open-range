@@ -39,20 +39,26 @@ class ReferenceSimPlane:
     """Replay hidden reference traces through the public decision loop."""
 
     def generate_bootstrap_trace(self, snapshot: Snapshot, *, episode_seed: int) -> SimTrace:
+        attack_index = episode_seed % max(1, len(snapshot.reference_bundle.reference_attack_traces))
+        defense_index = episode_seed % max(1, len(snapshot.reference_bundle.reference_defense_traces))
+        attack_trace = snapshot.reference_bundle.reference_attack_traces[attack_index]
+        defense_trace = snapshot.reference_bundle.reference_defense_traces[defense_index]
         runtime = ReferenceDrivenRuntime()
         runtime.reset(
             snapshot,
             EpisodeConfig(
                 mode="joint_pool",
                 scheduler_mode="strict_turns",
-                episode_horizon_minutes=max(6, len(snapshot.reference_bundle.reference_attack_traces[0].steps) + 3),
+                episode_horizon_minutes=max(6, len(attack_trace.steps) + 3),
             ),
+            reference_attack_index=attack_index,
+            reference_defense_index=defense_index,
         )
         turns: list[SimTurn] = []
         red_idx = 0
         blue_idx = 0
-        red_steps = snapshot.reference_bundle.reference_attack_traces[0].steps
-        blue_steps = snapshot.reference_bundle.reference_defense_traces[0].steps
+        red_steps = attack_trace.steps
+        blue_steps = defense_trace.steps
 
         while not runtime.state().done:
             decision = runtime.next_decision()

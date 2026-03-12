@@ -113,38 +113,71 @@ class TraceDatasetGenerator:
 
             for snapshot_idx, snapshot in enumerate(snapshots):
                 if include_sim:
-                    raw_rows.extend(
-                        self._episode_rows(
-                            snapshot,
-                            EpisodeConfig(mode="joint_pool", scheduler_mode="strict_turns"),
-                            trace_source="sim",
-                            teacher_source="reference_sim",
-                            split=dataset_split,
-                            lineage_root=lineage_root,
+                    for attack_idx, defense_idx in _reference_trace_pairs(snapshot, "joint_pool"):
+                        raw_rows.extend(
+                            self._episode_rows(
+                                snapshot,
+                                EpisodeConfig(mode="joint_pool", scheduler_mode="strict_turns"),
+                                trace_source="sim",
+                                teacher_source="reference_sim",
+                                split=dataset_split,
+                                lineage_root=lineage_root,
+                                attack_trace_index=attack_idx,
+                                defense_trace_index=defense_idx,
+                            )
                         )
-                    )
                 for mode in DEFAULT_RUNTIME_MODES:
-                    raw_rows.extend(
-                        self._episode_rows(
-                            snapshot,
-                            _episode_config_for(mode),
-                            trace_source="runtime",
-                            teacher_source="reference_runtime",
-                            split=dataset_split,
-                            lineage_root=lineage_root,
+                    for attack_idx, defense_idx in _reference_trace_pairs(snapshot, mode):
+                        raw_rows.extend(
+                            self._episode_rows(
+                                snapshot,
+                                _episode_config_for(mode),
+                                trace_source="runtime",
+                                teacher_source="reference_runtime",
+                                split=dataset_split,
+                                lineage_root=lineage_root,
+                                attack_trace_index=attack_idx,
+                                defense_trace_index=defense_idx,
+                            )
                         )
-                    )
+                        raw_rows.extend(
+                            self._episode_rows(
+                                snapshot,
+                                _episode_config_for(mode),
+                                trace_source="runtime",
+                                teacher_source="scripted_runtime",
+                                split=dataset_split,
+                                lineage_root=lineage_root,
+                                attack_trace_index=attack_idx,
+                                defense_trace_index=defense_idx,
+                            )
+                        )
                 if include_joint_pool:
-                    raw_rows.extend(
-                        self._episode_rows(
-                            snapshot,
-                            EpisodeConfig(mode="joint_pool", scheduler_mode="strict_turns"),
-                            trace_source="runtime",
-                            teacher_source="reference_runtime",
-                            split=dataset_split,
-                            lineage_root=lineage_root,
+                    for attack_idx, defense_idx in _reference_trace_pairs(snapshot, "joint_pool"):
+                        raw_rows.extend(
+                            self._episode_rows(
+                                snapshot,
+                                EpisodeConfig(mode="joint_pool", scheduler_mode="strict_turns"),
+                                trace_source="runtime",
+                                teacher_source="reference_runtime",
+                                split=dataset_split,
+                                lineage_root=lineage_root,
+                                attack_trace_index=attack_idx,
+                                defense_trace_index=defense_idx,
+                            )
                         )
-                    )
+                        raw_rows.extend(
+                            self._episode_rows(
+                                snapshot,
+                                EpisodeConfig(mode="joint_pool", scheduler_mode="strict_turns"),
+                                trace_source="runtime",
+                                teacher_source="scripted_runtime",
+                                split=dataset_split,
+                                lineage_root=lineage_root,
+                                attack_trace_index=attack_idx,
+                                defense_trace_index=defense_idx,
+                            )
+                        )
 
         raw_path = root_dir / "trace_rows.jsonl"
         decision_sft_path = root_dir / "decision_sft.jsonl"
@@ -178,14 +211,22 @@ class TraceDatasetGenerator:
         teacher_source: str,
         split: str,
         lineage_root: str,
+        attack_trace_index: int = 0,
+        defense_trace_index: int = 0,
     ) -> list[TraceDecisionRow]:
         runtime = ReferenceDrivenRuntime()
-        runtime.reset(snapshot, episode_config)
+        runtime.reset(
+            snapshot,
+            episode_config,
+            reference_attack_index=attack_trace_index,
+            reference_defense_index=defense_trace_index,
+        )
         teacher_steps = {
-            "red": list(snapshot.reference_bundle.reference_attack_traces[0].steps),
-            "blue": list(snapshot.reference_bundle.reference_defense_traces[0].steps),
+            "red": list(snapshot.reference_bundle.reference_attack_traces[attack_trace_index].steps),
+            "blue": list(snapshot.reference_bundle.reference_defense_traces[defense_trace_index].steps),
         }
         teacher_progress = {"red": 0, "blue": 0}
+        actor_decisions = {"red": 0, "blue": 0}
         rows: list[TraceDecisionRow] = []
         decision_index = 0
 
@@ -198,17 +239,28 @@ class TraceDatasetGenerator:
                 raise
             actor = decision.actor
             expected = _expected_step(teacher_steps[actor], teacher_progress[actor])
-            chosen_action = _teacher_action(snapshot, actor, expected)
+            teacher_action = _teacher_action(snapshot, actor, expected)
             candidates = _candidate_actions(
                 snapshot,
                 actor=actor,
                 observation=decision.obs,
-                expected_action=chosen_action,
+                expected_action=teacher_action,
                 remaining_targets=runtime._remaining_red_targets(),
             )
+            if teacher_source == "scripted_runtime":
+                chosen_action = _scripted_choice(
+                    actor=actor,
+                    observation=decision.obs,
+                    candidates=candidates,
+                    decision_count=actor_decisions[actor],
+                )
+                candidates = _select_candidate(candidates, chosen_action)
+            else:
+                chosen_action = teacher_action
             result = runtime.act(actor, chosen_action)
             if expected is not None and runtime._matches_step(chosen_action, expected, result.stdout):
                 teacher_progress[actor] += 1
+            actor_decisions[actor] += 1
             rows.append(
                 TraceDecisionRow(
                     trace_source=trace_source,  # type: ignore[arg-type]
@@ -468,6 +520,58 @@ def _dedupe_candidates(candidates: list[TraceCandidate]) -> tuple[TraceCandidate
     return tuple(deduped)
 
 
+def _select_candidate(candidates: tuple[TraceCandidate, ...], chosen_action: Action) -> tuple[TraceCandidate, ...]:
+    token = json.dumps(chosen_action.model_dump(mode="json"), sort_keys=True)
+    selected = []
+    matched = False
+    for candidate in candidates:
+        candidate_token = json.dumps(candidate.action.model_dump(mode="json"), sort_keys=True)
+        is_match = candidate_token == token and not matched
+        matched = matched or is_match
+        selected.append(candidate.model_copy(update={"selected": is_match}))
+    if matched:
+        return tuple(selected)
+    fallback = TraceCandidate(
+        label="scripted_choice",
+        action=chosen_action,
+        text=render_action_text(chosen_action),
+        selected=True,
+        counterfactual_label="alternative",
+    )
+    return _dedupe_candidates(selected + [fallback])
+
+
+def _scripted_choice(
+    *,
+    actor: str,
+    observation: Observation,
+    candidates: tuple[TraceCandidate, ...],
+    decision_count: int,
+) -> Action:
+    by_label = {candidate.label: candidate for candidate in candidates}
+    if actor == "red":
+        if decision_count == 0:
+            for label in ("root_probe", "web_probe", "recon_hosts", "recon_net"):
+                candidate = by_label.get(label)
+                if candidate is not None:
+                    return candidate.action
+        return by_label.get("teacher", candidates[0]).action
+    malicious_visible = any(event.malicious for event in observation.visible_events)
+    if malicious_visible:
+        detect_now = by_label.get("detect_now")
+        if detect_now is not None and decision_count == 0:
+            return detect_now.action
+    if decision_count == 0:
+        false_positive = by_label.get("false_positive")
+        if false_positive is not None and not malicious_visible:
+            return false_positive.action
+    if decision_count == 1:
+        over_disruptive = by_label.get("over_disruptive")
+        if over_disruptive is not None and malicious_visible:
+            return over_disruptive.action
+    return by_label.get("teacher", candidates[0]).action
+
+
 def _service_not_in(snapshot: Snapshot, *, excluded: set[str]) -> str:
     for preferred in ("svc-email", "svc-web", "svc-idp", "svc-fileshare", "svc-db", "svc-siem"):
         if preferred not in excluded and any(service.id == preferred for service in snapshot.world.services):
@@ -476,6 +580,17 @@ def _service_not_in(snapshot: Snapshot, *, excluded: set[str]) -> str:
         if service.id not in excluded:
             return service.id
     return ""
+
+
+def _reference_trace_pairs(snapshot: Snapshot, mode: str) -> tuple[tuple[int, int], ...]:
+    attack_count = max(1, len(snapshot.reference_bundle.reference_attack_traces))
+    defense_count = max(1, len(snapshot.reference_bundle.reference_defense_traces))
+    if mode == "red_only":
+        return tuple((attack_idx, min(attack_idx, defense_count - 1)) for attack_idx in range(attack_count))
+    if mode in {"blue_only_live", "blue_only_from_prefix"}:
+        return tuple((min(defense_idx, attack_count - 1), defense_idx) for defense_idx in range(defense_count))
+    count = max(attack_count, defense_count)
+    return tuple((idx % attack_count, idx % defense_count) for idx in range(count))
 
 
 def _dataset_split(root_idx: int, roots: int) -> str:
@@ -494,9 +609,9 @@ def _dataset_split(root_idx: int, roots: int) -> str:
 
 def _episode_config_for(mode: str) -> EpisodeConfig:
     if mode == "red_only":
-        return EpisodeConfig(mode="red_only", scheduler_mode="strict_turns", opponent_blue="witness")
+        return EpisodeConfig(mode="red_only", scheduler_mode="strict_turns", opponent_blue="reference")
     if mode == "blue_only_live":
-        return EpisodeConfig(mode="blue_only_live", scheduler_mode="strict_turns", opponent_red="witness")
+        return EpisodeConfig(mode="blue_only_live", scheduler_mode="strict_turns", opponent_red="reference")
     if mode == "blue_only_from_prefix":
         return EpisodeConfig(
             mode="blue_only_from_prefix",
@@ -559,6 +674,11 @@ def _write_role_source_shards(root_dir: Path, rows: list[TraceDecisionRow]) -> d
         add(f"raw.{role}.all", role_rows)
         for source in ("runtime", "sim"):
             add(f"raw.{role}.{source}", [row for row in role_rows if row.trace_source == source])
+        for teacher_source in ("reference_runtime", "scripted_runtime", "reference_sim"):
+            add(
+                f"raw.{role}.teacher.{teacher_source}",
+                [row for row in role_rows if row.teacher_source == teacher_source],
+            )
 
     for name, selected in shard_rows.items():
         payloads = [row.model_dump(mode="json") for row in selected]
@@ -575,6 +695,10 @@ def _write_role_source_shards(root_dir: Path, rows: list[TraceDecisionRow]) -> d
             selected = [row for row in role_rows if row.trace_source == source]
             if selected:
                 sft_rows[f"sft.{role}.{source}"] = [row_to_sft_record(row) for row in selected]
+        for teacher_source in ("reference_runtime", "scripted_runtime", "reference_sim"):
+            selected = [row for row in role_rows if row.teacher_source == teacher_source]
+            if selected:
+                sft_rows[f"sft.{role}.teacher.{teacher_source}"] = [row_to_sft_record(row) for row in selected]
 
     for name, payloads in sft_rows.items():
         path = root_dir / f"{name.replace('.', '_')}.jsonl"

@@ -35,6 +35,8 @@ def test_generate_trace_dataset_writes_raw_and_decision_views(tmp_path: Path) ->
     assert all(entry["split"] in {"train", "val", "test"} for entry in sft_rows)
     assert "sft.red.runtime" in report.shard_paths
     assert "sft.blue.runtime" in report.shard_paths
+    assert "sft.red.teacher.reference_runtime" in report.shard_paths
+    assert "sft.red.teacher.scripted_runtime" in report.shard_paths
     assert Path(report.shard_paths["sft.red.runtime"]).exists()
     assert Path(report.shard_paths["raw.red.all"]).exists()
 
