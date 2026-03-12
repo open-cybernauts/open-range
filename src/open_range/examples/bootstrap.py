@@ -13,20 +13,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from open_range import (
-    Action,
-    BuildConfig,
-    BuildPipeline,
-    EpisodeConfig,
-    FileSnapshotStore,
-    ScriptedRuntimeAgent,
-    TandemEpisodeDriver,
-    ReferenceSimPlane,
-    ReferenceDrivenRuntime,
-    load_bundled_manifest,
-)
-
-OFFLINE_BUILD_CONFIG = BuildConfig(validation_profile="graph_only")
+from open_range.build_config import OFFLINE_BUILD_CONFIG
+from open_range.decision_surface import trace_actions
+from open_range.driver import ScriptedRuntimeAgent, TandemEpisodeDriver
+from open_range.episode_config import EpisodeConfig
+from open_range.pipeline import BuildPipeline
+from open_range.resources import load_bundled_manifest
+from open_range.runtime import ReferenceDrivenRuntime
+from open_range.sim import ReferenceSimPlane
+from open_range.store import FileSnapshotStore
 
 
 def _default_manifest_name() -> str:
@@ -50,35 +45,8 @@ def _load_manifest(source: str | Path | None) -> dict[str, Any]:
 def _scripted_agents(snapshot):
     attack_idx = snapshot.seed % max(1, len(snapshot.reference_bundle.reference_attack_traces))
     defense_idx = snapshot.seed % max(1, len(snapshot.reference_bundle.reference_defense_traces))
-    red_steps = snapshot.reference_bundle.reference_attack_traces[attack_idx].steps
-    blue_steps = snapshot.reference_bundle.reference_defense_traces[defense_idx].steps
-    red_agent = ScriptedRuntimeAgent(
-        [
-            Action(
-                actor_id="red",
-                role="red",
-                kind=red_steps[0].kind,
-                payload={"target": red_steps[0].target, **red_steps[0].payload},
-            ),
-            Action(actor_id="red", role="red", kind="sleep", payload={}),
-        ]
-    )
-    blue_agent = ScriptedRuntimeAgent(
-        [
-            Action(
-                actor_id="blue",
-                role="blue",
-                kind=blue_steps[1].kind,
-                payload={"event_type": "InitialAccess", "target": blue_steps[1].target},
-            ),
-            Action(
-                actor_id="blue",
-                role="blue",
-                kind=blue_steps[2].kind,
-                payload={"target": blue_steps[2].target, "action": "contain"},
-            ),
-        ]
-    )
+    red_agent = ScriptedRuntimeAgent(trace_actions(snapshot, "red", trace_index=attack_idx)[:2])
+    blue_agent = ScriptedRuntimeAgent(trace_actions(snapshot, "blue", trace_index=defense_idx)[1:3])
     return red_agent, blue_agent
 
 

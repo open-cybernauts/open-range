@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from open_range.predicate_expr import parse_predicate
+
 
 StandardAttackObjective = Literal[
     "dos",
@@ -97,9 +99,9 @@ def objective_tags_for_predicate(
     owner_service: str = "",
     target_id: str = "",
 ) -> tuple[StandardAttackObjective, ...]:
-    name, inner = _predicate_parts(predicate)
-    target = inner or target_id
-    if name in {
+    expr = parse_predicate(predicate)
+    target = expr.inner or target_id
+    if expr.name in {
         "dos",
         "file_access",
         "file_creation",
@@ -109,11 +111,11 @@ def objective_tags_for_predicate(
         "privilege_escalation",
         "outbound_service",
     }:
-        return (name,)  # type: ignore[return-value]
-    if name == "asset_read":
+        return (expr.name,)  # type: ignore[return-value]
+    if expr.name == "asset_read":
         is_db = owner_service == "svc-db" or "db" in target.lower() or "mysql" in asset_location.lower()
         return ("db_access",) if is_db else ("file_access",)
-    if name == "credential_obtained":
+    if expr.name == "credential_obtained":
         return ("privilege_escalation",)
     return ()
 
@@ -126,10 +128,10 @@ def objective_grader_for_predicate(
     target_id: str = "",
     default_service: str = "",
 ) -> ObjectiveGraderSpec | None:
-    name, inner = _predicate_parts(predicate)
-    resolved_target = target_id or inner
+    expr = parse_predicate(predicate)
+    resolved_target = target_id or expr.inner
     service_id = owner_service or default_service
-    if name == "credential_obtained":
+    if expr.name == "credential_obtained":
         return ObjectiveGraderSpec(
             objective_tag="privilege_escalation",
             grader_kind="event_present",
@@ -397,11 +399,3 @@ def _event_linked_predicates(event: object) -> tuple[str, ...]:
     if isinstance(value, list):
         return tuple(str(item) for item in value)
     return ()
-
-
-def _predicate_parts(predicate: str) -> tuple[str, str]:
-    if "(" not in predicate or ")" not in predicate:
-        return predicate.strip(), ""
-    name, rest = predicate.split("(", 1)
-    inner = rest.rsplit(")", 1)[0].strip()
-    return name.strip(), inner

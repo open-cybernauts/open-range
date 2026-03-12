@@ -3,99 +3,48 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from open_range import (
-    EnterpriseSaaSManifest,
-    ValidatorReport,
+from open_range.admission import (
+    ProbeSpec,
+    ReferenceAction,
     ReferenceBundle,
-    WorldIR,
-    validate_manifest,
+    ReferenceTrace,
+    ValidatorCheckReport,
+    ValidatorReport,
+    ValidatorStageReport,
 )
-from open_range.admission import ProbeSpec, ValidatorCheckReport, ValidatorStageReport, ReferenceAction, ReferenceTrace
+from open_range.manifest import EnterpriseSaaSManifest, validate_manifest
 from open_range.world_ir import (
     GreenWorkloadSpec,
     HostSpec,
     LineageSpec,
     MutationBoundsSpec,
     ObjectiveSpec,
+    WorldIR,
 )
+from tests.support import manifest_payload
 
 
 def _manifest_payload() -> dict:
-    return {
-        "version": 1,
-        "world_family": "enterprise_saas_v1",
-        "seed": 1337,
-        "business": {
-            "archetype": "healthcare_saas",
-            "workflows": [
-                "helpdesk_ticketing",
-                "payroll_approval",
-                "document_sharing",
-                "internal_email",
-            ],
-        },
-        "topology": {
-            "zones": ["external", "dmz", "corp", "data", "management"],
-            "services": ["web_app", "email", "idp", "fileshare", "db", "siem"],
-        },
-        "users": {
-            "roles": {
-                "sales": 8,
-                "engineer": 6,
-                "finance": 2,
-                "it_admin": 1,
-            },
-        },
-        "assets": [
-            {"id": "finance_docs", "class": "crown_jewel"},
-            {"id": "payroll_db", "class": "crown_jewel"},
-            {"id": "idp_admin_cred", "class": "sensitive"},
-        ],
-        "objectives": {
-            "red": [
-                {"predicate": "asset_read(finance_docs)"},
-                {"predicate": "credential_obtained(idp_admin_cred)"},
-            ],
-            "blue": [
-                {"predicate": "intrusion_detected(initial_access)"},
-                {"predicate": "intrusion_contained(before_asset_read)"},
-                {"predicate": "service_health_above(0.9)"},
-            ],
-        },
-        "security": {
-            "allowed_weakness_families": [
-                "config_identity",
-                "workflow_abuse",
-                "secret_exposure",
-                "code_web",
-                "telemetry_blindspot",
-            ],
-            "code_flaw_kinds": [
-                "sql_injection",
-                "broken_authorization",
-                "auth_bypass",
-            ],
-            "phishing_surface_enabled": True,
-            "observability": {
-                "require_web_logs": True,
-                "require_idp_logs": True,
-                "require_email_logs": True,
-                "require_siem_ingest": True,
-            },
-        },
-        "difficulty": {
-            "target_red_path_depth": 8,
-            "target_blue_signal_points": 4,
-            "target_noise_density": "medium",
-        },
-        "mutation_bounds": {
-            "max_new_hosts": 2,
-            "max_new_services": 1,
-            "max_new_users": 5,
-            "max_new_weaknesses": 2,
-            "allow_patch_old_weaknesses": True,
-        },
+    payload = manifest_payload()
+    payload["users"]["roles"] = {
+        "sales": 8,
+        "engineer": 6,
+        "finance": 2,
+        "it_admin": 1,
     }
+    payload["objectives"]["red"] = [
+        {"predicate": "asset_read(finance_docs)"},
+        {"predicate": "credential_obtained(idp_admin_cred)"},
+    ]
+    payload["security"]["code_flaw_kinds"] = [
+        "sql_injection",
+        "broken_authorization",
+        "auth_bypass",
+    ]
+    payload["security"]["phishing_surface_enabled"] = True
+    payload["difficulty"]["target_red_path_depth"] = 8
+    payload["mutation_bounds"]["allow_patch_old_weaknesses"] = True
+    return payload
 
 
 def test_manifest_accepts_spec_example_shape():

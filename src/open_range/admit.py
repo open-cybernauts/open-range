@@ -6,11 +6,11 @@ import asyncio
 import json
 import shutil
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 from urllib.parse import urlencode
 
+from open_range.admission_plan import admission_stages, profile_requires_live
 from open_range.admission_scoring import report_summary
 from open_range.admission import (
     ValidatorCheckReport,
@@ -40,12 +40,6 @@ class AdmissionController(Protocol):
 
 
 CheckFunc = Callable[[WorldIR, KindArtifacts, ReferenceBundle | None], ValidatorCheckReport]
-
-
-@dataclass(frozen=True)
-class _Stage:
-    name: str
-    checks: tuple[CheckFunc, ...]
 
 
 class LocalAdmissionController:
@@ -79,14 +73,15 @@ class LocalAdmissionController:
             "explicit" if self.live_backend is not None else ("auto" if live_backend is not None else "unavailable")
         )
 
-        for stage in self._stages(build_config):
+        check_map = self._check_map()
+        for stage in admission_stages(build_config):
             checks: list[ValidatorCheckReport] = []
-            for check in stage.checks:
+            for check_name in stage.check_names:
                 if not continue_running:
                     break
-                if reference_bundle is None and stage.name in {"red_reference", "blue_reference", "necessity", "shortcut", "determinism"}:
+                if reference_bundle is None and stage.requires_references:
                     reference_bundle = build_reference_bundle(world, build_config)
-                result = check(world, artifacts, reference_bundle)
+                result = check_map[check_name](world, artifacts, reference_bundle)
                 checks.append(result)
                 if self.mode == "fail_fast" and not result.passed and not result.advisory:
                     continue_running = False
@@ -109,7 +104,7 @@ class LocalAdmissionController:
             health_info.update(live_info)
             if self.mode == "fail_fast" and not live_stage.passed:
                 continue_running = False
-        elif self._profile_requires_live(build_config):
+        elif profile_requires_live(build_config):
             stages.append(
                 ValidatorStageReport(
                     name="kind_live",
@@ -150,56 +145,24 @@ class LocalAdmissionController:
         return final_bundle, report
 
     @staticmethod
-    def _stages(build_config: BuildConfig) -> tuple[_Stage, ...]:
-        static_stage = _Stage(
-            "static",
-            (
-                _check_manifest_compliance,
-                _check_graph_consistency,
-                _check_path_solvability,
-                _check_objective_grounding,
-                _check_workflow_consistency,
-            ),
-        )
-        live_stage = _Stage(
-            "live",
-            (
-                _check_render_outputs,
-                _check_service_health_contract,
-                _check_siem_ingest,
-                _check_isolation,
-                _check_difficulty_envelope,
-            ),
-        )
-        reference_stages = (
-            _Stage("red_reference", (_check_red_reference,)),
-            _Stage("blue_reference", (_check_blue_reference,)),
-        )
-        advanced_stages = (
-            _Stage("necessity", (_check_necessity,)),
-            _Stage("shortcut", (_check_shortcut_probes,)),
-            _Stage("determinism", (_check_determinism,)),
-        )
-
-        if build_config.validation_profile == "graph_only":
-            return (static_stage,)
-        if build_config.validation_profile == "graph_plus_live":
-            return (static_stage, live_stage) + reference_stages
-        if build_config.validation_profile == "no_necessity":
-            return (static_stage, live_stage) + reference_stages + (
-                _Stage("shortcut", (_check_shortcut_probes,)),
-                _Stage("determinism", (_check_determinism,)),
-            )
-        return (
-            _Stage(
-                static_stage.name,
-                static_stage.checks,
-            ),
-            _Stage(
-                live_stage.name,
-                live_stage.checks,
-            ),
-        ) + reference_stages + advanced_stages
+    def _check_map() -> dict[str, CheckFunc]:
+        return {
+            "manifest_compliance": _check_manifest_compliance,
+            "graph_consistency": _check_graph_consistency,
+            "path_solvability": _check_path_solvability,
+            "objective_grounding": _check_objective_grounding,
+            "topology_workflow_consistency": _check_workflow_consistency,
+            "render_outputs": _check_render_outputs,
+            "service_health": _check_service_health_contract,
+            "siem_ingest": _check_siem_ingest,
+            "isolation": _check_isolation,
+            "difficulty_envelope": _check_difficulty_envelope,
+            "red_reference": _check_red_reference,
+            "blue_reference": _check_blue_reference,
+            "necessity": _check_necessity,
+            "shortcut_probes": _check_shortcut_probes,
+            "determinism": _check_determinism,
+        }
 
     def _run_live_backend_checks(
         self,
@@ -287,10 +250,6 @@ class LocalAdmissionController:
             checks=tuple(checks),
         )
         return stage, live_info
-
-    @staticmethod
-    def _profile_requires_live(build_config: BuildConfig) -> bool:
-        return build_config.validation_profile in {"full", "graph_plus_live"}
 
     def _auto_live_backend(self, build_config: BuildConfig) -> LiveBackend | None:
         if not self.auto_live:

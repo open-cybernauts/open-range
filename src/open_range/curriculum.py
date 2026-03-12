@@ -8,6 +8,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from open_range.predicate_expr import predicate_inner
 from open_range.store import FileSnapshotStore
 from open_range.weaknesses import build_catalog_weakness
 from open_range.world_ir import (
@@ -277,7 +278,7 @@ def _first_objective_service(world: WorldIR) -> str:
     objective = next(iter(world.red_objectives), None)
     if objective is None:
         return world.services[0].id
-    asset_id = _predicate_inner(objective.predicate)
+    asset_id = predicate_inner(objective.predicate)
     asset = next((item for item in world.assets if item.id == asset_id), None)
     if asset is not None:
         return asset.owner_service
@@ -291,12 +292,6 @@ def _least_populated_role(world: WorldIR) -> str:
     if not counts:
         return "sales"
     return sorted(counts.items(), key=lambda item: (item[1], item[0]))[0][0]
-
-
-def _predicate_inner(predicate: str) -> str:
-    if "(" not in predicate or ")" not in predicate:
-        return ""
-    return predicate.split("(", 1)[1].rsplit(")", 1)[0].strip()
 
 
 def _add_host(world: WorldIR) -> WorldIR | None:
@@ -373,7 +368,7 @@ def _add_service(world: WorldIR, *, objective_service_id: str) -> WorldIR | None
     )
 
     assets = list(world.assets)
-    first_asset_id = _predicate_inner(world.red_objectives[0].predicate) if world.red_objectives else ""
+    first_asset_id = predicate_inner(world.red_objectives[0].predicate) if world.red_objectives else ""
     for idx, asset in enumerate(assets):
         if asset.id != first_asset_id or asset.owner_service != source_service.id:
             continue
@@ -740,7 +735,7 @@ def _mutation_kind_target(world: WorldIR, family: str, target_service: str) -> t
         return "missing_idp_logs", "telemetry", target_service
     exposed_asset = next(
         (asset.id for asset in world.assets if asset.owner_service == target_service),
-        _predicate_inner(world.red_objectives[0].predicate) if world.red_objectives else target_service,
+        predicate_inner(world.red_objectives[0].predicate) if world.red_objectives else target_service,
     )
     if target_service == "svc-email":
         return "token_in_email", "asset", exposed_asset

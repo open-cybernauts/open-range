@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from collections.abc import Mapping
 
 from open_range.objectives import ObjectiveGraderSpec, evaluate_red_objectives, objective_grader_for_predicate
+from open_range.predicate_expr import parse_predicate, predicate_inner
 from open_range.world_ir import AssetSpec, ServiceSpec, WeaknessSpec, WorldIR
 
 
@@ -21,28 +22,28 @@ class PredicateEngine:
         return tuple(weakness for weakness in self.world.weaknesses if weakness.status == "seeded")
 
     def objective_target_asset(self, predicate: str) -> AssetSpec | None:
-        name, inner = _predicate_parts(predicate)
-        if not inner:
+        expr = parse_predicate(predicate)
+        if not expr.inner:
             return None
-        if name in {"dos", "intrusion_detected", "intrusion_contained", "service_health_above", "outbound_service"}:
+        if expr.name in {"dos", "intrusion_detected", "intrusion_contained", "service_health_above", "outbound_service"}:
             return None
         for asset in self.world.assets:
-            if asset.id == inner:
+            if asset.id == expr.inner:
                 return asset
         return None
 
     def objective_target_service(self, predicate: str) -> str | None:
-        name, inner = _predicate_parts(predicate)
+        expr = parse_predicate(predicate)
         asset = self.objective_target_asset(predicate)
         if asset is not None:
             return asset.owner_service
         if any(token in predicate for token in ("service_health_above", "intrusion_detected", "intrusion_contained")):
             return "svc-siem"
-        if name in {"dos", "outbound_service", "unauthorized_admin_login", "privilege_escalation"} and inner:
+        if expr.name in {"dos", "outbound_service", "unauthorized_admin_login", "privilege_escalation"} and expr.inner:
             for service in self.world.services:
-                if service.id == inner:
+                if service.id == expr.inner:
                     return service.id
-            if name in {"unauthorized_admin_login", "privilege_escalation"}:
+            if expr.name in {"unauthorized_admin_login", "privilege_escalation"}:
                 return "svc-idp"
         return None
 
@@ -58,7 +59,7 @@ class PredicateEngine:
             predicate,
             owner_service=asset.owner_service if asset is not None else "",
             asset_location=asset.location if asset is not None else "",
-            target_id=_predicate_inner(predicate),
+            target_id=predicate_inner(predicate),
             default_service=self.objective_target_service(predicate) or "",
         )
 
@@ -196,14 +197,3 @@ def _shortest_path(start: str, target: str, adjacency: dict[str, set[str]]) -> t
             seen.add(neighbor)
             queue.append((neighbor, path + (neighbor,)))
     return (start, target)
-
-
-def _predicate_parts(predicate: str) -> tuple[str, str]:
-    if "(" not in predicate or ")" not in predicate:
-        return predicate.strip(), ""
-    name, rest = predicate.split("(", 1)
-    return name.strip(), rest.rsplit(")", 1)[0].strip()
-
-
-def _predicate_inner(predicate: str) -> str:
-    return _predicate_parts(predicate)[1]

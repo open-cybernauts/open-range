@@ -20,7 +20,9 @@ import random
 from pathlib import Path
 from typing import Any
 
-from open_range import BuildConfig, generate_trace_dataset, load_bundled_manifest
+from open_range.build_config import BuildConfig
+from open_range.resources import load_bundled_manifest
+from open_range.tracegen import generate_trace_dataset
 
 DEFAULT_MODEL = "HuggingFaceTB/SmolLM2-360M-Instruct"
 TRACE_BUILD_CONFIG = BuildConfig(validation_profile="graph_only")

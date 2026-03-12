@@ -4,13 +4,13 @@ from pathlib import Path
 
 import yaml
 
-from open_range import (
-    BuildPipeline,
+from open_range.manifest import validate_manifest
+from open_range.pipeline import BuildPipeline
+from open_range.resources import (
     bundled_manifest_names,
     bundled_manifest_path,
     load_bundled_manifest,
     load_bundled_manifest_registry,
-    validate_manifest,
 )
 
 

@@ -18,26 +18,24 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from open_range import BuildConfig, BuildPipeline, EpisodeConfig, FileSnapshotStore, FrontierMutationPolicy, PopulationStats, load_bundled_manifest
-from open_range.probe_planner import runtime_action
+from open_range.build_config import OFFLINE_BUILD_CONFIG
+from open_range.curriculum import FrontierMutationPolicy, PopulationStats
+from open_range.decision_surface import candidate_actions, teacher_action
+from open_range.episode_config import EpisodeConfig
+from open_range.pipeline import BuildPipeline
+from open_range.resources import load_bundled_manifest
 from open_range.runtime import ReferenceDrivenRuntime
-from open_range.runtime_types import Action, Observation
 from open_range.snapshot import RuntimeSnapshot
+from open_range.store import FileSnapshotStore
 from open_range.training_data import (
-    TraceCandidate,
     TraceLineage,
     build_decision_prompt,
-    normalize_trace_action,
-    render_action_text,
     render_candidate_completion,
-    trace_benchmark_tags,
-    trace_weaknesses,
 )
 
 
 DEFAULT_BASE_MODEL = "HuggingFaceTB/SmolLM2-360M-Instruct"
 DEFAULT_ADAPTER = "/tmp/openrange-sft-tiny-split/adapter"
-OFFLINE_BUILD_CONFIG = BuildConfig(validation_profile="graph_only")
 
 
 def _default_manifest_name() -> str:
@@ -64,7 +62,7 @@ def teacher_pick_rate(picks: list[dict[str, Any]]) -> float:
     return sum(1 for pick in picks if pick.get("chosen_label") == "teacher") / len(picks)
 
 
-def build_prompt(snapshot: RuntimeSnapshot, observation: Observation, candidates: tuple[TraceCandidate, ...], decision_index: int) -> str:
+def build_prompt(snapshot: RuntimeSnapshot, observation, candidates, decision_index: int) -> str:
     return (
         "<system>\n"
         "You are the red operator in OpenRange. "
@@ -87,8 +85,8 @@ def build_prompt(snapshot: RuntimeSnapshot, observation: Observation, candidates
             decision_index=decision_index,
             observation=observation,
             candidate_actions=candidates,
-            weaknesses=trace_weaknesses(snapshot),
-            benchmark_tags=trace_benchmark_tags(snapshot),
+            weaknesses=(),
+            benchmark_tags=(),
             trace_source="runtime",
             teacher_source="reference_runtime",
             split="test",
@@ -98,68 +96,18 @@ def build_prompt(snapshot: RuntimeSnapshot, observation: Observation, candidates
     )
 
 
-def red_candidates(runtime: ReferenceDrivenRuntime, snapshot: RuntimeSnapshot) -> tuple[TraceCandidate, ...]:
-    expected = runtime._next_red_step()  # bounded eval probe: candidate set includes the exact next reference action
-    if expected is None:
-        sleep = Action(actor_id="red", role="red", kind="sleep", payload={})
-        return (
-            TraceCandidate(label="sleep", text=render_action_text(sleep), action=sleep, counterfactual_label="sleep"),
-        )
-
-    exact = normalize_trace_action(snapshot, runtime_action("red", expected))
-    candidates = [
-        TraceCandidate(label="teacher", text=render_action_text(exact), action=exact, counterfactual_label="teacher"),
-    ]
-
-    target = str(exact.payload.get("target", ""))
-    if exact.kind == "api":
-        wrong_root = Action(actor_id="red", role="red", kind="api", payload={"target": target, "path": "/"})
-        candidates.append(
-            TraceCandidate(
-                label="root_probe",
-                text=render_action_text(wrong_root),
-                action=wrong_root,
-                counterfactual_label="probe",
-            )
-        )
-        if target != "svc-web":
-            web_probe = Action(actor_id="red", role="red", kind="api", payload={"target": "svc-web", "path": "/"})
-            candidates.append(
-                TraceCandidate(
-                    label="web_probe",
-                    text=render_action_text(web_probe),
-                    action=web_probe,
-                    counterfactual_label="probe",
-                )
-            )
-    else:
-        recon = Action(actor_id="red", role="red", kind="shell", payload={"target": target, "command": "cat /etc/hosts"})
-        candidates.append(
-            TraceCandidate(
-                label="recon_hosts",
-                text=render_action_text(recon),
-                action=recon,
-                counterfactual_label="probe",
-            )
-        )
-        scan = Action(actor_id="red", role="red", kind="shell", payload={"target": target, "command": "ip -br a"})
-        candidates.append(
-            TraceCandidate(
-                label="recon_net",
-                text=render_action_text(scan),
-                action=scan,
-                counterfactual_label="probe",
-            )
-        )
-
-    sleep = Action(actor_id="red", role="red", kind="sleep", payload={})
-    candidates.append(
-        TraceCandidate(label="sleep", text=render_action_text(sleep), action=sleep, counterfactual_label="sleep")
+def red_candidates(runtime: ReferenceDrivenRuntime, snapshot: RuntimeSnapshot):
+    expected = runtime._next_red_step()
+    return candidate_actions(
+        snapshot,
+        actor="red",
+        observation=runtime._build_observation("red"),
+        expected_action=teacher_action(snapshot, "red", expected),
+        remaining_targets=runtime._remaining_red_targets(),
     )
-    return tuple(candidates)
 
 
-def score_candidates(model: Any, tokenizer: Any, prompt: str, candidates: tuple[TraceCandidate, ...]) -> list[tuple[TraceCandidate, float]]:
+def score_candidates(model: Any, tokenizer: Any, prompt: str, candidates) -> list[tuple[object, float]]:
     import torch
 
     prompt_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
@@ -267,7 +215,14 @@ def evaluate_model_rollouts(
                         if runtime.state().done:
                             break
                         raise
-                    candidates = red_candidates(runtime, snapshot)
+                    expected = runtime._next_red_step()
+                    candidates = candidate_actions(
+                        snapshot,
+                        actor="red",
+                        observation=decision.obs,
+                        expected_action=teacher_action(snapshot, "red", expected),
+                        remaining_targets=runtime._remaining_red_targets(),
+                    )
                     prompt = build_prompt(snapshot, decision.obs, candidates, turns)
                     ranked = score_candidates(model, tokenizer, prompt, candidates)
                     chosen, loss = ranked[0]

@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 
 from open_range.objectives import PUBLIC_OBJECTIVE_PREDICATE_NAMES
+from open_range.predicate_expr import parse_predicate
 
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
@@ -157,9 +158,9 @@ class ObjectivePredicate(_StrictModel):
 
     @model_validator(mode="after")
     def _validate_predicate_name(self) -> "ObjectivePredicate":
-        name = self.predicate.split("(", 1)[0].strip()
-        if name not in PUBLIC_OBJECTIVE_PREDICATE_NAMES:
-            raise ValueError(f"unsupported objective predicate {name!r}")
+        expr = parse_predicate(self.predicate)
+        if expr.name not in PUBLIC_OBJECTIVE_PREDICATE_NAMES:
+            raise ValueError(f"unsupported objective predicate {expr.name!r}")
         if "(" in self.predicate and not self.predicate.endswith(")"):
             raise ValueError("objective predicate must end with ')' when using arguments")
         return self

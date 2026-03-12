@@ -7,6 +7,7 @@ from typing import Protocol
 from open_range.build_config import BuildConfig, DEFAULT_BUILD_CONFIG
 from open_range.manifest import EnterpriseSaaSManifest, ManifestAsset, validate_manifest
 from open_range.objectives import objective_tags_for_predicate
+from open_range.predicate_expr import predicate_inner
 from open_range.world_ir import (
     AssetSpec,
     CredentialSpec,
@@ -296,7 +297,7 @@ class EnterpriseSaaSManifestCompiler:
         predicate: str,
         assets: tuple[AssetSpec, ...],
     ) -> ObjectiveSpec:
-        target = _predicate_inner(predicate)
+        target = predicate_inner(predicate)
         asset = next((item for item in assets if item.id == target), None)
         objective_tags = objective_tags_for_predicate(
             predicate,
@@ -503,9 +504,3 @@ class EnterpriseSaaSManifestCompiler:
         if role == "it_admin":
             return ("review_idp", "triage_alerts", "reset_password")
         return ("check_mail", "browse_app", "access_fileshare")
-
-
-def _predicate_inner(predicate: str) -> str:
-    if "(" not in predicate or ")" not in predicate:
-        return ""
-    return predicate.split("(", 1)[1].rsplit(")", 1)[0].strip()

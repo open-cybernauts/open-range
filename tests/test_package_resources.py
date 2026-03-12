@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from open_range import (
+from open_range.resources import (
     bundled_docs_dir,
     bundled_schema_dir,
     load_bundled_doc,

@@ -9,21 +9,18 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from open_range import (
-    BuildConfig,
-    BuildPipeline,
-    EpisodeConfig,
-    FileSnapshotStore,
-    FrontierMutationPolicy,
-    PopulationStats,
-    ScriptedRuntimeAgent,
-    ReferenceSimPlane,
-    ReferenceDrivenRuntime,
-    load_bundled_manifest,
-)
-from open_range.probe_planner import runtime_action
-from open_range.runtime_types import Action, EpisodeScore
+from open_range.build_config import OFFLINE_BUILD_CONFIG
+from open_range.curriculum import FrontierMutationPolicy, PopulationStats
+from open_range.decision_surface import reference_trace_pairs, trace_actions
+from open_range.driver import ScriptedRuntimeAgent
+from open_range.episode_config import EpisodeConfig
+from open_range.pipeline import BuildPipeline
+from open_range.resources import load_bundled_manifest
+from open_range.runtime import ReferenceDrivenRuntime
+from open_range.runtime_types import EpisodeScore
+from open_range.sim import ReferenceSimPlane
 from open_range.snapshot import RuntimeSnapshot, Snapshot
+from open_range.store import FileSnapshotStore
 
 
 def _default_manifest_name() -> str:
@@ -44,25 +41,13 @@ def _load_manifest(source: str | Path | None) -> dict[str, Any]:
     return load_bundled_manifest(str(source))
 
 
-def _actions_for(snapshot: RuntimeSnapshot, actor: str, *, trace_index: int) -> list[Action]:
-    trace = (
-        snapshot.reference_bundle.reference_attack_traces[trace_index]
-        if actor == "red"
-        else snapshot.reference_bundle.reference_defense_traces[trace_index]
-    )
-    actions = [runtime_action(actor, step) for step in trace.steps]
-    if actions:
-        return actions
-    return [Action(actor_id=actor, role=actor, kind="sleep", payload={})]
-
-
 def _scripted_agent(snapshot: RuntimeSnapshot, actor: str, *, trace_index: int) -> ScriptedRuntimeAgent:
-    return ScriptedRuntimeAgent(_actions_for(snapshot, actor, trace_index=trace_index))
+    return ScriptedRuntimeAgent(trace_actions(snapshot, actor, trace_index=trace_index))
 
 
 def _run_mode(snapshot: RuntimeSnapshot, episode_config: EpisodeConfig) -> dict[str, Any]:
     pair_reports: list[dict[str, Any]] = []
-    for attack_idx, defense_idx in _reference_pairs(snapshot, episode_config.mode):
+    for attack_idx, defense_idx in reference_trace_pairs(snapshot, episode_config.mode):
         runtime = ReferenceDrivenRuntime()
         red_agent = _scripted_agent(snapshot, "red", trace_index=attack_idx)
         blue_agent = _scripted_agent(snapshot, "blue", trace_index=defense_idx)
@@ -149,18 +134,6 @@ def _aggregate_pair_reports(pair_reports: list[dict[str, Any]], *, mode: str) ->
         "red_win_rate": sum(1 for entry in pair_reports if entry["winner"] == "red") / total if total else 0.0,
         "blue_win_rate": sum(1 for entry in pair_reports if entry["winner"] == "blue") / total if total else 0.0,
     }
-
-
-def _reference_pairs(snapshot: RuntimeSnapshot, mode: str) -> tuple[tuple[int, int], ...]:
-    attack_count = max(1, len(snapshot.reference_bundle.reference_attack_traces))
-    defense_count = max(1, len(snapshot.reference_bundle.reference_defense_traces))
-    if mode == "red_only":
-        return tuple((idx, idx % defense_count) for idx in range(attack_count))
-    if mode in {"blue_only_live", "blue_only_from_prefix"}:
-        return tuple((idx % attack_count, idx) for idx in range(defense_count))
-    count = max(attack_count, defense_count)
-    return tuple((idx % attack_count, idx % defense_count) for idx in range(count))
-
 
 def _population_stats(snapshot: Snapshot, episodes: list[dict[str, Any]], *, split: str, novelty: float) -> PopulationStats:
     total = len(episodes)
@@ -350,4 +323,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-OFFLINE_BUILD_CONFIG = BuildConfig(validation_profile="graph_only")

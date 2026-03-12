@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 
 from open_range.cluster import BootedRelease
 from open_range.code_web import code_web_cleanup_commands, code_web_guard_path
+from open_range.runtime_events import action_target
 from open_range.runtime_types import Action
 from open_range.snapshot import Snapshot
 from open_range.world_ir import ServiceSpec, WeaknessSpec
@@ -106,7 +107,7 @@ class PodActionBackend:
 
     def _execute_control(self, action: Action) -> ActionExecution:
         assert self._release is not None
-        target = _action_target(action)
+        target = action_target(action)
         directive = str(action.payload.get("action", "contain")).lower()
         if target not in self._service_by_id:
             return ActionExecution(
@@ -139,7 +140,7 @@ class PodActionBackend:
                 ok=False,
                 service_health=self.service_health(),
             )
-        target = _action_target(action)
+        target = action_target(action)
         if target and target in self._service_by_id:
             if self._is_contained(target):
                 return ActionExecution(
@@ -176,7 +177,7 @@ class PodActionBackend:
         raise ValueError(f"unsupported runner role: {action.role}")
 
     def _api_command(self, action: Action) -> str:
-        target = _action_target(action)
+        target = action_target(action)
         service = self._service_by_id.get(target)
         if service is None:
             return f"echo unknown target {target}; exit 1"
@@ -201,7 +202,7 @@ class PodActionBackend:
         command = str(action.payload.get("command", "")).strip()
         if command:
             return command
-        target = _action_target(action)
+        target = action_target(action)
         if action.role == "blue" and target == "svc-siem":
             return "wget -qO- http://svc-siem:9200/all.log | tail -n 20"
         if target in self._service_by_id:
@@ -215,7 +216,7 @@ class PodActionBackend:
         return "true"
 
     def _mail_command(self, action: Action) -> str:
-        target = _action_target(action) or "svc-email"
+        target = action_target(action) or "svc-email"
         service = self._service_by_id.get(target)
         if service is None:
             return f"echo unknown mail target {target}; exit 1"
@@ -275,17 +276,6 @@ class PodActionBackend:
     def _weakness_for(self, target: str) -> WeaknessSpec | None:
         assert self._snapshot is not None
         return next((weak for weak in self._snapshot.world.weaknesses if weak.target == target), None)
-
-
-def _action_target(action: Action) -> str:
-    target = action.payload.get("target")
-    if isinstance(target, str) and target:
-        return target
-    service = action.payload.get("service")
-    if isinstance(service, str) and service:
-        return service
-    return ""
-
 
 def _green_sandbox_name(persona_id: str) -> str:
     safe = "".join(ch.lower() if ch.isalnum() else "-" for ch in persona_id).strip("-")

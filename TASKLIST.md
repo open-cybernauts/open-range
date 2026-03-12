@@ -218,6 +218,15 @@ Rules:
 - [x] Narrow default decision-training prompts to the true runtime observation surface and keep evaluator metadata out of prompt text
 - [x] Strengthen benchmark-aligned live objective grading for event-backed objectives beyond pure linked-event checks
 - [x] Exercise multiple reference traces in the user-facing eval/demo surfaces instead of always using the first path
+
+## Phase 24 - Codebase Simplification
+
+- [x] Add shared build-config presets for offline structural and offline reference workflows
+- [x] Centralize predicate parsing into one typed helper and remove duplicate string-splitting helpers
+- [x] Extract shared decision-surface generation so trace export, scripted eval, and model probes use the same candidate logic
+- [x] Split red/green event and objective-mapping logic out of `runtime.py`
+- [x] Replace repeated large manifest fixtures in tests with shared support helpers
+- [x] Narrow the root package surface so internal scripts/tests import from owning modules instead of one giant `__init__`
 - [x] Align top-level contributor guidance with the standalone package architecture
 
 ## Audit notes

@@ -12,6 +12,7 @@ from open_range.green import GreenScheduler, ScriptedGreenScheduler
 from open_range.predicates import PredicateEngine
 from open_range.probe_planner import runtime_action as reference_runtime_action
 from open_range.rewards import RewardEngine
+from open_range.runtime_events import action_target, green_events_for_action, red_events_for_step
 from open_range.runtime_types import (
     Action,
     ActionResult,
@@ -354,9 +355,19 @@ class ReferenceDrivenRuntime:
         )
 
     def _act_green(self, action: Action) -> ActionResult:
-        target = str(action.payload.get("service", action.payload.get("target", "")))
+        target = action_target(action)
         live = self._execute_live_action(action)
-        emitted = self._green_events_for_action(action, live, target) if live.ok else ()
+        emitted = (
+            green_events_for_action(
+                action,
+                live_recovery_applied=live.recovery_applied,
+                target=target,
+                emit_event=self._emit_event,
+                service_surfaces=self._service_surfaces,
+            )
+            if live.ok
+            else ()
+        )
         self._state.sim_time = round(min(self._state.sim_time + 0.01, self._episode_config.episode_horizon), 4)
         return ActionResult(
             action=action,
@@ -368,64 +379,12 @@ class ReferenceDrivenRuntime:
             done=self._state.done,
         )
 
-    def _green_events_for_action(
-        self,
-        action: Action,
-        live: ActionExecution,
-        target: str,
-    ) -> tuple[RuntimeEvent, ...]:
-        branch = str(action.payload.get("branch", "")).lower()
-        reported_target = str(action.payload.get("reported_target", target)) or target
-        if branch == "report_suspicious_activity":
-            return (
-                self._emit_event(
-                    event_type="DetectionAlertRaised",
-                    actor="green",
-                    source_entity=action.actor_id,
-                    target_entity=reported_target,
-                    malicious=False,
-                    observability_surfaces=("svc-siem",),
-                ),
-            )
-        if branch == "reset_password" and live.recovery_applied:
-            return (
-                self._emit_event(
-                    event_type="RecoveryCompleted",
-                    actor="green",
-                    source_entity=action.actor_id,
-                    target_entity=reported_target,
-                    malicious=False,
-                    observability_surfaces=self._service_surfaces(target),
-                ),
-            )
-        if branch == "open_it_ticket":
-            return (
-                self._emit_event(
-                    event_type="DetectionAlertRaised",
-                    actor="green",
-                    source_entity=action.actor_id,
-                    target_entity=reported_target,
-                    malicious=False,
-                    observability_surfaces=("svc-siem",),
-                ),
-            )
-        return (
-            self._emit_event(
-                event_type="BenignUserAction",
-                actor="green",
-                source_entity=action.actor_id,
-                target_entity=target,
-                malicious=False,
-                observability_surfaces=self._service_surfaces(target),
-            ),
-        )
-
     def _act_red(self, action: Action, *, internal: bool = False) -> ActionResult:
         if self._state.red_session is not None:
             self._state.red_session.action_count += 1
 
         emitted: list[RuntimeEvent] = []
-        target = _action_target(action)
+        target = action_target(action)
         exec_action = action
         if self.action_backend is not None:
             payload = dict(action.payload)
@@ -446,7 +405,16 @@ class ReferenceDrivenRuntime:
         elif expected is not None and live.ok and self._matches_step(action, expected, live.stdout):
             self._red_progress += 1
             stdout = f"red advanced on {target}"
-            emitted = self._events_for_red_step(expected, action)
+            batch = red_events_for_step(
+                expected,
+                action,
+                last_red_target=self._last_red_target,
+                emit_event=self._emit_event,
+                service_surfaces=self._service_surfaces,
+            )
+            emitted = list(batch.events)
+            self._red_objectives_satisfied.update(batch.satisfied_objectives)
+            self._last_red_target = batch.last_red_target
         else:
             stdout = live.stdout or f"red executed on {target or 'unknown target'}"
 
@@ -516,7 +484,7 @@ class ReferenceDrivenRuntime:
                 )
                 stdout = "finding rejected as false positive"
         elif action.kind == "control":
-            target = _action_target(action)
+            target = action_target(action)
             directive = str(action.payload.get("action", "contain")).lower()
             remaining_targets = self._remaining_red_targets()
             continuity_before = self._state.continuity
@@ -620,169 +588,6 @@ class ReferenceDrivenRuntime:
             done=self._state.done,
         )
 
-    def _events_for_red_step(self, expected, action: Action) -> list[RuntimeEvent]:
-        emitted: list[RuntimeEvent] = []
-        target = expected.target
-        step_action = str(expected.payload.get("action", ""))
-        asset_id = str(expected.payload.get("asset", ""))
-        objective = str(expected.payload.get("objective", "")).strip()
-
-        if step_action == "initial_access":
-            emitted.append(
-                self._emit_event(
-                    event_type="InitialAccess",
-                    actor="red",
-                    source_entity=action.actor_id,
-                    target_entity=target,
-                    malicious=True,
-                    observability_surfaces=self._service_surfaces(target),
-                )
-            )
-        elif step_action == "click_lure":
-            emitted.append(
-                self._emit_event(
-                    event_type="InitialAccess",
-                    actor="red",
-                    source_entity=action.actor_id,
-                    target_entity=target,
-                    malicious=True,
-                    observability_surfaces=self._service_surfaces(target),
-                )
-            )
-        elif step_action == "traverse":
-            emitted.append(
-                self._emit_event(
-                    event_type="CrossZoneTraversal",
-                    actor="red",
-                    source_entity=self._last_red_target or action.actor_id,
-                    target_entity=target,
-                    malicious=True,
-                    observability_surfaces=self._service_surfaces(target),
-                )
-            )
-        elif step_action == "collect_secret":
-            emitted.extend(self._events_for_secret_collection(target, asset_id, objective=objective))
-        elif step_action == "abuse_identity":
-            emitted.extend(self._events_for_identity_abuse(target, objective=objective))
-        elif step_action == "abuse_workflow":
-            emitted.extend(self._events_for_workflow_abuse(target, objective=objective))
-        elif step_action == "satisfy_objective":
-            emitted.extend(self._events_for_objective(target, objective=objective, asset_id=asset_id))
-        self._last_red_target = target
-        return emitted
-
-    def _events_for_secret_collection(self, target: str, asset_id: str, *, objective: str = "") -> list[RuntimeEvent]:
-        if objective:
-            return self._events_for_objective(target, objective=objective, asset_id=asset_id)
-        if not asset_id:
-            return [
-                self._emit_event(
-                    event_type="SensitiveAssetRead",
-                    actor="red",
-                    source_entity=target,
-                    target_entity=target,
-                    malicious=True,
-                    observability_surfaces=self._service_surfaces(target),
-                )
-            ]
-        if "cred" in asset_id or "token" in asset_id:
-            self._red_objectives_satisfied.add(f"credential_obtained({asset_id})")
-            return [
-                self._emit_event(
-                    event_type="CredentialObtained",
-                    actor="red",
-                    source_entity=target,
-                    target_entity=asset_id,
-                    malicious=True,
-                    observability_surfaces=self._service_surfaces(target),
-                    linked_objective_predicates=(f"credential_obtained({asset_id})",),
-                )
-            ]
-        self._red_objectives_satisfied.add(f"asset_read({asset_id})")
-        return [
-            self._emit_event(
-                event_type="SensitiveAssetRead",
-                actor="red",
-                source_entity=target,
-                target_entity=asset_id,
-                malicious=True,
-                observability_surfaces=self._service_surfaces(target),
-                linked_objective_predicates=(f"asset_read({asset_id})",),
-            )
-        ]
-
-    def _events_for_identity_abuse(self, target: str, *, objective: str = "") -> list[RuntimeEvent]:
-        if objective:
-            return self._events_for_objective(target, objective=objective)
-        return [
-            self._emit_event(
-                event_type="CredentialObtained",
-                actor="red",
-                source_entity=target,
-                target_entity=target,
-                malicious=True,
-                observability_surfaces=self._service_surfaces(target),
-            ),
-            self._emit_event(
-                event_type="UnauthorizedCredentialUse",
-                actor="red",
-                source_entity=target,
-                target_entity=target,
-                malicious=True,
-                observability_surfaces=self._service_surfaces(target),
-            ),
-        ]
-
-    def _events_for_workflow_abuse(self, target: str, *, objective: str = "") -> list[RuntimeEvent]:
-        if objective:
-            return self._events_for_objective(target, objective=objective)
-        return [
-            self._emit_event(
-                event_type="UnauthorizedCredentialUse",
-                actor="red",
-                source_entity=target,
-                target_entity=target,
-                malicious=True,
-                observability_surfaces=self._service_surfaces(target),
-            )
-        ]
-
-    def _events_for_objective(self, target: str, *, objective: str, asset_id: str = "") -> list[RuntimeEvent]:
-        if not objective and not asset_id:
-            return []
-        objective = objective or (f"credential_obtained({asset_id})" if "cred" in asset_id else f"asset_read({asset_id})")
-        target_ref = _predicate_inner(objective) or asset_id or target
-        name = _predicate_name(objective)
-        surfaces = self._service_surfaces(target)
-        if name in {"credential_obtained", "unauthorized_admin_login"}:
-            event_type = "CredentialObtained" if name == "credential_obtained" else "UnauthorizedCredentialUse"
-        elif name in {"asset_read", "file_access", "db_access"}:
-            event_type = "SensitiveAssetRead"
-        elif name == "file_creation":
-            event_type = "PersistenceEstablished"
-        elif name == "db_modification":
-            event_type = "PrivilegeEscalation"
-        elif name == "privilege_escalation":
-            event_type = "PrivilegeEscalation"
-        elif name == "outbound_service":
-            event_type = "PersistenceEstablished"
-        elif name == "dos":
-            event_type = "ServiceDegraded"
-        else:
-            event_type = "SensitiveAssetRead"
-        self._red_objectives_satisfied.add(objective)
-        return [
-            self._emit_event(
-                event_type=event_type,
-                actor="red",
-                source_entity=target,
-                target_entity=target_ref,
-                malicious=True,
-                observability_surfaces=surfaces,
-                linked_objective_predicates=(objective,),
-            )
-        ]
-
     def _next_red_step(self):
         if self._snapshot is None:
             return None
@@ -801,7 +606,7 @@ class ReferenceDrivenRuntime:
 
     @staticmethod
     def _matches_step(action: Action, expected, live_stdout: str) -> bool:
-        if action.kind != expected.kind or _action_target(action) != expected.target:
+        if action.kind != expected.kind or action_target(action) != expected.target:
             return False
         if action.kind == "api":
             expected_path = expected.payload.get("path")
@@ -1198,25 +1003,3 @@ def _telemetry_delay(config: EpisodeConfig) -> float:
     if config.telemetry_delay_profile == "high":
         return 1.0
     return 0.5
-
-
-def _action_target(action: Action) -> str:
-    target = action.payload.get("target")
-    if isinstance(target, str) and target:
-        return target
-    service = action.payload.get("service")
-    if isinstance(service, str) and service:
-        return service
-    return ""
-
-
-def _predicate_name(predicate: str) -> str:
-    if "(" not in predicate or ")" not in predicate:
-        return predicate.strip()
-    return predicate.split("(", 1)[0].strip()
-
-
-def _predicate_inner(predicate: str) -> str:
-    if "(" not in predicate or ")" not in predicate:
-        return ""
-    return predicate.split("(", 1)[1].rsplit(")", 1)[0].strip()
