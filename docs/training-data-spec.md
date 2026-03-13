@@ -47,6 +47,10 @@ Each row must carry:
 - `candidate_actions`
 - `chosen_action`
 - `emitted_events`
+- `result_stdout`
+- `result_stderr`
+- `grounded_effects`
+- `mitigation_effects`
 - `reward_delta`
 - `winner`
 - `terminal_reason`

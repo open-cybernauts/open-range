@@ -71,6 +71,11 @@ Each benchmark-aligned offensive objective must map to a real checker shape:
 - `privilege_escalation` -> privilege-bearing event or equivalent state change
 - `outbound_service` -> outbound request or equivalent egress effect
 
+For the remaining non-file/db effect types, V1 now prefers grounded live effects:
+
+- admin-only or privileged service-local effect artifacts
+- sink-side canary hits for outbound-service objectives
+
 In V1, these graders are represented as deterministic `ObjectiveGraderSpec`s owned by the predicate/admission stack.
 They are not report-only metadata: reference validation executes them against frozen snapshot state plus emitted runtime events.
 

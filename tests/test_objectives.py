@@ -174,9 +174,7 @@ def test_live_outbound_grader_probes_ssrf_realizations_without_output_tokens() -
     class _Pods:
         async def exec(self, service: str, cmd: str, timeout: float = 10.0):
             del timeout
-            if service != "svc-web":
-                return SimpleNamespace(ok=False, stdout="", stderr="bad service")
-            if "file_get_contents($url" in cmd and "REMOTE_ADDR" in cmd and "/opt/openrange/footholds/" in cmd:
+            if service == "svc-siem" and "egress-canary" in cmd and world.weaknesses[0].id in cmd:
                 return SimpleNamespace(ok=True, stdout="", stderr="")
             return SimpleNamespace(ok=False, stdout="", stderr="miss")
 

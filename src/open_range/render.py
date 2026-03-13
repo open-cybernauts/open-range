@@ -235,7 +235,22 @@ def _service_command(service: ServiceSpec) -> list[str]:
         return [
             "/bin/sh",
             "-lc",
-            "mkdir -p /srv/http/siem && touch /srv/http/siem/all.log && busybox httpd -f -p 9200 -h /srv/http/siem",
+            (
+                "mkdir -p /srv/http/siem && touch /srv/http/siem/all.log /srv/http/siem/egress-canary.log && "
+                "("
+                "while true; do "
+                "{ "
+                "IFS= read -r request_line || exit 0; "
+                "printf '%s\\n' \"$request_line\" >> /srv/http/siem/egress-canary.log; "
+                "path=$(printf '%s' \"$request_line\" | awk '{print $2}'); "
+                "slug=${path##*/}; slug=${slug%%\\?*}; "
+                "body=\"OPENRANGE-EFFECT:egress:${slug}\"; "
+                "printf 'HTTP/1.1 200 OK\\r\\nContent-Type: text/plain\\r\\nContent-Length: %s\\r\\n\\r\\n%s' \"${#body}\" \"$body\"; "
+                "} | busybox nc -lp 9201 -q 1; "
+                "done"
+                ") & "
+                "busybox httpd -f -p 9200 -h /srv/http/siem"
+            ),
         ]
     return []
 
@@ -267,6 +282,13 @@ def _firewall_rules(
             if dep is None:
                 continue
             allow(from_zone, host_by_id[dep.host].zone, dep.ports)
+
+    for edge in world.telemetry_edges:
+        source = service_by_id.get(edge.source)
+        target = service_by_id.get(edge.target)
+        if source is None or target is None:
+            continue
+        allow(host_by_id[source.host].zone, host_by_id[target.host].zone, target.ports)
 
     role_zone_map = {
         role: host_by_id[user.primary_host].zone

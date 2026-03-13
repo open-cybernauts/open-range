@@ -79,7 +79,9 @@ def test_kind_renderer_emits_expected_files(tmp_path: Path):
     assert artifacts.chart_values["global"]["namePrefix"].startswith("enterprise-saas-v1-")
     assert "sandbox-red" in artifacts.chart_values["sandboxes"]
     assert artifacts.chart_values["services"]["svc-db"]["payloads"][0]["mountPath"] == "/docker-entrypoint-initdb.d/01-init.sql"
-    assert artifacts.chart_values["services"]["svc-siem"]["command"][-1].endswith("busybox httpd -f -p 9200 -h /srv/http/siem")
+    siem_command = artifacts.chart_values["services"]["svc-siem"]["command"][-1]
+    assert "busybox nc -lp 9201" in siem_command
+    assert "busybox httpd -f -p 9200 -h /srv/http/siem" in siem_command
     assert any(rule["fromZone"] == "external" and rule["toZone"] == "dmz" for rule in artifacts.chart_values["firewallRules"])
     assert artifacts.pinned_image_digests["svc-web"].startswith("php:8.1-apache@sha256:")
 

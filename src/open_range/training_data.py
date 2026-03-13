@@ -27,6 +27,7 @@ CounterfactualLabel = Literal[
     "sleep",
     "unknown",
 ]
+_HIDDEN_ACTION_PAYLOAD_KEYS = frozenset({"service_command"})
 
 
 class _StrictModel(BaseModel):
@@ -74,7 +75,11 @@ class TraceDecisionRow(_StrictModel):
     candidate_actions: tuple[TraceCandidate, ...] = Field(default_factory=tuple)
     chosen_action: Action
     chosen_action_text: str
+    result_stdout: str = ""
+    result_stderr: str = ""
     emitted_events: tuple[RuntimeEvent, ...] = Field(default_factory=tuple)
+    grounded_effects: tuple[str, ...] = Field(default_factory=tuple)
+    mitigation_effects: tuple[str, ...] = Field(default_factory=tuple)
     reward_delta: float = 0.0
     winner: str = ""
     terminal_reason: str = ""
@@ -113,6 +118,15 @@ def normalize_trace_action(snapshot: RuntimeSnapshot, action: Action) -> Action:
         return action
     payload = dict(action.payload)
     payload["action"] = "mitigate"
+    return action.model_copy(update={"payload": payload})
+
+
+def public_trace_action(action: Action) -> Action:
+    payload = {
+        key: value
+        for key, value in action.payload.items()
+        if key not in _HIDDEN_ACTION_PAYLOAD_KEYS
+    }
     return action.model_copy(update={"payload": payload})
 
 
@@ -186,6 +200,8 @@ def row_to_sft_record(row: TraceDecisionRow) -> dict[str, Any]:
         "chosen_label": selected.label,
         "winner": row.winner,
         "terminal_reason": row.terminal_reason,
+        "grounded_effects": list(row.grounded_effects),
+        "mitigation_effects": list(row.mitigation_effects),
     }
 
 
@@ -313,6 +329,56 @@ def trace_weaknesses(snapshot: RuntimeSnapshot) -> tuple[TraceWeakness, ...]:
 def trace_benchmark_tags(snapshot: RuntimeSnapshot) -> tuple[str, ...]:
     tags = {tag for weakness in snapshot.world.weaknesses for tag in weakness.benchmark_tags}
     return tuple(sorted(tags))
+
+
+def grounded_effects_for_result(
+    *,
+    stdout: str,
+    emitted_events: tuple[RuntimeEvent, ...],
+) -> tuple[str, ...]:
+    labels = {
+        event.event_type
+        for event in emitted_events
+        if event.event_type in {
+            "CredentialObtained",
+            "UnauthorizedCredentialUse",
+            "PrivilegeEscalation",
+            "SensitiveAssetRead",
+            "PersistenceEstablished",
+            "ServiceDegraded",
+        }
+    }
+    labels.update(
+        token
+        for token in stdout.split()
+        if token.startswith("OPENRANGE-EFFECT:") or token.startswith("OPENRANGE-FOOTHOLD:")
+    )
+    return tuple(sorted(labels))
+
+
+def mitigation_effects_for_result(
+    *,
+    action: Action,
+    stdout: str,
+    emitted_events: tuple[RuntimeEvent, ...],
+) -> tuple[str, ...]:
+    labels = {
+        event.event_type
+        for event in emitted_events
+        if event.event_type in {"ContainmentApplied", "PatchApplied", "RecoveryCompleted"}
+    }
+    if action.kind == "control":
+        directive = str(action.payload.get("action", "")).lower()
+        target = str(action.payload.get("target", ""))
+        if directive in {"contain", "patch", "mitigate", "recover", "restore"} and target:
+            labels.add(f"{directive}:{target}")
+    if "mitigation applied to " in stdout:
+        labels.add("mitigation_applied")
+    if "patch applied to " in stdout:
+        labels.add("patch_applied")
+    if "containment applied to " in stdout:
+        labels.add("containment_applied")
+    return tuple(sorted(labels))
 
 
 def _supports_service_native_patch(snapshot: RuntimeSnapshot, target: str) -> bool:

@@ -27,6 +27,9 @@ from open_range.training_data import (
     TraceDatasetReport,
     TraceDecisionRow,
     TraceLineage,
+    grounded_effects_for_result,
+    mitigation_effects_for_result,
+    public_trace_action,
     render_action_text,
     row_to_sft_record,
     trace_benchmark_tags,
@@ -269,6 +272,11 @@ class TraceDatasetGenerator:
             if expected is not None and runtime.matches_reference_step(chosen_action, expected, result.stdout):
                 teacher_progress[actor] += 1
             actor_decisions[actor] += 1
+            public_candidates = tuple(
+                candidate.model_copy(update={"action": public_trace_action(candidate.action)})
+                for candidate in candidates
+            )
+            public_action = public_trace_action(chosen_action)
             rows.append(
                 TraceDecisionRow(
                     trace_source=trace_source,  # type: ignore[arg-type]
@@ -289,10 +297,21 @@ class TraceDatasetGenerator:
                     role=actor,
                     decision_index=decision_index,
                     observation=decision.obs,
-                    candidate_actions=candidates,
-                    chosen_action=chosen_action,
-                    chosen_action_text=render_action_text(chosen_action),
+                    candidate_actions=public_candidates,
+                    chosen_action=public_action,
+                    chosen_action_text=render_action_text(public_action),
+                    result_stdout=result.stdout,
+                    result_stderr=result.stderr,
                     emitted_events=result.emitted_events,
+                    grounded_effects=grounded_effects_for_result(
+                        stdout=result.stdout,
+                        emitted_events=result.emitted_events,
+                    ),
+                    mitigation_effects=mitigation_effects_for_result(
+                        action=public_action,
+                        stdout=result.stdout,
+                        emitted_events=result.emitted_events,
+                    ),
                     reward_delta=result.reward_delta,
                     winner="",
                     terminal_reason="",

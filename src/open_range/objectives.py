@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from open_range.async_utils import run_async
+from open_range.effect_markers import effect_marker_path, effect_marker_service, effect_marker_token
 from open_range.predicate_expr import parse_predicate
 
 
@@ -349,6 +350,9 @@ def _snapshot_mapping(snapshot: object, attr: str) -> dict[str, object]:
 
 
 def _probe_live_objective_effect(snapshot: object, pods: object, grader: ObjectiveGraderSpec) -> bool:
+    effect_paths = _effect_marker_specs(snapshot, grader)
+    if effect_paths and _probe_effect_paths(pods, effect_paths):
+        return True
     for weakness in _relevant_weaknesses(snapshot, grader):
         for service, command in _live_effect_probe_commands(weakness, grader):
             result = run_async(pods.exec(service, command, timeout=10.0))
@@ -369,6 +373,17 @@ def _requires_effect_probe(snapshot: object, grader: ObjectiveGraderSpec) -> boo
     if _relevant_weaknesses(snapshot, grader):
         return True
     return bool(_relevant_realizations(snapshot, grader))
+
+
+def _effect_marker_specs(snapshot: object, grader: ObjectiveGraderSpec) -> tuple[tuple[str, str, str], ...]:
+    matches: list[tuple[str, str, str]] = []
+    for weakness in _relevant_weaknesses(snapshot, grader):
+        service = effect_marker_service(weakness)
+        path = effect_marker_path(weakness)
+        token = effect_marker_token(weakness)
+        if service and path:
+            matches.append((service, path, token))
+    return tuple(dict.fromkeys(matches))
 
 
 def _relevant_weaknesses(snapshot: object, grader: ObjectiveGraderSpec) -> tuple[object, ...]:
@@ -471,13 +486,9 @@ def _live_effect_probe_commands(
         elif kind == "command_injection" and code_paths:
             commands.append((target, _grep_all(code_paths[0], "shell_exec", "printf 'scan=%s")))
         elif kind == "ssrf" and code_paths:
-            internal_path = code_paths[1] if len(code_paths) > 1 else ""
-            seed_path = seed_paths[0] if seed_paths else ""
             parts = [_grep_all(code_paths[0], "file_get_contents($url")]
-            if internal_path:
-                parts.append(_grep_all(internal_path, "REMOTE_ADDR", "file_get_contents"))
-            if seed_path:
-                parts.append(_nonempty_file(seed_path))
+            if seed_paths:
+                commands.append((effect_marker_service(weakness), _grep_any(seed_paths[0], effect_marker_token(weakness), weakness.id)))
             commands.append((target, " && ".join(parts)))
 
     return tuple(commands)
@@ -497,6 +508,22 @@ def _probe_realizations(
         if expected_ref:
             command += f" && grep -q {shlex.quote(expected_ref)} {shlex.quote(path)}"
         elif require_nonempty:
+            command += f" && test -s {shlex.quote(path)}"
+        result = run_async(pods.exec(service, command, timeout=10.0))
+        if result.ok:
+            return True
+    return False
+
+
+def _probe_effect_paths(
+    pods: object,
+    effect_paths: tuple[tuple[str, str, str], ...],
+) -> bool:
+    for service, path, token in effect_paths:
+        command = f"test -f {shlex.quote(path)}"
+        if token:
+            command += f" && grep -Fq {shlex.quote(token)} {shlex.quote(path)}"
+        else:
             command += f" && test -s {shlex.quote(path)}"
         result = run_async(pods.exec(service, command, timeout=10.0))
         if result.ok:
@@ -575,10 +602,9 @@ def _effect_tokens(grader: ObjectiveGraderSpec) -> tuple[str, ...]:
     elif grader.objective_tag == "outbound_service":
         tokens.update(
             {
-                "http://127.0.0.1",
+                "openrange-effect:egress:",
+                "openrange-egress",
                 "fetch",
-                "openrange-foothold:",
-                "url",
             }
         )
     return tuple(sorted(tokens))

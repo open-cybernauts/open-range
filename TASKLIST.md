@@ -242,6 +242,15 @@ Rules:
 - [x] Make live admin/privilege/egress output grading prefer weakness-specific live effect probes over generic output-token matches
 - [x] Re-verify the hidden-surface boundary and stronger live graders with targeted and full tests
 
+## Phase 28 - Grounded Effect Realism
+
+- [x] Make `unauthorized_admin_login` and `privilege_escalation` rely on service-local effect artifacts instead of generic temp markers
+- [x] Make `outbound_service` use a sink-side SIEM canary hit instead of a localhost-only SSRF proof
+- [x] Allow private reference-only shell steps to execute target-local probe commands when a live backend is present
+- [x] Clear service-local effect artifacts during live counterfactual replay so necessity and determinism are not polluted by stale effects
+- [x] Export grounded effects and mitigation effects explicitly in branch-native trace rows
+- [x] Keep training-facing action JSON free of internal-only execution helpers
+
 ## Phase 24 - Codebase Simplification
 
 - [x] Add shared build-config presets for offline structural and offline reference workflows

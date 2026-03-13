@@ -89,7 +89,7 @@ class EnterpriseSaaSManifestCompiler:
             "service_id": "svc-siem",
             "zone": "management",
             "exposure": "management",
-            "ports": (514, 9200),
+            "ports": (514, 9200, 9201),
             "dependencies": (),
             "telemetry": ("ingest", "alert"),
         },

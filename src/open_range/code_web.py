@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import textwrap
 from dataclasses import dataclass
+from urllib.parse import quote
 
+from open_range.effect_markers import (
+    effect_marker_content,
+    effect_marker_path,
+    effect_marker_service,
+    effect_marker_token,
+)
 from open_range.world_ir import WeaknessRealizationSpec, WeaknessSpec, WorldIR
 
 
@@ -45,10 +53,10 @@ def code_web_realizations(world: WorldIR, weakness: WeaknessSpec) -> tuple[Weakn
     if weakness.kind == "ssrf":
         realizations.append(
             WeaknessRealizationSpec(
-                kind="code",
-                service=weakness.target,
-                path=_internal_resource_route_path(weakness),
-                summary="localhost-only metadata route fetched by the vulnerable SSRF handler",
+                kind="seed_data",
+                service=effect_marker_service(weakness),
+                path=effect_marker_path(weakness),
+                summary="sink-side egress canary log written when the vulnerable SSRF handler reaches the telemetry sink",
             )
         )
     return tuple(realizations)
@@ -78,7 +86,7 @@ def code_web_template(world: WorldIR, weakness: WeaknessSpec) -> CodeWebTemplate
             route_path="/admin.php",
             summary="admin handler trusts a debug switch instead of enforcing authentication state",
             witness_query=(("debug", "1"), ("as", "admin")),
-            expected_contains=_foothold_token(world, weakness),
+            expected_contains=effect_marker_token(weakness),
         )
     if weakness.kind == "path_traversal":
         return CodeWebTemplate(
@@ -91,14 +99,14 @@ def code_web_template(world: WorldIR, weakness: WeaknessSpec) -> CodeWebTemplate
         return CodeWebTemplate(
             route_path="/fetch.php",
             summary="URL fetcher can retrieve internal-only HTTP resources without egress controls",
-            witness_query=(("url", f"http://127.0.0.1{_internal_resource_http_path(weakness)}"),),
-            expected_contains=_foothold_token(world, weakness),
+            witness_query=(("url", _egress_canary_url(weakness)),),
+            expected_contains=effect_marker_token(weakness),
         )
     return CodeWebTemplate(
         route_path="/ops.php",
         summary="operations handler shells out with untrusted input",
         witness_query=(("host", f"127.0.0.1;cat {_foothold_path(weakness)}"),),
-        expected_contains=_foothold_token(world, weakness),
+        expected_contains=effect_marker_token(weakness),
     )
 
 
@@ -123,8 +131,8 @@ def code_web_realization_content(world: WorldIR, weakness: WeaknessSpec, realiza
             token={_foothold_token(world, weakness)}
             """
         )
-    if realization.path == _internal_resource_route_path(weakness):
-        return _internal_resource_route_template(weakness)
+    if realization.path == effect_marker_path(weakness):
+        return ""
     return _route_template(world, weakness)
 
 
@@ -145,6 +153,8 @@ def code_web_guard_path(weakness: WeaknessSpec) -> str:
 def _route_template(world: WorldIR, weakness: WeaknessSpec) -> str:
     foothold_path = _foothold_path(weakness)
     guard_path = _guard_path(weakness)
+    effect_path = effect_marker_path(weakness)
+    effect_content = _php_string_literal(effect_marker_content(weakness))
     if weakness.kind == "sql_injection":
         return textwrap.dedent(
             f"""\
@@ -196,7 +206,9 @@ def _route_template(world: WorldIR, weakness: WeaknessSpec) -> str:
             $debug = $_GET['debug'] ?? '0';
             $as = $_GET['as'] ?? 'user';
             if (($debug === '1' || ($_GET['impersonate'] ?? '') === 'it_admin') && $as === 'admin') {{
-                echo file_get_contents('{foothold_path}');
+                @mkdir(dirname('{effect_path}'), 0777, true);
+                file_put_contents('{effect_path}', {effect_content});
+                echo file_get_contents('{effect_path}');
                 return;
             }}
             http_response_code(403);
@@ -268,29 +280,18 @@ def _route_template(world: WorldIR, weakness: WeaknessSpec) -> str:
         $host = $_GET['host'] ?? '127.0.0.1';
         $cmd = "printf 'scan=%s\\n' " . $host;
         $output = shell_exec($cmd . " 2>&1");
+        if (strpos((string)$output, 'OPENRANGE-FOOTHOLD:') !== false) {{
+            @mkdir(dirname('{effect_path}'), 0777, true);
+            file_put_contents('{effect_path}', {effect_content});
+            header('Content-Type: text/plain');
+            echo file_get_contents('{effect_path}');
+            return;
+        }}
         header('Content-Type: text/plain');
         echo $output;
         ?>
         """
     )
-
-
-def _internal_resource_route_template(weakness: WeaknessSpec) -> str:
-    return textwrap.dedent(
-        f"""\
-        <?php
-        if (($_SERVER['REMOTE_ADDR'] ?? '') !== '127.0.0.1') {{
-            http_response_code(403);
-            echo 'local only';
-            return;
-        }}
-        header('Content-Type: text/plain');
-        echo file_get_contents('{_foothold_path(weakness)}');
-        ?>
-        """
-    )
-
-
 def _preferred_asset(world: WorldIR) -> str:
     for asset in world.assets:
         if asset.confidentiality == "critical":
@@ -314,9 +315,10 @@ def _guard_path(weakness: WeaknessSpec) -> str:
     return f"/var/www/html/.openrange/guards/{weakness.id}.patched"
 
 
-def _internal_resource_route_path(weakness: WeaknessSpec) -> str:
-    return f"/var/www/html/.openrange/internal-{weakness.id}.php"
+def _egress_canary_url(weakness: WeaknessSpec) -> str:
+    token = quote(effect_marker_token(weakness), safe="")
+    return f"http://svc-siem:9201/openrange-egress/{weakness.id}?token={token}"
 
 
-def _internal_resource_http_path(weakness: WeaknessSpec) -> str:
-    return f"/.openrange/internal-{weakness.id}.php"
+def _php_string_literal(text: str) -> str:
+    return json.dumps(text)

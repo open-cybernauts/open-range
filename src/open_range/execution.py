@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from open_range.async_utils import run_async
 from open_range.cluster import BootedRelease
 from open_range.code_web import code_web_cleanup_commands, code_web_guard_path
+from open_range.effect_markers import effect_marker_cleanup_command
 from open_range.runtime_events import action_target
 from open_range.runtime_types import Action
 from open_range.snapshot import RuntimeSnapshot
@@ -85,6 +86,9 @@ class PodActionBackend:
         if action.kind == "control":
             return self._execute_control(action)
         if action.kind == "shell":
+            service_command = str(action.payload.get("service_command", "")).strip()
+            if service_command:
+                return self._run_on_target_service(action, service_command)
             return self._run_in_runner(action, self._shell_command(action))
         if action.kind == "mail":
             return self._run_in_runner(action, self._mail_command(action))
@@ -156,6 +160,35 @@ class PodActionBackend:
                 )
         runner = self._runner_for(action)
         result = run_async(self._release.pods.exec(runner, command, timeout=action.timeout_s))
+        return ActionExecution(
+            stdout=result.stdout.strip(),
+            stderr=result.stderr.strip(),
+            ok=result.ok,
+            service_health=self.service_health(),
+        )
+
+    def _run_on_target_service(self, action: Action, command: str) -> ActionExecution:
+        assert self._release is not None
+        target = action_target(action)
+        if not target or target not in self._service_by_id:
+            return ActionExecution(
+                stderr="missing or unknown target service",
+                ok=False,
+                service_health=self.service_health(),
+            )
+        if self._is_contained(target):
+            return ActionExecution(
+                stderr=f"target {target} is contained",
+                ok=False,
+                service_health=self.service_health(),
+            )
+        if self._is_patched(target):
+            return ActionExecution(
+                stderr=f"target {target} is patched",
+                ok=False,
+                service_health=self.service_health(),
+            )
+        result = run_async(self._release.pods.exec(target, command, timeout=action.timeout_s))
         return ActionExecution(
             stdout=result.stdout.strip(),
             stderr=result.stderr.strip(),
@@ -263,6 +296,9 @@ class PodActionBackend:
     def _patch_command_for(self, target: str) -> str:
         weakness = self._weakness_for(target)
         if weakness is not None and weakness.remediation_kind == "shell" and weakness.remediation_command:
+            cleanup = effect_marker_cleanup_command(weakness)
+            if cleanup:
+                return f"{weakness.remediation_command}\n{cleanup}"
             return weakness.remediation_command
         return "touch /tmp/openrange-patched"
 
@@ -271,6 +307,10 @@ class PodActionBackend:
         weakness = self._weakness_for(target)
         if weakness is not None and weakness.family == "code_web":
             cleanup.extend(code_web_cleanup_commands(weakness))
+        if weakness is not None:
+            effect_cleanup = effect_marker_cleanup_command(weakness)
+            if effect_cleanup:
+                cleanup.append(effect_cleanup)
         return " && ".join(cleanup)
 
     def _weakness_for(self, target: str) -> WeaknessSpec | None:

@@ -84,7 +84,10 @@ def test_synthesizer_realizes_exact_code_web_templates_and_witness_routes(tmp_pa
         first_step = reference_bundle.reference_attack_traces[0].steps[0]
         assert first_step.payload["path"] == route.removeprefix("/var/www/html")
         assert first_step.payload["query"]
-        assert first_step.payload["expect_contains"].startswith("OPENRANGE-FOOTHOLD:")
+        if kind in {"auth_bypass", "ssrf", "command_injection"}:
+            assert first_step.payload["expect_contains"].startswith("OPENRANGE-EFFECT:")
+        else:
+            assert first_step.payload["expect_contains"].startswith("OPENRANGE-FOOTHOLD:")
         assert not any(
             file.mount_path.startswith("/var/www/html/openrange-foothold-")
             for file in web_payloads

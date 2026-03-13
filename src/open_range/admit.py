@@ -1063,7 +1063,11 @@ def _looks_like_shortcut_payload(stdout: str) -> bool:
     text = stdout.strip()
     if not text:
         return False
-    return "OPENRANGE-FOOTHOLD:" in text or "admin_console=enabled" in text
+    return (
+        "OPENRANGE-FOOTHOLD:" in text
+        or "OPENRANGE-EFFECT:" in text
+        or "admin_console=enabled" in text
+    )
 
 
 def _artifact_shortcut_findings(world: WorldIR, artifacts: KindArtifacts) -> list[str]:

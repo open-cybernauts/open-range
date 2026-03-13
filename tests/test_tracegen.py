@@ -31,6 +31,8 @@ def test_generate_trace_dataset_writes_raw_and_decision_views(tmp_path: Path) ->
     assert {"red", "blue"} <= {row["role"] for row in raw_rows}
     assert {"red_only", "blue_only_live", "blue_only_from_prefix", "joint_pool"} <= {row["mode"] for row in raw_rows}
     assert all("candidate_actions" in row and row["candidate_actions"] for row in raw_rows)
+    assert all("grounded_effects" in row and "mitigation_effects" in row for row in raw_rows)
+    assert all("service_command" not in row["chosen_action"]["payload"] for row in raw_rows)
     assert all(len(entry["messages"]) == 3 for entry in sft_rows)
     assert all(entry["lineage_root_world_id"] for entry in sft_rows)
     assert all(entry["split"] in {"train", "val", "test"} for entry in sft_rows)

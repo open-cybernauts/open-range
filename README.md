@@ -152,12 +152,14 @@ Key rules:
 The offensive slice is documented separately in:
 
 - [docs/benchmark-offensive-coverage.md](/home/talian/priv/open-range/docs/benchmark-offensive-coverage.md)
+- [docs/effect-grounding.md](/home/talian/priv/open-range/docs/effect-grounding.md)
 
 Current implementation points:
 
 - exact `code_web` flaws carry benchmark tags plus benchmark-aligned `objective_tags`
 - red objectives compile with derived offensive objective tags where applicable
 - admission now executes service-native grader checks during red reference validation for grounded red objectives
+- admin, privilege, and outbound-service objectives are grounded by service-local effect artifacts or sink-side canary hits
 - `EpisodeConfig.prompt_mode` supports `zero_day` and `one_day`
 - runtime first observations expose prompt-mode-specific briefings without leaking private references or exact flaw inventories
 

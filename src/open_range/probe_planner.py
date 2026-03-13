@@ -9,6 +9,7 @@ import shlex
 from open_range.admission import ProbeSpec, ReferenceAction, ReferenceBundle, ReferenceTrace
 from open_range.build_config import BuildConfig, DEFAULT_BUILD_CONFIG
 from open_range.code_web import code_web_payload
+from open_range.effect_markers import effect_marker_content, effect_marker_path, effect_marker_token
 from open_range.predicates import PredicateEngine
 from open_range.runtime_types import Action
 from open_range.world_ir import WorldIR
@@ -382,8 +383,11 @@ def _weakness_red_steps(
             weakness_id=weakness.id,
             target=weakness.target,
             path=realization_path,
-            expect_contains=weakness.kind,
+            expect_contains=effect_marker_token(weakness) or weakness.kind,
         )
+        live_command = _identity_effect_command(weakness, realization_path or "")
+        payload["command"] = live_command
+        payload["service_command"] = live_command
         objective = _target_ref_objective(world, weakness.target_ref)
         if objective is not None:
             payload["objective"] = objective
@@ -393,13 +397,18 @@ def _weakness_red_steps(
 
     if weakness.family == "workflow_abuse":
         realization_path = _first_realization_path(weakness, kind="workflow") or _first_realization_path(weakness)
+        effect_token = effect_marker_token(weakness)
         payload = _shell_payload(
             action="abuse_workflow",
             weakness_id=weakness.id,
             target=weakness.target,
             path=realization_path,
-            expect_contains=weakness.kind,
+            expect_contains=effect_token or weakness.kind,
         )
+        if effect_token:
+            live_command = _workflow_effect_command(weakness, realization_path or "")
+            payload["command"] = live_command
+            payload["service_command"] = live_command
         objective = _target_ref_objective(world, weakness.target_ref)
         if objective is not None:
             payload["objective"] = objective
@@ -482,3 +491,45 @@ def _target_ref_objective(world, target_ref: str) -> str | None:
 def _mailbox_from_path(path: str) -> str:
     slug = path.split("/mailboxes/", 1)[1].split("/", 1)[0]
     return slug.replace("_at_", "@").replace("_", ".")
+
+
+def _identity_effect_command(weakness, realization_path: str) -> str:
+    effect_path = effect_marker_path(weakness)
+    effect_content = effect_marker_content(weakness)
+    markers = {
+        "weak_password": ('"min_password_length": 6', '"password_reuse_allowed": true'),
+        "default_credential": ('"default_username": "admin"', '"default_password": "admin"'),
+        "overbroad_service_account": ('"service_account_scope"', "svc-db", "svc-idp"),
+        "admin_surface_exposed": ('"admin_surface_public": true',),
+        "trust_edge_misconfig": ('"trust_scope": "corp-wide"', '"peer_validation": false'),
+    }[weakness.kind]
+    tests = " && ".join(
+        [f"test -f {shlex.quote(realization_path)}"]
+        + [f"grep -Fq {shlex.quote(marker)} {shlex.quote(realization_path)}" for marker in markers]
+    )
+    return (
+        f"{tests} && mkdir -p {shlex.quote(effect_path.rsplit('/', 1)[0])} && "
+        f"printf %s {shlex.quote(effect_content)} > {shlex.quote(effect_path)} && "
+        f"cat {shlex.quote(effect_path)}"
+    )
+
+
+def _workflow_effect_command(weakness, realization_path: str) -> str:
+    effect_path = effect_marker_path(weakness)
+    effect_content = effect_marker_content(weakness)
+    markers = {
+        "helpdesk_reset_bypass": ('"identity_verification": "none"', '"reset_without_ticket_owner": true'),
+        "approval_chain_bypass": ('"secondary_approval_skipped": true',),
+        "document_share_abuse": ('"share_visibility": "public_link"',),
+        "phishing_credential_capture": ('"credential_capture_landing": "/login"',),
+        "internal_request_impersonation": ('"internal_alias_trust": true',),
+    }[weakness.kind]
+    tests = " && ".join(
+        [f"test -f {shlex.quote(realization_path)}"]
+        + [f"grep -Fq {shlex.quote(marker)} {shlex.quote(realization_path)}" for marker in markers]
+    )
+    return (
+        f"{tests} && mkdir -p {shlex.quote(effect_path.rsplit('/', 1)[0])} && "
+        f"printf %s {shlex.quote(effect_content)} > {shlex.quote(effect_path)} && "
+        f"cat {shlex.quote(effect_path)}"
+    )

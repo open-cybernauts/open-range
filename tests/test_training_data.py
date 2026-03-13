@@ -5,10 +5,14 @@ from open_range.training_data import (
     TraceCandidate,
     TraceLineage,
     build_decision_prompt,
+    grounded_effects_for_result,
+    mitigation_effects_for_result,
+    public_trace_action,
     render_action_text,
     render_candidate_completion,
     system_prompt_for_role,
 )
+from open_range.runtime_types import RuntimeEvent
 
 
 def test_decision_prompt_and_completion_are_structured() -> None:
@@ -70,3 +74,52 @@ def test_decision_prompt_can_optionally_include_hidden_context() -> None:
 
     assert "benchmark_tags=cve_bench" in prompt
     assert "weaknesses:" in prompt
+
+
+def test_public_trace_action_strips_internal_execution_payload() -> None:
+    action = Action(
+        actor_id="red",
+        role="red",
+        kind="shell",
+        payload={"target": "svc-idp", "command": "cat /etc/openrange/admin-surface.json", "service_command": "grep -Fq admin /etc/openrange/admin-surface.json"},
+    )
+
+    public = public_trace_action(action)
+
+    assert "service_command" not in public.payload
+    assert public.payload["command"] == "cat /etc/openrange/admin-surface.json"
+
+
+def test_grounded_and_mitigation_effect_helpers_extract_runtime_signals() -> None:
+    events = (
+        RuntimeEvent(
+            id="evt-1",
+            event_type="PrivilegeEscalation",
+            actor="red",
+            time=1.0,
+            source_entity="svc-idp",
+            target_entity="idp_admin_cred",
+            malicious=True,
+        ),
+        RuntimeEvent(
+            id="evt-2",
+            event_type="PatchApplied",
+            actor="blue",
+            time=2.0,
+            source_entity="blue",
+            target_entity="svc-idp",
+            malicious=False,
+        ),
+    )
+
+    grounded = grounded_effects_for_result(stdout="OPENRANGE-EFFECT:privilege:wk-1:svc-idp", emitted_events=events)
+    mitigations = mitigation_effects_for_result(
+        action=Action(actor_id="blue", role="blue", kind="control", payload={"target": "svc-idp", "action": "mitigate"}),
+        stdout="mitigation applied to svc-idp",
+        emitted_events=events,
+    )
+
+    assert "PrivilegeEscalation" in grounded
+    assert any(item.startswith("OPENRANGE-EFFECT:privilege:") for item in grounded)
+    assert "PatchApplied" in mitigations
+    assert "mitigate:svc-idp" in mitigations
