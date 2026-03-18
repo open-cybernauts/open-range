@@ -276,7 +276,9 @@ class PodActionBackend:
             ".\n"
             "QUIT\n"
         )
-        return f"printf %s {shlex.quote(payload)} | nc -w 3 {shlex.quote(target)} {port}"
+        return (
+            f"printf %s {shlex.quote(payload)} | nc -w 3 {shlex.quote(target)} {port}"
+        )
 
     def _is_contained(self, target: str) -> bool:
         release = self._require_release()
@@ -328,7 +330,9 @@ class PodActionBackend:
 
     def _weakness_for(self, target: str) -> WeaknessSpec | None:
         snapshot = self._require_snapshot()
-        return next((weak for weak in snapshot.world.weaknesses if weak.target == target), None)
+        return next(
+            (weak for weak in snapshot.world.weaknesses if weak.target == target), None
+        )
 
     def _require_release(self) -> BootedRelease:
         if self._release is None:
@@ -339,6 +343,7 @@ class PodActionBackend:
         if self._snapshot is None:
             raise RuntimeError("no active snapshot is bound")
         return self._snapshot
+
 
 def _green_sandbox_name(persona_id: str) -> str:
     safe = "".join(ch.lower() if ch.isalnum() else "-" for ch in persona_id).strip("-")

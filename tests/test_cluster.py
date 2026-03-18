@@ -22,14 +22,18 @@ def test_podset_is_healthy_uses_async_kubectl(monkeypatch) -> None:
 
     podset = PodSet(project_name="or-demo", pod_ids={"svc-web": "ns/svc-web-pod"})
     monkeypatch.setattr(PodSet, "_discover_current_ref", lambda self, service: "")
-    monkeypatch.setattr(cluster_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        cluster_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
 
     assert run_async(podset.is_healthy("svc-web")) is True
 
 
 def test_podset_resolve_caches_discovered_refs(monkeypatch) -> None:
     podset = PodSet(project_name="or-demo")
-    monkeypatch.setattr(PodSet, "_discover_current_ref", lambda self, service: "ns/svc-web-pod")
+    monkeypatch.setattr(
+        PodSet, "_discover_current_ref", lambda self, service: "ns/svc-web-pod"
+    )
 
     assert podset._resolve("svc-web") == ("ns", "svc-web-pod")
     assert podset.pod_ids["svc-web"] == "ns/svc-web-pod"

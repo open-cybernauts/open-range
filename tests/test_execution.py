@@ -46,7 +46,10 @@ def test_mail_command_quotes_smtp_payload_and_target() -> None:
 
     command = backend._mail_command(action)
 
-    assert command == f"printf %s {shlex.quote(payload)} | nc -w 3 {shlex.quote('svc-email')} 25"
+    assert (
+        command
+        == f"printf %s {shlex.quote(payload)} | nc -w 3 {shlex.quote('svc-email')} 25"
+    )
 
 
 def test_execution_helpers_raise_clear_errors_when_unbound() -> None:
