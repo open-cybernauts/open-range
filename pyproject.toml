@@ -3,7 +3,7 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openenv-open-range"
+name = "open-range"
 version = "0.1.0"
 description = "Manifest-first red/blue/green cyber range package"
 requires-python = ">=3.11"

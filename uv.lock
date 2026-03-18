@@ -1102,7 +1102,7 @@ wheels = [
 ]
 
 [[package]]
-name = "openenv-open-range"
+name = "open-range"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

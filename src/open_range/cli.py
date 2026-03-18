@@ -56,7 +56,7 @@ def _write_json(payload: dict[str, Any], dest: Path) -> Path:
 @click.option(
     "-v", "--verbose", is_flag=True, default=False, help="Enable debug logging."
 )
-@click.version_option(package_name="openenv-open-range", prog_name="openrange")
+@click.version_option(package_name="open-range", prog_name="openrange")
 def cli(verbose: bool) -> None:
     """Build, admit, and run immutable OpenRange snapshots."""
     _configure_logging(verbose)

@@ -3,7 +3,7 @@
   <img src="assets/evolving_gym_hero.png" alt="OpenRange: multi-agent cybersecurity range" width="800" />
   <br />
   <br />
-  <img src="https://img.shields.io/badge/Package-openenv--open--range-blue" alt="Package: openenv-open-range" />
+  <img src="https://img.shields.io/badge/Package-open--range-blue" alt="Package: open-range" />
   <img src="https://img.shields.io/badge/Runtime-red%2Fblue%2Fgreen-red" alt="Runtime: red/blue/green" />
   <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0" />
 </div>
