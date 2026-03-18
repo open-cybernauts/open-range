@@ -241,6 +241,106 @@ def test_blue_only_live_can_win_by_detect_and_contain(tmp_path: Path):
     assert runtime.score().winner == "blue"
 
 
+def test_runtime_flags_mock_git_clone_in_episode_audit(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    runtime = ReferenceDrivenRuntime()
+    runtime.reset(
+        snapshot,
+        EpisodeConfig(
+            mode="red_only",
+            green_enabled=False,
+            audit={
+                "suspicious_patterns": (r"\bgit\s+clone\b",),
+                "minimum_actions_for_collapse": 1,
+            },
+        ),
+    )
+
+    decision = runtime.next_decision()
+    assert decision.actor == "red"
+    runtime.act(
+        "red",
+        Action(
+            actor_id="red",
+            role="red",
+            kind="shell",
+            payload={"command": "git clone https://example.com/upstream.git"},
+        ),
+    )
+
+    audit = runtime.score().audit
+    assert audit is not None
+    assert audit.suspicious_actions
+    assert audit.suspicious_actions[0].matched_patterns == (r"\bgit\s+clone\b",)
+    assert audit.suspicious_actions[0].fingerprint_prefix == "git clone"
+
+
+def test_runtime_tags_emitted_events_when_a_live_command_matches_audit_pattern(
+    tmp_path: Path,
+):
+    snapshot = _snapshot(tmp_path)
+
+    class FakePods:
+        def __init__(self, pod_ids):
+            self.pod_ids = pod_ids
+
+        async def exec(
+            self, service: str, cmd: str, timeout: float = 30.0
+        ) -> ExecResult:
+            del timeout
+            if service == "sandbox-red":
+                seeded = _code_web_response(snapshot, cmd, set())
+                if seeded is not None:
+                    return seeded
+            return ExecResult(stdout=f"{service}:{cmd}", stderr="", exit_code=0)
+
+        async def is_healthy(self, service: str) -> bool:
+            return service in self.pod_ids
+
+    pod_ids = {
+        service.id: f"ns/{service.id}-pod" for service in snapshot.world.services
+    }
+    pod_ids["sandbox-red"] = "ns/sandbox-red-pod"
+    pod_ids["sandbox-blue"] = "ns/sandbox-blue-pod"
+    for persona in snapshot.world.green_personas:
+        pod_ids[f"sandbox-green-{persona.id.replace('_', '-').lower()}"] = (
+            f"ns/{persona.id}-pod"
+        )
+
+    backend = PodActionBackend()
+    backend.bind(
+        snapshot, SimpleNamespace(release_name="or-test", pods=FakePods(pod_ids))
+    )
+    runtime = ReferenceDrivenRuntime(action_backend=backend)
+    runtime.reset(
+        snapshot,
+        EpisodeConfig(
+            mode="joint_pool",
+            green_enabled=False,
+            audit={"suspicious_patterns": (r"wget -qO- http://svc-web",)},
+        ),
+    )
+
+    first_step = snapshot.reference_bundle.reference_attack_traces[0].steps[0]
+    assert runtime.next_decision().actor == "red"
+    result = runtime.act(
+        "red",
+        Action(
+            actor_id="red",
+            role="red",
+            kind=first_step.kind,
+            payload={"target": first_step.target, **first_step.payload},
+        ),
+    )
+
+    assert result.emitted_events
+    assert result.emitted_events[0].suspicious is True
+    assert result.emitted_events[0].suspicious_reasons == (r"wget -qO- http://svc-web",)
+    audit = runtime.score().audit
+    assert audit is not None
+    assert audit.suspicious_event_ids == (result.emitted_events[0].id,)
+
+
 def test_runtime_hard_done_rejects_more_decisions_and_actions(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
     runtime = ReferenceDrivenRuntime()

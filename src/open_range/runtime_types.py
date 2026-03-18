@@ -51,6 +51,8 @@ class RuntimeEvent(_StrictModel):
     malicious: bool
     observability_surfaces: tuple[str, ...] = Field(default_factory=tuple)
     linked_objective_predicates: tuple[str, ...] = Field(default_factory=tuple)
+    suspicious: bool = Field(default=False, exclude=True)
+    suspicious_reasons: tuple[str, ...] = Field(default_factory=tuple, exclude=True)
 
 
 class ServiceHealth(_StrictModel):
@@ -122,6 +124,80 @@ class EpisodeState(_StrictModel):
     blue_session: ActorSessionState | None = None
 
 
+class AuditActionRecord(_StrictModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    actor: ExternalRole
+    sim_time: float = Field(ge=0.0)
+    action_kind: ActionKind
+    target: str = ""
+    command: str = ""
+    fingerprint: str = Field(min_length=1)
+    fingerprint_prefix: str = Field(min_length=1)
+    matched_patterns: tuple[str, ...] = Field(default_factory=tuple)
+    emitted_event_ids: tuple[str, ...] = Field(default_factory=tuple)
+
+
+class ActionDiversitySummary(_StrictModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    actor: ExternalRole
+    total_actions: int = Field(ge=0)
+    unique_fingerprints: int = Field(ge=0)
+    diversity_score: float = Field(ge=0.0, le=1.0)
+    dominant_fingerprint: str = ""
+    dominant_fingerprint_prefix: str = ""
+    dominant_share: float = Field(default=0.0, ge=0.0, le=1.0)
+    collapse_warning: bool = False
+
+
+class IntegritySample(_StrictModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    service_id: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    exists: bool
+    digest: str = ""
+
+
+class IntegrityDelta(_StrictModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    service_id: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    before_exists: bool
+    after_exists: bool
+    before_digest: str = ""
+    after_digest: str = ""
+
+
+class BinaryIntegritySummary(_StrictModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    available: bool = False
+    checked_services: tuple[str, ...] = Field(default_factory=tuple)
+    checked_paths: int = Field(default=0, ge=0)
+    changed_services: tuple[str, ...] = Field(default_factory=tuple)
+    unchanged_services: tuple[str, ...] = Field(default_factory=tuple)
+    changed_paths: tuple[IntegrityDelta, ...] = Field(default_factory=tuple)
+
+
+class EpisodeAudit(_StrictModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    action_count: int = Field(default=0, ge=0)
+    unique_fingerprints: int = Field(default=0, ge=0)
+    action_diversity_score: float = Field(default=1.0, ge=0.0, le=1.0)
+    collapse_warning: bool = False
+    suspicious_actions: tuple[AuditActionRecord, ...] = Field(default_factory=tuple)
+    suspicious_event_ids: tuple[str, ...] = Field(default_factory=tuple)
+    role_diversity: tuple[ActionDiversitySummary, ...] = Field(default_factory=tuple)
+    binary_integrity: BinaryIntegritySummary = Field(
+        default_factory=BinaryIntegritySummary
+    )
+
+
 class EpisodeScore(_StrictModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -137,6 +213,7 @@ class EpisodeScore(_StrictModel):
     red_objectives_satisfied: tuple[str, ...]
     blue_objectives_satisfied: tuple[str, ...]
     event_count: int
+    audit: EpisodeAudit | None = None
 
 
 EpisodeHandle = EpisodeState

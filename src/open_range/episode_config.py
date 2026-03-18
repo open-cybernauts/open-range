@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from open_range.audit import AuditConfig
+
 
 TrainingMode = Literal[
     "red_only", "blue_only_live", "blue_only_from_prefix", "joint_pool"
@@ -53,6 +55,7 @@ class EpisodeConfig(BaseModel):
     hallucination_penalty_enabled: bool = True
     opponent_red: OpponentController = "scripted"
     opponent_blue: OpponentController = "scripted"
+    audit: AuditConfig = Field(default_factory=AuditConfig)
     start_state: StartState = "clean"
     episode_horizon_minutes: float = Field(default=25.0, gt=0.0)
     continuity_threshold: float = Field(default=0.9, ge=0.0, le=1.0)

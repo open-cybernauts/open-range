@@ -13,7 +13,7 @@ from open_range.cluster import BootedRelease
 from open_range.code_web import code_web_cleanup_commands, code_web_guard_path
 from open_range.effect_markers import effect_marker_cleanup_command
 from open_range.runtime_events import action_target
-from open_range.runtime_types import Action
+from open_range.runtime_types import Action, IntegritySample
 from open_range.snapshot import RuntimeSnapshot
 from open_range.world_ir import ServiceSpec, WeaknessSpec
 
@@ -29,6 +29,9 @@ class ActionExecution:
     containment_applied: bool = False
     patch_applied: bool = False
     recovery_applied: bool = False
+    executed_command: str = ""
+    runner_service: str = ""
+    target_service: str = ""
 
 
 class ActionBackend(Protocol):
@@ -36,6 +39,9 @@ class ActionBackend(Protocol):
     def clear(self) -> None: ...
     def execute(self, action: Action) -> ActionExecution: ...
     def service_health(self) -> dict[str, float]: ...
+    def capture_integrity(
+        self, service_paths: dict[str, tuple[str, ...]]
+    ) -> tuple[IntegritySample, ...]: ...
     def record_event(self, event: Any) -> None: ...
 
 
@@ -91,11 +97,28 @@ class PodActionBackend:
                 "linked_objective_predicates": list(
                     getattr(event, "linked_objective_predicates", ())
                 ),
+                "suspicious": getattr(event, "suspicious", False),
+                "suspicious_reasons": list(getattr(event, "suspicious_reasons", ())),
             },
             sort_keys=True,
         )
         cmd = f"printf '%s\\n' {shlex.quote(payload)} >> /srv/http/siem/all.log"
         run_async(self._release.pods.exec("svc-siem", cmd, timeout=5.0))
+
+    def capture_integrity(
+        self, service_paths: dict[str, tuple[str, ...]]
+    ) -> tuple[IntegritySample, ...]:
+        release = self._require_release()
+        samples: list[IntegritySample] = []
+        for service_id, paths in sorted(service_paths.items()):
+            for path in paths:
+                result = run_async(
+                    release.pods.exec(
+                        service_id, _integrity_probe_command(path), timeout=5.0
+                    )
+                )
+                samples.append(_parse_integrity_sample(service_id, path, result))
+        return tuple(samples)
 
     def execute(self, action: Action) -> ActionExecution:
         if self._release is None or self._snapshot is None:
@@ -119,6 +142,7 @@ class PodActionBackend:
             stderr=f"unsupported live action kind: {action.kind}",
             ok=False,
             service_health=self.service_health(),
+            target_service=action_target(action),
         )
 
     def service_health(self) -> dict[str, float]:
@@ -157,6 +181,9 @@ class PodActionBackend:
             and directive not in {"recover", "restore", "patch", "mitigate"},
             patch_applied=result.ok and directive in {"patch", "mitigate"},
             recovery_applied=result.ok and directive in {"recover", "restore"},
+            executed_command=command,
+            runner_service=target,
+            target_service=target,
         )
 
     def _run_in_runner(self, action: Action, command: str) -> ActionExecution:
@@ -188,6 +215,9 @@ class PodActionBackend:
             stderr=result.stderr.strip(),
             ok=result.ok,
             service_health=self.service_health(),
+            executed_command=command,
+            runner_service=runner,
+            target_service=target,
         )
 
     def _run_on_target_service(self, action: Action, command: str) -> ActionExecution:
@@ -217,6 +247,9 @@ class PodActionBackend:
             stderr=result.stderr.strip(),
             ok=result.ok,
             service_health=self.service_health(),
+            executed_command=command,
+            runner_service=target,
+            target_service=target,
         )
 
     def _runner_for(self, action: Action) -> str:
@@ -373,3 +406,35 @@ class PodActionBackend:
 def _green_sandbox_name(persona_id: str) -> str:
     safe = "".join(ch.lower() if ch.isalnum() else "-" for ch in persona_id).strip("-")
     return f"sandbox-green-{safe}"
+
+
+def _integrity_probe_command(path: str) -> str:
+    quoted = shlex.quote(path)
+    return (
+        f"if [ -e {quoted} ]; then "
+        f"if command -v sha256sum >/dev/null 2>&1; then set -- $(sha256sum {quoted}); "
+        "elif command -v shasum >/dev/null 2>&1; then set -- $(shasum -a 256 "
+        f"{quoted}); "
+        f"elif command -v busybox >/dev/null 2>&1; then set -- $(busybox sha256sum {quoted}); "
+        "else printf 'error\\tno-sha256-tool\\n'; exit 1; fi; "
+        "printf 'present\\t%s\\n' \"$1\"; "
+        "else printf 'missing\\t\\n'; fi"
+    )
+
+
+def _parse_integrity_sample(service_id: str, path: str, result) -> IntegritySample:
+    if not result.ok:
+        return IntegritySample(
+            service_id=service_id, path=path, exists=False, digest=""
+        )
+    status, _sep, digest = result.stdout.partition("\t")
+    if status.strip() != "present":
+        return IntegritySample(
+            service_id=service_id, path=path, exists=False, digest=""
+        )
+    return IntegritySample(
+        service_id=service_id,
+        path=path,
+        exists=True,
+        digest=digest.strip(),
+    )

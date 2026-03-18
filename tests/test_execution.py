@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import shlex
+from types import SimpleNamespace
 
 import pytest
 
+from open_range.cluster import ExecResult
 from open_range.execution import PodActionBackend
-from open_range.runtime_types import Action
+from open_range.runtime_types import Action, IntegritySample
 from open_range.world_ir import ServiceSpec
 
 
@@ -102,3 +104,41 @@ def test_runner_for_red_service_origin_uses_zone_tooling_runner() -> None:
 
     assert backend._runner_for(web_origin) == "sandbox-green-sales-01"
     assert backend._runner_for(idp_origin) == "sandbox-green-it-admin-01"
+
+
+def test_capture_integrity_hashes_or_marks_missing_live_paths() -> None:
+    class FakePods:
+        async def exec(
+            self, service: str, cmd: str, timeout: float = 30.0
+        ) -> ExecResult:
+            del timeout
+            if service == "svc-web" and "index.html" in cmd:
+                return ExecResult(stdout="present\tabc123\n", stderr="", exit_code=0)
+            return ExecResult(stdout="missing\t\n", stderr="", exit_code=0)
+
+    backend = PodActionBackend()
+    backend._release = SimpleNamespace(pods=FakePods())
+
+    samples = backend.capture_integrity(
+        {
+            "svc-web": (
+                "/var/www/html/index.html",
+                "/var/www/html/missing.php",
+            )
+        }
+    )
+
+    assert samples == (
+        IntegritySample(
+            service_id="svc-web",
+            path="/var/www/html/index.html",
+            exists=True,
+            digest="abc123",
+        ),
+        IntegritySample(
+            service_id="svc-web",
+            path="/var/www/html/missing.php",
+            exists=False,
+            digest="",
+        ),
+    )

@@ -6,6 +6,7 @@ from math import inf
 from typing import Literal
 from uuid import uuid4
 
+from open_range.audit import ActionAuditor, command_text_for_action
 from open_range.episode_config import DEFAULT_EPISODE_CONFIG, EpisodeConfig
 from open_range.execution import ActionBackend, ActionExecution
 from open_range.green import GreenScheduler, ScriptedGreenScheduler
@@ -72,6 +73,7 @@ class ReferenceDrivenRuntime:
         self._next_due_time = {"red": 0.0, "blue": 0.0}
         self._reference_attack_index = 0
         self._reference_defense_index = 0
+        self._auditor: ActionAuditor | None = None
 
     def reset(
         self,
@@ -116,6 +118,9 @@ class ReferenceDrivenRuntime:
             len(snapshot.reference_bundle.reference_defense_traces),
             fallback=self._reference_attack_index,
         )
+        self._auditor = ActionAuditor(episode_config.audit)
+        self._auditor.bind_snapshot(snapshot)
+        self._auditor.capture_baseline(self._capture_integrity)
 
         service_health = {service.id: 1.0 for service in snapshot.world.services}
         if self.action_backend is not None:
@@ -211,6 +216,11 @@ class ReferenceDrivenRuntime:
             winner=self._state.winner,
             done=self._state.done,
         )
+        audit = (
+            self._auditor.build_summary(self._capture_integrity)
+            if self._auditor is not None
+            else None
+        )
         return EpisodeScore(
             snapshot_id=self._state.snapshot_id,
             episode_id=self._state.episode_id,
@@ -224,6 +234,7 @@ class ReferenceDrivenRuntime:
             red_objectives_satisfied=tuple(sorted(self._red_objectives_satisfied)),
             blue_objectives_satisfied=tuple(sorted(self._blue_objectives_satisfied)),
             event_count=len(self._events),
+            audit=audit,
         )
 
     def state(self) -> EpisodeState:
@@ -239,6 +250,7 @@ class ReferenceDrivenRuntime:
     def close(self) -> None:
         self._snapshot = None
         self._predicates = None
+        self._auditor = None
         self._pending_actor = ""
         self._state.done = True
         self._state.next_actor = ""
@@ -454,6 +466,12 @@ class ReferenceDrivenRuntime:
                 payload.setdefault("target", target)
             exec_action = action.model_copy(update={"payload": payload})
         live = self._execute_live_action(exec_action)
+        audit = self._observe_action(
+            exec_action,
+            live,
+            controlled=not internal,
+        )
+        emit_event = self._audit_emit_event(audit)
         stdout = live.stdout or "red action had no strategic effect"
         stderr = live.stderr
 
@@ -476,7 +494,7 @@ class ReferenceDrivenRuntime:
                 expected,
                 action,
                 last_red_target=self._last_red_target,
-                emit_event=self._emit_event,
+                emit_event=emit_event,
                 service_surfaces=self._service_surfaces,
             )
             emitted = list(batch.events)
@@ -496,6 +514,7 @@ class ReferenceDrivenRuntime:
         self._red_reward_shaping += reward_delta
         if not internal:
             self._last_reward_delta["red"] += reward_delta
+        self._record_action_audit(audit, emitted)
 
         return ActionResult(
             action=action,
@@ -517,6 +536,8 @@ class ReferenceDrivenRuntime:
         if internal and self._resolved_opponent_mode("blue") in {"reference", "replay"}:
             expected_internal = self._next_blue_step()
         live = self._execute_live_action(action)
+        audit = self._observe_action(action, live, controlled=not internal)
+        emit_event = self._audit_emit_event(audit)
         stdout = live.stdout or "blue action applied"
         stderr = live.stderr
 
@@ -528,7 +549,7 @@ class ReferenceDrivenRuntime:
             matched = self._find_detectable_event(event_type, target, visible_only=True)
             if matched is not None:
                 emitted.append(
-                    self._emit_event(
+                    emit_event(
                         event_type="DetectionAlertRaised",
                         actor="blue",
                         source_entity="blue",
@@ -572,7 +593,7 @@ class ReferenceDrivenRuntime:
                 self._contained_targets.add(target)
                 self._patched_targets.discard(target)
                 emitted.append(
-                    self._emit_event(
+                    emit_event(
                         event_type="ContainmentApplied",
                         actor="blue",
                         source_entity="blue",
@@ -590,7 +611,7 @@ class ReferenceDrivenRuntime:
                 self._patched_targets.add(target)
                 self._contained_targets.discard(target)
                 emitted.append(
-                    self._emit_event(
+                    emit_event(
                         event_type="PatchApplied",
                         actor="blue",
                         source_entity="blue",
@@ -608,7 +629,7 @@ class ReferenceDrivenRuntime:
                 self._contained_targets.discard(target)
                 self._patched_targets.discard(target)
                 emitted.append(
-                    self._emit_event(
+                    emit_event(
                         event_type="RecoveryCompleted",
                         actor="blue",
                         source_entity="blue",
@@ -680,6 +701,7 @@ class ReferenceDrivenRuntime:
             action, expected_internal, live.stdout
         ):
             self._blue_internal_progress += 1
+        self._record_action_audit(audit, emitted)
 
         return ActionResult(
             action=action,
@@ -929,6 +951,8 @@ class ReferenceDrivenRuntime:
         malicious: bool,
         observability_surfaces: tuple[str, ...],
         linked_objective_predicates: tuple[str, ...] = (),
+        suspicious: bool = False,
+        suspicious_reasons: tuple[str, ...] = (),
     ) -> RuntimeEvent:
         self._event_seq += 1
         event = RuntimeEvent(
@@ -941,6 +965,8 @@ class ReferenceDrivenRuntime:
             malicious=malicious,
             observability_surfaces=observability_surfaces,
             linked_objective_predicates=linked_objective_predicates,
+            suspicious=suspicious,
+            suspicious_reasons=suspicious_reasons,
         )
         self._events.append(event)
         blue_delay = self._blue_visibility_time(event, observability_surfaces)
@@ -1064,12 +1090,60 @@ class ReferenceDrivenRuntime:
                 and directive in {"patch", "mitigate"},
                 recovery_applied=action.kind == "control"
                 and directive in {"recover", "restore"},
+                executed_command=command_text_for_action(action),
+                runner_service=action.payload.get("origin", action.actor_id),
+                target_service=action_target(action),
             )
         result = self.action_backend.execute(action)
         if result.service_health:
             self._state.service_health.update(result.service_health)
             self._update_continuity()
         return result
+
+    def _observe_action(
+        self,
+        action: Action,
+        live: ActionExecution,
+        *,
+        controlled: bool,
+    ):
+        if self._auditor is None:
+            return None
+        return self._auditor.observe(
+            action=action,
+            executed_command=live.executed_command,
+            sim_time=self._state.sim_time,
+            controlled=controlled,
+        )
+
+    def _audit_emit_event(self, audit):
+        if audit is None or not audit.suspicious:
+            return self._emit_event
+
+        def emit_event(**kwargs):
+            return self._emit_event(
+                **kwargs,
+                suspicious=True,
+                suspicious_reasons=audit.matched_patterns,
+            )
+
+        return emit_event
+
+    def _record_action_audit(self, audit, emitted: list[RuntimeEvent]) -> None:
+        if self._auditor is None:
+            return
+        self._auditor.record(
+            audit,
+            emitted_event_ids=tuple(event.id for event in emitted),
+        )
+
+    def _capture_integrity(self, service_paths):
+        if self.action_backend is None:
+            return ()
+        capture_integrity = getattr(self.action_backend, "capture_integrity", None)
+        if not callable(capture_integrity):
+            return ()
+        return capture_integrity(service_paths)
 
     def _advance_due_time(self, actor: ExternalRole) -> None:
         cadence = 1.0 if self._is_controlled(actor) else self._opponent_cadence(actor)
