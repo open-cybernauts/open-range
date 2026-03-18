@@ -47,6 +47,10 @@ Each row must carry:
 - `candidate_actions`
 - `chosen_action`
 - `emitted_events`
+- `result_stdout`
+- `result_stderr`
+- `grounded_effects`
+- `mitigation_effects`
 - `reward_delta`
 - `winner`
 - `terminal_reason`
@@ -133,6 +137,13 @@ The canonical trace rows may be transformed into training views, including:
 - later ranking/preference datasets
 
 Derived views must preserve snapshot and lineage metadata.
+
+The default export should also write clean shards for:
+
+- `red` vs `blue`
+- `runtime` vs `sim`
+- role-only all-source views such as `sft_red_all.jsonl`
+- role-and-source views such as `sft_blue_runtime.jsonl`
 
 ## Initial Sequence
 
