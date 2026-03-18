@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from open_range.episode_config import EpisodeConfig
 from open_range.runtime_types import Action, RuntimeEvent
 from open_range.snapshot import RuntimeSnapshot
+from open_range.world_ir import GreenPersona
 
 
 class GreenScheduler(Protocol):
@@ -191,7 +192,11 @@ class ScriptedGreenScheduler:
         reporter = max(
             personas,
             key=lambda persona: (
-                round(persona.awareness - (persona.susceptibility * 0.4), 4),
+                round(
+                    persona.awareness
+                    - (self._susceptibility_score(persona, event) * 0.4),
+                    4,
+                ),
                 persona.id,
             ),
         )
@@ -205,10 +210,21 @@ class ScriptedGreenScheduler:
         if event.event_type in {
             "CredentialObtained",
             "UnauthorizedCredentialUse",
-        } and reporter.awareness >= (reporter.susceptibility * 0.8):
+        } and reporter.awareness >= (
+            self._susceptibility_score(reporter, event) * 0.8
+        ):
             self._reactive_queue[llm_slot].append(
                 self._recover_action(reporter.id, event.target_entity)
             )
+
+    @staticmethod
+    def _susceptibility_score(persona: GreenPersona, event: RuntimeEvent) -> float:
+        if not persona.susceptibility:
+            return 0.0
+        event_key = _event_susceptibility_key(event.event_type)
+        if event_key in persona.susceptibility:
+            return persona.susceptibility[event_key]
+        return max(persona.susceptibility.values())
 
     def _schedule_workflow_orchestrator_reaction(
         self, event: RuntimeEvent, personas: list[Any], slot: int
@@ -285,3 +301,17 @@ def _routine_service(routine: str) -> str:
     if "payroll" in lowered:
         return "svc-db"
     return "svc-web"
+
+
+def _event_susceptibility_key(event_type: str) -> str:
+    chunks: list[str] = []
+    token: list[str] = []
+    for char in event_type:
+        if char.isupper() and token:
+            chunks.append("".join(token).lower())
+            token = [char]
+            continue
+        token.append(char)
+    if token:
+        chunks.append("".join(token).lower())
+    return "_".join(chunks)

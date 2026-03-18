@@ -76,6 +76,38 @@ def test_build_config_can_filter_services_without_touching_manifest_schema(
     assert candidate.world.allowed_service_kinds == ("web_app", "idp", "siem")
 
 
+def test_build_pipeline_threads_manifest_npc_profiles_into_personas(tmp_path: Path):
+    pipeline = BuildPipeline(store=FileSnapshotStore(tmp_path / "snapshots"))
+    payload = _manifest_payload()
+    payload["npc_profiles"] = {
+        "sales": {
+            "awareness": 0.15,
+            "susceptibility": {"phishing": 0.85, "pretexting": 0.55},
+            "routine": ["check_mail", "browse_app"],
+        }
+    }
+
+    candidate = pipeline.build(
+        payload,
+        tmp_path / "rendered-npc-profiles",
+        BuildConfig(validation_profile="graph_only"),
+    )
+
+    sales_personas = [
+        persona for persona in candidate.world.green_personas if persona.role == "sales"
+    ]
+
+    assert sales_personas
+    assert all(persona.awareness == 0.15 for persona in sales_personas)
+    assert all(
+        persona.susceptibility == {"phishing": 0.85, "pretexting": 0.55}
+        for persona in sales_personas
+    )
+    assert all(
+        persona.routine == ("check_mail", "browse_app") for persona in sales_personas
+    )
+
+
 def test_manifest_accepts_standard_attack_objectives_and_rejects_unknown_predicates() -> (
     None
 ):

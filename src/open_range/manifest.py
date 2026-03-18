@@ -6,7 +6,7 @@ public and must not encode a golden path, literal exploit steps, or flag paths.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 
@@ -94,6 +94,7 @@ SupportedWeaknessKind = Literal[
 NoiseDensity = Literal["low", "medium", "high"]
 AssetClass = Literal["crown_jewel", "sensitive", "operational"]
 WeaknessTargetKind = Literal["service", "workflow", "asset", "credential", "telemetry"]
+Probability = Annotated[float, Field(ge=0.0, le=1.0)]
 
 WEAKNESS_KIND_CATALOG: dict[WeaknessFamily, tuple[str, ...]] = {
     "code_web": (
@@ -147,6 +148,12 @@ class TopologySpec(_StrictModel):
 
 class UserRoleSpec(_StrictModel):
     roles: dict[str, PositiveInt] = Field(default_factory=dict, min_length=1)
+
+
+class NPCProfileSpec(_StrictModel):
+    awareness: float | None = Field(default=None, ge=0.0, le=1.0)
+    susceptibility: dict[str, Probability] = Field(default_factory=dict)
+    routine: tuple[str, ...] | None = None
 
 
 class ManifestAsset(_StrictModel):
@@ -249,6 +256,7 @@ class EnterpriseSaaSManifest(_StrictModel):
     business: BusinessSpec
     topology: TopologySpec
     users: UserRoleSpec
+    npc_profiles: dict[str, NPCProfileSpec] = Field(default_factory=dict)
     assets: tuple[ManifestAsset, ...] = Field(default_factory=tuple, min_length=1)
     objectives: ObjectiveSet
     security: SecuritySpec

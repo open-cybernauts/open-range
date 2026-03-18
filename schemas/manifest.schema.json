@@ -115,6 +115,51 @@
       "title": "MutationBounds",
       "type": "object"
     },
+    "NPCProfileSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "awareness": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Awareness"
+        },
+        "routine": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Routine"
+        },
+        "susceptibility": {
+          "additionalProperties": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "title": "Susceptibility",
+          "type": "object"
+        }
+      },
+      "title": "NPCProfileSpec",
+      "type": "object"
+    },
     "ObjectivePredicate": {
       "additionalProperties": false,
       "properties": {
@@ -353,6 +398,13 @@
     },
     "mutation_bounds": {
       "$ref": "#/$defs/MutationBounds"
+    },
+    "npc_profiles": {
+      "additionalProperties": {
+        "$ref": "#/$defs/NPCProfileSpec"
+      },
+      "title": "Npc Profiles",
+      "type": "object"
     },
     "objectives": {
       "$ref": "#/$defs/ObjectiveSet"

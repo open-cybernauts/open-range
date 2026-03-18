@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Protocol
 
 from open_range.build_config import BuildConfig, DEFAULT_BUILD_CONFIG
-from open_range.manifest import EnterpriseSaaSManifest, ManifestAsset, validate_manifest
+from open_range.manifest import (
+    EnterpriseSaaSManifest,
+    ManifestAsset,
+    NPCProfileSpec,
+    validate_manifest,
+)
 from open_range.objectives import objective_tags_for_predicate
 from open_range.predicate_expr import predicate_inner
 from open_range.world_ir import (
@@ -116,6 +121,7 @@ class EnterpriseSaaSManifestCompiler:
             raise ValueError(
                 f"build_config.world_family={build_config.world_family!r} does not match manifest world_family={parsed.world_family!r}"
             )
+        self._validate_npc_profiles(parsed)
         service_names = self._selected_services(parsed, build_config)
         workflow_names = self._selected_workflows(parsed, build_config)
         allowed_families = self._selected_weakness_families(parsed, build_config)
@@ -388,13 +394,13 @@ class EnterpriseSaaSManifestCompiler:
                     )
                 )
                 personas.append(
-                    GreenPersona(
+                    self._persona_for_user(
                         id=user_id,
                         role=role,
                         department=role,
                         home_host=home_host,
                         mailbox=f"{user_id}@corp.local",
-                        routine=self._routine_for_role(role),
+                        profile=manifest.npc_profiles.get(role),
                     )
                 )
             groups.append(
@@ -543,6 +549,48 @@ class EnterpriseSaaSManifestCompiler:
             if layout["service_id"] == service_id:
                 return layout["host_id"]
         return "web-1"
+
+    @classmethod
+    def _validate_npc_profiles(cls, manifest: EnterpriseSaaSManifest) -> None:
+        if not manifest.npc_profiles:
+            return
+        declared_roles = set(manifest.users.roles)
+        unknown_roles = sorted(set(manifest.npc_profiles) - declared_roles)
+        if not unknown_roles:
+            return
+        declared = ", ".join(sorted(declared_roles))
+        unknown = ", ".join(repr(role) for role in unknown_roles)
+        raise ValueError(
+            f"npc_profiles references unknown role(s): {unknown}; declared manifest roles: {declared}"
+        )
+
+    @classmethod
+    def _persona_for_user(
+        cls,
+        *,
+        id: str,
+        role: str,
+        department: str,
+        home_host: str,
+        mailbox: str,
+        profile: NPCProfileSpec | None,
+    ) -> GreenPersona:
+        persona = GreenPersona(
+            id=id,
+            role=role,
+            department=department,
+            home_host=home_host,
+            mailbox=mailbox,
+            routine=cls._routine_for_role(role),
+        )
+        if profile is None:
+            return persona
+        updates = {"susceptibility": profile.susceptibility}
+        if profile.awareness is not None:
+            updates["awareness"] = profile.awareness
+        if profile.routine is not None:
+            updates["routine"] = profile.routine
+        return persona.model_copy(update=updates)
 
     @staticmethod
     def _routine_for_role(role: str) -> tuple[str, ...]:

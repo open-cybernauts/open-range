@@ -30,6 +30,7 @@ The supported surface on this branch is:
 - [Benchmark Offensive Coverage](docs/benchmark-offensive-coverage.md)
 - [Effect Grounding](docs/effect-grounding.md)
 - [Weakness Lifecycle](docs/weakness-lifecycle.md)
+- [NPC Profiles](docs/npc-profiles.md)
 
 ## Package shape
 

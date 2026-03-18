@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from open_range.compiler import EnterpriseSaaSManifestCompiler
 from tests.support import manifest_payload
 
@@ -102,3 +104,44 @@ def test_compiler_threads_pinned_weaknesses_into_world():
     assert world.pinned_weaknesses[0].family == "secret_exposure"
     assert world.pinned_weaknesses[0].kind == "credential_in_share"
     assert world.pinned_weaknesses[0].target == "asset:finance_docs"
+
+
+def test_compiler_applies_partial_npc_profile_overrides_and_keeps_defaults():
+    payload = _manifest_payload()
+    payload["npc_profiles"] = {
+        "sales": {
+            "awareness": 0.25,
+        }
+    }
+
+    world = EnterpriseSaaSManifestCompiler().compile(payload)
+
+    sales_personas = [
+        persona for persona in world.green_personas if persona.role == "sales"
+    ]
+
+    assert sales_personas
+    assert all(persona.awareness == 0.25 for persona in sales_personas)
+    assert all(persona.susceptibility == {} for persona in sales_personas)
+    assert all(
+        persona.routine == ("check_mail", "browse_app", "access_fileshare")
+        for persona in sales_personas
+    )
+
+
+def test_compiler_treats_empty_npc_profiles_as_noop():
+    baseline = EnterpriseSaaSManifestCompiler().compile(_manifest_payload())
+    payload = _manifest_payload()
+    payload["npc_profiles"] = {}
+
+    world = EnterpriseSaaSManifestCompiler().compile(payload)
+
+    assert world.green_personas == baseline.green_personas
+
+
+def test_compiler_rejects_npc_profiles_for_unknown_roles():
+    payload = _manifest_payload()
+    payload["npc_profiles"] = {"legal": {"awareness": 0.5}}
+
+    with pytest.raises(ValueError, match="npc_profiles references unknown role"):
+        EnterpriseSaaSManifestCompiler().compile(payload)

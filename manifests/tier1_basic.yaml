@@ -32,6 +32,35 @@ users:
     finance: 1
     it_admin: 1
 
+npc_profiles:
+  sales:
+    awareness: 0.2
+    susceptibility:
+      initial_access: 0.8
+      credential_obtained: 0.7
+    routine:
+      - check_mail
+      - browse_app
+      - access_fileshare
+  engineer:
+    awareness: 0.65
+    susceptibility:
+      initial_access: 0.4
+      credential_obtained: 0.3
+    routine:
+      - browse_app
+      - check_mail
+      - access_fileshare
+  it_admin:
+    awareness: 0.9
+    susceptibility:
+      credential_obtained: 0.2
+      unauthorized_credential_use: 0.1
+    routine:
+      - review_idp
+      - triage_alerts
+      - reset_password
+
 assets:
   - id: finance_docs
     class: crown_jewel

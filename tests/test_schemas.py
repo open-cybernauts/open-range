@@ -95,6 +95,25 @@ def test_manifest_accepts_pinned_weaknesses():
     )
 
 
+def test_manifest_schema_round_trip_supports_npc_profiles():
+    payload = _manifest_payload()
+    payload["npc_profiles"] = {
+        "sales": {
+            "awareness": 0.2,
+            "susceptibility": {"phishing": 0.8},
+            "routine": ["check_mail", "browse_app"],
+        }
+    }
+
+    manifest = validate_manifest(payload)
+    round_tripped = EnterpriseSaaSManifest.model_validate(manifest.model_dump())
+    schema = EnterpriseSaaSManifest.model_json_schema()
+
+    assert round_tripped == manifest
+    assert "npc_profiles" in schema["properties"]
+    assert "NPCProfileSpec" in schema["$defs"]
+
+
 def test_manifest_rejects_pinned_kind_from_wrong_family():
     payload = _manifest_payload()
     payload["security"]["pinned_weaknesses"] = [

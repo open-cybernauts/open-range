@@ -11,10 +11,11 @@ from open_range.cluster import ExecResult
 from open_range.code_web import code_web_payload
 from open_range.compiler import EnterpriseSaaSManifestCompiler
 from open_range.episode_config import EpisodeConfig
+from open_range.green import ScriptedGreenScheduler
 from open_range.execution import PodActionBackend
 from open_range.render import EnterpriseSaaSKindRenderer
 from open_range.runtime import ReferenceDrivenRuntime
-from open_range.runtime_types import Action
+from open_range.runtime_types import Action, RuntimeEvent
 from open_range.store import FileSnapshotStore
 from open_range.synth import EnterpriseSaaSWorldSynthesizer
 from open_range.weaknesses import CatalogWeaknessSeeder
@@ -793,3 +794,59 @@ def test_green_branch_backends_are_not_aliases(tmp_path: Path):
     assert any(
         event.event_type == "RecoveryCompleted" for event in orchestrated_green_events
     )
+
+
+def test_small_llm_green_branch_handles_profiled_susceptibility_maps(tmp_path: Path):
+    payload = _manifest_payload()
+    payload["npc_profiles"] = {
+        "sales": {
+            "awareness": 0.9,
+            "susceptibility": {"credential_obtained": 0.8, "phishing": 0.6},
+        }
+    }
+    world = CatalogWeaknessSeeder().apply(
+        EnterpriseSaaSManifestCompiler().compile(payload)
+    )
+    synth = EnterpriseSaaSWorldSynthesizer().synthesize(
+        world, tmp_path / "synth-small-llm"
+    )
+    artifacts = EnterpriseSaaSKindRenderer().render(
+        world, synth, tmp_path / "rendered-small-llm"
+    )
+    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(
+        world, artifacts, OFFLINE_BUILD_CONFIG
+    )
+    store = FileSnapshotStore(tmp_path / "snapshots-small-llm")
+    snapshot = hydrate_runtime_snapshot(
+        store, store.create(world, artifacts, reference_bundle, report, synth=synth)
+    )
+
+    scheduler = ScriptedGreenScheduler()
+    scheduler.reset(
+        snapshot,
+        EpisodeConfig(
+            mode="joint_pool",
+            green_enabled=True,
+            green_routine_enabled=False,
+            green_branch_backend="small_llm",
+        ),
+    )
+    scheduler.record_event(
+        RuntimeEvent(
+            id="evt-1",
+            event_type="CredentialObtained",
+            actor="red",
+            time=0.0,
+            source_entity="svc-web",
+            target_entity="idp_admin_cred",
+            malicious=True,
+        )
+    )
+    scheduler.advance_until(1.0)
+    actions = scheduler.pop_ready_actions()
+
+    assert any(
+        action.payload.get("branch") == "report_suspicious_activity"
+        for action in actions
+    )
+    assert any(action.payload.get("branch") == "reset_password" for action in actions)
