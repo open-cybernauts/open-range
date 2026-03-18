@@ -210,9 +210,7 @@ class ScriptedGreenScheduler:
         if event.event_type in {
             "CredentialObtained",
             "UnauthorizedCredentialUse",
-        } and reporter.awareness >= (
-            self._susceptibility_score(reporter, event) * 0.8
-        ):
+        } and reporter.awareness >= (self._susceptibility_score(reporter, event) * 0.8):
             self._reactive_queue[llm_slot].append(
                 self._recover_action(reporter.id, event.target_entity)
             )
