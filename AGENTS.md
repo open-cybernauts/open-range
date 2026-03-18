@@ -139,6 +139,30 @@ contract, especially around:
 - hydrated runtime snapshots
 - multi-reference support
 
+## Build, Test, and Dev Commands
+
+Prefer `uv run -m ...` for Python commands in this repo.
+
+- create or refresh the local environment with `uv sync --extra dev`
+- run the main test suite with `uv run -m pytest tests -q`
+- run focused tests with `uv run -m pytest tests/test_runtime.py -q`
+- inspect the CLI with `uv run -m open_range.cli --help`
+- run demos with `uv run -m open_range.examples.demo` and `uv run -m open_range.examples.bootstrap`
+- do not use `source .venv/bin/activate` for normal development flows
+- do not fall back to raw `python -m ...` when `uv run -m ...` is available
+- if Codex does not see `uv` on `PATH`, resolve the machine's local `uv` path first instead of falling back to venv activation
+- run `docker` and `kind` directly, without wrapping them in Python env activation
+
+## PR Guidelines
+
+- default pull requests for this repo should target `v1`, not `main`, unless the user explicitly asks otherwise
+- keep each PR focused on one theme
+- follow `.github/PULL_REQUEST_TEMPLATE.md`
+- keep the `Testing` section terse and factual: commands plus pass/fail or an explicit `Not run`
+- do not paste long verification logs or terminal transcripts into the PR body
+- include the exact verification commands used in the PR description, especially for admission, runtime, or Kind-backed changes
+- use `Review Notes` only for reviewer-relevant context such as risks, tradeoffs, or follow-up work
+
 ## Review Priorities
 
 When reviewing or changing code, prioritize:

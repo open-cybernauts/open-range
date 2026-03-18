@@ -50,7 +50,9 @@ class PodActionBackend:
     def bind(self, snapshot: RuntimeSnapshot, release: BootedRelease) -> None:
         self._snapshot = snapshot
         self._release = release
-        self._service_by_id = {service.id: service for service in snapshot.world.services}
+        self._service_by_id = {
+            service.id: service for service in snapshot.world.services
+        }
 
     def clear(self) -> None:
         self._snapshot = None
@@ -69,8 +71,12 @@ class PodActionBackend:
                 "source_entity": getattr(event, "source_entity", ""),
                 "target_entity": getattr(event, "target_entity", ""),
                 "malicious": getattr(event, "malicious", False),
-                "observability_surfaces": list(getattr(event, "observability_surfaces", ())),
-                "linked_objective_predicates": list(getattr(event, "linked_objective_predicates", ())),
+                "observability_surfaces": list(
+                    getattr(event, "observability_surfaces", ())
+                ),
+                "linked_objective_predicates": list(
+                    getattr(event, "linked_objective_predicates", ())
+                ),
             },
             sort_keys=True,
         )
@@ -105,7 +111,9 @@ class PodActionBackend:
         if self._release is None:
             return {}
         return {
-            service_id: 1.0 if run_async(self._release.pods.is_healthy(service_id)) else 0.0
+            service_id: 1.0
+            if run_async(self._release.pods.is_healthy(service_id))
+            else 0.0
             for service_id in sorted(self._service_by_id)
         }
 
@@ -131,7 +139,8 @@ class PodActionBackend:
             stderr=result.stderr.strip(),
             ok=result.ok,
             service_health=self.service_health(),
-            containment_applied=result.ok and directive not in {"recover", "restore", "patch", "mitigate"},
+            containment_applied=result.ok
+            and directive not in {"recover", "restore", "patch", "mitigate"},
             patch_applied=result.ok and directive in {"patch", "mitigate"},
             recovery_applied=result.ok and directive in {"recover", "restore"},
         )
@@ -295,7 +304,11 @@ class PodActionBackend:
 
     def _patch_command_for(self, target: str) -> str:
         weakness = self._weakness_for(target)
-        if weakness is not None and weakness.remediation_kind == "shell" and weakness.remediation_command:
+        if (
+            weakness is not None
+            and weakness.remediation_kind == "shell"
+            and weakness.remediation_command
+        ):
             cleanup = effect_marker_cleanup_command(weakness)
             if cleanup:
                 return f"{weakness.remediation_command}\n{cleanup}"
