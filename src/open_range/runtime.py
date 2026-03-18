@@ -845,8 +845,7 @@ class ReferenceDrivenRuntime:
         return f"{self._briefing_text(actor)}\n{base}"
 
     def _briefing_text(self, actor: ExternalRole) -> str:
-        assert self._snapshot is not None
-        world = self._snapshot.world
+        world = self._require_snapshot().world
         objectives = world.red_objectives if actor == "red" else world.blue_objectives
         public_services = ",".join(service.id for service in world.services if self._predicates and self._predicates.is_public_service(service))
         lines = [
@@ -976,14 +975,17 @@ class ReferenceDrivenRuntime:
         return next((weakness for weakness in self._predicates.active_weaknesses() if weakness.id == weakness_id), None)
 
     def _reference_attack_trace(self):
-        assert self._snapshot is not None
-        traces = self._snapshot.reference_bundle.reference_attack_traces
+        traces = self._require_snapshot().reference_bundle.reference_attack_traces
         return traces[self._reference_attack_index % len(traces)]
 
     def _reference_defense_trace(self):
-        assert self._snapshot is not None
-        traces = self._snapshot.reference_bundle.reference_defense_traces
+        traces = self._require_snapshot().reference_bundle.reference_defense_traces
         return traces[self._reference_defense_index % len(traces)]
+
+    def _require_snapshot(self) -> RuntimeSnapshot:
+        if self._snapshot is None:
+            raise RuntimeError("runtime has no active snapshot")
+        return self._snapshot
 
     def _resolve_reference_index(
         self,

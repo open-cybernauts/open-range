@@ -29,6 +29,7 @@ from open_range.runtime import ReferenceDrivenRuntime
 from open_range.snapshot import RuntimeSnapshot
 from open_range.store import FileSnapshotStore
 from open_range.training_data import (
+    TraceCandidate,
     TraceLineage,
     build_decision_prompt,
     render_candidate_completion,
