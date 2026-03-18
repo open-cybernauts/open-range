@@ -153,6 +153,15 @@ Prefer `uv run` for Python commands in this repo.
 
 Default pull requests for this repo should target `v1`, not `main`, unless the user explicitly asks otherwise.
 
+## Pull Requests
+
+When Codex opens or updates a pull request:
+
+- follow `.github/PULL_REQUEST_TEMPLATE.md`
+- keep the `Testing` section terse and factual: commands plus pass/fail or an explicit `Not run`
+- do not paste long verification logs or terminal transcripts into the PR body
+- use `Review Notes` only for reviewer-relevant context such as risks, tradeoffs, or follow-up work
+
 ## Review Priorities
 
 When reviewing or changing code, prioritize:
