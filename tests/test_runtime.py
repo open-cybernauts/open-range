@@ -258,7 +258,7 @@ def test_runtime_flags_mock_git_clone_in_episode_audit(tmp_path: Path):
 
     decision = runtime.next_decision()
     assert decision.actor == "red"
-    runtime.act(
+    result = runtime.act(
         "red",
         Action(
             actor_id="red",
@@ -273,6 +273,42 @@ def test_runtime_flags_mock_git_clone_in_episode_audit(tmp_path: Path):
     assert audit.suspicious_actions
     assert audit.suspicious_actions[0].matched_patterns == (r"\bgit\s+clone\b",)
     assert audit.suspicious_actions[0].fingerprint_prefix == "git clone"
+    assert result.emitted_events[0].event_type == "SuspiciousActionObserved"
+    assert result.emitted_events[0].suspicious is True
+    assert audit.suspicious_event_ids == (result.emitted_events[0].id,)
+
+
+def test_runtime_hides_suspicious_audit_only_events_from_decision_observations(
+    tmp_path: Path,
+):
+    snapshot = _snapshot(tmp_path)
+    runtime = ReferenceDrivenRuntime()
+    runtime.reset(
+        snapshot,
+        EpisodeConfig(
+            mode="joint_pool",
+            green_enabled=False,
+            audit={"suspicious_patterns": (r"\bgit\s+clone\b",)},
+        ),
+    )
+
+    assert runtime.next_decision().actor == "red"
+    runtime.act(
+        "red",
+        Action(
+            actor_id="red",
+            role="red",
+            kind="shell",
+            payload={"command": "git clone https://example.com/upstream.git"},
+        ),
+    )
+    decision = runtime.next_decision()
+
+    assert decision.actor == "blue"
+    assert all(
+        event.event_type != "SuspiciousActionObserved"
+        for event in decision.obs.visible_events
+    )
 
 
 def test_runtime_tags_emitted_events_when_a_live_action_matches_audit_pattern(

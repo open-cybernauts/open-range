@@ -514,6 +514,7 @@ class ReferenceDrivenRuntime:
         self._red_reward_shaping += reward_delta
         if not internal:
             self._last_reward_delta["red"] += reward_delta
+        self._append_suspicious_audit_event(exec_action, audit, emitted)
         self._record_action_audit(audit, emitted)
 
         return ActionResult(
@@ -701,6 +702,7 @@ class ReferenceDrivenRuntime:
             action, expected_internal, live.stdout
         ):
             self._blue_internal_progress += 1
+        self._append_suspicious_audit_event(action, audit, emitted)
         self._record_action_audit(audit, emitted)
 
         return ActionResult(
@@ -924,6 +926,8 @@ class ReferenceDrivenRuntime:
                 continue
             if not self._is_visible_to(actor, event):
                 continue
+            if event.event_type == "SuspiciousActionObserved":
+                continue
             if actor == "blue":
                 if event.observability_surfaces:
                     visible.append(event)
@@ -1136,6 +1140,24 @@ class ReferenceDrivenRuntime:
         self._auditor.record(
             audit,
             emitted_event_ids=tuple(event.id for event in emitted),
+        )
+
+    def _append_suspicious_audit_event(
+        self, action: Action, audit, emitted: list[RuntimeEvent]
+    ) -> None:
+        if audit is None or not audit.suspicious or emitted:
+            return
+        emitted.append(
+            self._emit_event(
+                event_type="SuspiciousActionObserved",
+                actor=action.role,
+                source_entity=action.actor_id,
+                target_entity=action_target(action) or action.kind,
+                malicious=action.role == "red",
+                observability_surfaces=(),
+                suspicious=True,
+                suspicious_reasons=audit.matched_patterns,
+            )
         )
 
     def _capture_integrity(self, service_paths):

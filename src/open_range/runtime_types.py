@@ -24,6 +24,7 @@ EventType = Literal[
     "RecoveryCompleted",
     "ServiceDegraded",
     "BenignUserAction",
+    "SuspiciousActionObserved",
 ]
 
 
@@ -172,16 +173,31 @@ class IntegrityDelta(_StrictModel):
     after_digest: str = ""
 
 
+class IntegrityServiceSummary(_StrictModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    service_id: str = Field(min_length=1)
+    available: bool = False
+    checked_paths: int = Field(default=0, ge=0)
+    changed_paths: tuple[IntegrityDelta, ...] = Field(default_factory=tuple)
+    unchanged_paths: int = Field(default=0, ge=0)
+
+
 class BinaryIntegritySummary(_StrictModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: bool = False
     available: bool = False
     checked_services: tuple[str, ...] = Field(default_factory=tuple)
+    available_services: tuple[str, ...] = Field(default_factory=tuple)
+    unavailable_services: tuple[str, ...] = Field(default_factory=tuple)
     checked_paths: int = Field(default=0, ge=0)
     changed_services: tuple[str, ...] = Field(default_factory=tuple)
     unchanged_services: tuple[str, ...] = Field(default_factory=tuple)
     changed_paths: tuple[IntegrityDelta, ...] = Field(default_factory=tuple)
+    service_summaries: tuple[IntegrityServiceSummary, ...] = Field(
+        default_factory=tuple
+    )
 
 
 class EpisodeAudit(_StrictModel):

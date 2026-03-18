@@ -22,6 +22,7 @@ from open_range.runtime_types import (
     ExternalRole,
     IntegrityDelta,
     IntegritySample,
+    IntegrityServiceSummary,
 )
 from open_range.snapshot import RuntimeSnapshot
 
@@ -37,6 +38,7 @@ DEFAULT_SUSPICIOUS_PATTERNS = (
 )
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 _VOLATILE_INTEGRITY_SUFFIXES = (".log",)
+_SHELL_WRAPPER_NAMES = {"ash", "bash", "dash", "ksh", "sh", "zsh"}
 _DEFAULT_BINARY_PATHS_BY_KIND = {
     "web_app": ("/usr/local/bin/apache2-foreground", "/usr/sbin/apache2"),
     "email": ("/usr/sbin/sendmail", "/usr/sbin/exim4", "/usr/sbin/postfix"),
@@ -92,17 +94,24 @@ class ActionAuditor:
         self._records: list[AuditActionRecord] = []
         self._integrity_targets: dict[str, tuple[str, ...]] = {}
         self._integrity_expected_keys: set[tuple[str, str]] = set()
+        self._integrity_expected_keys_by_service: dict[str, set[tuple[str, str]]] = {}
         self._integrity_baseline: dict[tuple[str, str], IntegritySample] = {}
+        self._integrity_baseline_available_by_service: dict[str, bool] = {}
         self._integrity_available = False
 
     def bind_snapshot(self, snapshot: RuntimeSnapshot) -> None:
         self._integrity_targets = integrity_targets_for_snapshot(snapshot, self.config)
+        self._integrity_expected_keys_by_service = {
+            service_id: {(service_id, path) for path in paths}
+            for service_id, paths in self._integrity_targets.items()
+        }
         self._integrity_expected_keys = {
             (service_id, path)
             for service_id, paths in self._integrity_targets.items()
             for path in paths
         }
         self._integrity_baseline = {}
+        self._integrity_baseline_available_by_service = {}
         self._integrity_available = False
 
     def capture_baseline(
@@ -117,8 +126,12 @@ class ActionAuditor:
         if not callable(capture_integrity) or not self._integrity_targets:
             return
         samples = capture_integrity(self._integrity_targets)
-        self._integrity_baseline, self._integrity_available = (
-            self._integrity_sample_map(samples)
+        self._integrity_baseline = self._integrity_sample_map(samples)
+        self._integrity_baseline_available_by_service = (
+            self._integrity_service_availability(self._integrity_baseline)
+        )
+        self._integrity_available = any(
+            self._integrity_baseline_available_by_service.values()
         )
 
     def observe(
@@ -273,76 +286,103 @@ class ActionAuditor:
             return BinaryIntegritySummary(enabled=False)
         checked_services = tuple(sorted(self._integrity_targets))
         checked_paths = sum(len(paths) for paths in self._integrity_targets.values())
-        if (
-            not checked_services
-            or not self._integrity_available
-            or not callable(capture_integrity)
-        ):
+        if not checked_services or not callable(capture_integrity):
             return BinaryIntegritySummary(
                 enabled=True,
                 available=False,
                 checked_services=checked_services,
+                unavailable_services=checked_services,
                 checked_paths=checked_paths,
             )
         current_samples = capture_integrity(self._integrity_targets)
-        current_map, current_available = self._integrity_sample_map(current_samples)
-        if not current_available:
-            return BinaryIntegritySummary(
-                enabled=True,
-                available=False,
-                checked_services=checked_services,
-                checked_paths=checked_paths,
-            )
+        current_map = self._integrity_sample_map(current_samples)
+        current_available_by_service = self._integrity_service_availability(current_map)
         deltas: list[IntegrityDelta] = []
-        for key, baseline in sorted(self._integrity_baseline.items()):
-            current = current_map.get(
-                key,
-                IntegritySample(
-                    service_id=baseline.service_id,
-                    path=baseline.path,
-                    probe_ok=False,
-                    exists=False,
-                    digest="",
-                ),
-            )
-            if baseline.exists != current.exists or baseline.digest != current.digest:
-                deltas.append(
-                    IntegrityDelta(
-                        service_id=baseline.service_id,
-                        path=baseline.path,
-                        before_exists=baseline.exists,
-                        after_exists=current.exists,
-                        before_digest=baseline.digest,
-                        after_digest=current.digest,
+        changed_services: list[str] = []
+        unchanged_services: list[str] = []
+        available_services: list[str] = []
+        unavailable_services: list[str] = []
+        service_summaries: list[IntegrityServiceSummary] = []
+        for service_id in checked_services:
+            service_paths = self._integrity_targets.get(service_id, ())
+            if not (
+                self._integrity_baseline_available_by_service.get(service_id, False)
+                and current_available_by_service.get(service_id, False)
+            ):
+                unavailable_services.append(service_id)
+                service_summaries.append(
+                    IntegrityServiceSummary(
+                        service_id=service_id,
+                        available=False,
+                        checked_paths=len(service_paths),
                     )
                 )
-        changed_services = tuple(sorted({delta.service_id for delta in deltas}))
-        changed_service_set = set(changed_services)
-        unchanged_services = tuple(
-            service_id
-            for service_id in checked_services
-            if service_id not in changed_service_set
-        )
+                continue
+            available_services.append(service_id)
+            service_deltas: list[IntegrityDelta] = []
+            for key in sorted(
+                self._integrity_expected_keys_by_service.get(service_id, ())
+            ):
+                baseline = self._integrity_baseline.get(key)
+                current = current_map.get(key)
+                if baseline is None or current is None:
+                    continue
+                if (
+                    baseline.exists != current.exists
+                    or baseline.digest != current.digest
+                ):
+                    service_deltas.append(
+                        IntegrityDelta(
+                            service_id=service_id,
+                            path=baseline.path,
+                            before_exists=baseline.exists,
+                            after_exists=current.exists,
+                            before_digest=baseline.digest,
+                            after_digest=current.digest,
+                        )
+                    )
+            deltas.extend(service_deltas)
+            if service_deltas:
+                changed_services.append(service_id)
+            else:
+                unchanged_services.append(service_id)
+            service_summaries.append(
+                IntegrityServiceSummary(
+                    service_id=service_id,
+                    available=True,
+                    checked_paths=len(service_paths),
+                    changed_paths=tuple(service_deltas),
+                    unchanged_paths=len(service_paths) - len(service_deltas),
+                )
+            )
         return BinaryIntegritySummary(
             enabled=True,
-            available=True,
+            available=bool(available_services),
             checked_services=checked_services,
+            available_services=tuple(available_services),
+            unavailable_services=tuple(unavailable_services),
             checked_paths=checked_paths,
-            changed_services=changed_services,
-            unchanged_services=unchanged_services,
+            changed_services=tuple(changed_services),
+            unchanged_services=tuple(unchanged_services),
             changed_paths=tuple(deltas),
+            service_summaries=tuple(service_summaries),
         )
 
+    @staticmethod
     def _integrity_sample_map(
-        self, samples: tuple[IntegritySample, ...]
-    ) -> tuple[dict[tuple[str, str], IntegritySample], bool]:
-        sample_map = {(sample.service_id, sample.path): sample for sample in samples}
-        complete = (
-            bool(self._integrity_expected_keys)
-            and self._integrity_expected_keys.issubset(sample_map)
-            and all(sample.probe_ok for sample in sample_map.values())
-        )
-        return sample_map, complete
+        samples: tuple[IntegritySample, ...],
+    ) -> dict[tuple[str, str], IntegritySample]:
+        return {(sample.service_id, sample.path): sample for sample in samples}
+
+    def _integrity_service_availability(
+        self, sample_map: dict[tuple[str, str], IntegritySample]
+    ) -> dict[str, bool]:
+        return {
+            service_id: bool(expected_keys)
+            and expected_keys.issubset(sample_map)
+            and all(sample_map[key].probe_ok for key in expected_keys)
+            for service_id, expected_keys in self._integrity_expected_keys_by_service.items()
+        }
 
 
 def command_text_for_action(action: Action) -> str:
@@ -394,7 +434,7 @@ def fallback_fingerprint_source(action: Action) -> str:
 
 
 def fingerprint_prefix_for_command(command: str, *, token_limit: int) -> str:
-    tokens = _command_tokens(command)
+    tokens = _unwrap_command_tokens(_command_tokens(command))
     while tokens and _ENV_ASSIGNMENT_RE.match(tokens[0]):
         tokens.pop(0)
     if not tokens:
@@ -461,6 +501,47 @@ def _command_tokens(command: str) -> list[str]:
         return shlex.split(command, posix=True)
     except ValueError:
         return command.split()
+
+
+def _command_name(token: str) -> str:
+    return token.rsplit("/", 1)[-1]
+
+
+def _unwrap_command_tokens(tokens: list[str]) -> list[str]:
+    current = list(tokens)
+    for _ in range(4):
+        unwrapped = _unwrap_command_tokens_once(current)
+        if unwrapped is None:
+            return current
+        current = unwrapped
+    return current
+
+
+def _unwrap_command_tokens_once(tokens: list[str]) -> list[str] | None:
+    if not tokens:
+        return None
+    command_name = _command_name(tokens[0])
+    if command_name == "env":
+        remainder = list(tokens[1:])
+        while remainder:
+            token = remainder[0]
+            if token == "--":
+                remainder = remainder[1:]
+                break
+            if token.startswith("-") or _ENV_ASSIGNMENT_RE.match(token):
+                remainder = remainder[1:]
+                continue
+            break
+        return remainder or None
+    if (
+        command_name in _SHELL_WRAPPER_NAMES
+        and len(tokens) >= 3
+        and tokens[1].startswith("-")
+        and "c" in tokens[1]
+    ):
+        inner_tokens = _command_tokens(tokens[2])
+        return inner_tokens or None
+    return None
 
 
 def _is_volatile_integrity_path(path: str) -> bool:
