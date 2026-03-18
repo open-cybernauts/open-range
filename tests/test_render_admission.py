@@ -96,6 +96,14 @@ def test_kind_renderer_emits_expected_files(tmp_path: Path):
     )
     assert "sandbox-red" in artifacts.chart_values["sandboxes"]
     assert (
+        artifacts.chart_values["sandboxes"]["sandbox-red"]["image"]
+        == "wbitt/network-multitool:alpine-extra"
+    )
+    assert (
+        artifacts.chart_values["sandboxes"]["sandbox-blue"]["image"]
+        == "wbitt/network-multitool:alpine-extra"
+    )
+    assert (
         artifacts.chart_values["services"]["svc-db"]["payloads"][0]["mountPath"]
         == "/docker-entrypoint-initdb.d/01-init.sql"
     )
