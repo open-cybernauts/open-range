@@ -687,6 +687,16 @@ bash scripts/deploy_hf.sh
 - Container names follow Docker Compose convention: `open-range-<service>-1`.
   The environment resolves these via `_container_name()` discovery.
 
+## Local Dev Workflow
+
+Prefer `uv run` for Python commands in this repo.
+
+- use `uv run -m pytest`, `uv run -m open_range.cli`, and similar module entrypoints
+- do not use `source .venv/bin/activate` for normal development flows
+- do not fall back to raw `python -m ...` when `uv run -m ...` is available
+- if Codex does not see `uv` on `PATH`, resolve the machine's local `uv` path first instead of falling back to venv activation
+- run `docker` and `kind` directly, without wrapping them in Python env activation
+
 ## Key References
 
 - **OpenEnv**: `../References/OpenEnv/` (full reference repo)
