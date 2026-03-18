@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import gc
+import statistics
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -55,6 +58,40 @@ def _code_web_response(
     return ExecResult(
         stdout=str(payload.get("expect_contains", "")), stderr="", exit_code=0
     )
+
+
+def _benchmark_runtime_ms_per_action(
+    snapshot, *, audit_enabled: bool, action_count: int
+) -> float:
+    runtime = ReferenceDrivenRuntime()
+    runtime.reset(
+        snapshot,
+        EpisodeConfig(
+            mode="joint_pool",
+            green_enabled=False,
+            episode_horizon_minutes=float(action_count),
+            audit={"enabled": audit_enabled},
+        ),
+    )
+
+    start = time.perf_counter_ns()
+    for _ in range(action_count):
+        decision = runtime.next_decision()
+        if decision.actor == "red":
+            action = Action(
+                actor_id="red",
+                role="red",
+                kind="shell",
+                payload={
+                    "command": "bash -lc 'git clone https://example.com/upstream.git'"
+                },
+            )
+        else:
+            action = Action(actor_id="blue", role="blue", kind="sleep", payload={})
+        runtime.act(decision.actor, action)
+    runtime.score()
+    elapsed_ns = time.perf_counter_ns() - start
+    return elapsed_ns / 1_000_000 / action_count
 
 
 def test_joint_pool_next_decision_returns_actor_specific_observations(tmp_path: Path):
@@ -347,6 +384,41 @@ def test_runtime_audit_only_events_do_not_trigger_green_reactions(tmp_path: Path
     assert not any(
         event.actor == "green" and event.event_type == "DetectionAlertRaised"
         for event in runtime.export_events()
+    )
+
+
+def test_runtime_audit_overhead_stays_below_issue_target(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    action_count = 400
+    warmup_trials = 1
+    measured_trials = 3
+    overheads: list[float] = []
+
+    for _ in range(warmup_trials):
+        _benchmark_runtime_ms_per_action(
+            snapshot, audit_enabled=False, action_count=action_count
+        )
+        _benchmark_runtime_ms_per_action(
+            snapshot, audit_enabled=True, action_count=action_count
+        )
+
+    for _ in range(measured_trials):
+        gc.collect()
+        without_audit = _benchmark_runtime_ms_per_action(
+            snapshot, audit_enabled=False, action_count=action_count
+        )
+        gc.collect()
+        with_audit = _benchmark_runtime_ms_per_action(
+            snapshot, audit_enabled=True, action_count=action_count
+        )
+        overheads.append(with_audit - without_audit)
+
+    median_overhead_ms = statistics.median(overheads)
+    assert median_overhead_ms < 50.0, (
+        "audit overhead exceeded the issue target of 50 ms/action; "
+        f"measured median overhead={median_overhead_ms:.3f} ms/action "
+        f"across {measured_trials} trials with {action_count} actions/trial "
+        f"(raw={overheads!r})"
     )
 
 
