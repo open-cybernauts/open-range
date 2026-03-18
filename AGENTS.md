@@ -158,9 +158,12 @@ Prefer `uv run -m ...` for Python commands in this repo.
 - default pull requests for this repo should target `v1`, not `main`, unless the user explicitly asks otherwise
 - keep each PR focused on one theme
 - follow `.github/PULL_REQUEST_TEMPLATE.md`
-- keep the `Testing` section terse and factual: commands plus pass/fail or an explicit `Not run`
+- keep the `Testing` section terse and factual
+- do not list routine Ruff, formatting, or generic unit-test commands in the PR body when CI already runs them
+- reserve the `Testing` section for manual verification, integration checks, Kind/admission runs, training/eval smoke tests, or anything else the workflow does not already cover
+- if there was no special verification beyond CI-covered lint/unit checks, say that plainly instead of pasting the commands
 - do not paste long verification logs or terminal transcripts into the PR body
-- include the exact verification commands used in the PR description, especially for admission, runtime, or Kind-backed changes
+- include the exact verification commands used in the PR description for admission, runtime, Kind-backed, training, or other non-routine validation
 - use `Review Notes` only for reviewer-relevant context such as risks, tradeoffs, or follow-up work
 
 ## Review Priorities

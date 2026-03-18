@@ -13,9 +13,9 @@ Closes #
 
 <!--
 Keep verification terse:
-- list the command(s) you ran
-- mark each as pass/fail
-- if something was not run, say why
+- do not list routine Ruff / format / generic unit-test commands when CI already runs them
+- list only manual or non-routine verification that reviewers would not otherwise see
+- if there was no special verification beyond CI-covered lint/unit checks, say that plainly
 - do not paste long terminal transcripts
 -->
 
