@@ -1,22 +1,7 @@
 # NPC Profile Spec
 
-This document defines the public manifest contract for role-level green-user
-behavior in OpenRange V1.
-
-`npc_profiles` is a public business-world input. It shapes generated
-`GreenPersona` objects without exposing private validator references or hidden
-weakness inventory.
-
-## Goals
-
-- Let manifest authors vary role-level NPC behavior without editing Python code.
-- Keep the contract backward compatible with existing manifests.
-- Make the current semantics explicit so newcomers do not need to read the
-  compiler or runtime to use the feature safely.
-
-## Manifest Shape
-
-`npc_profiles` is an optional top-level manifest field.
+`npc_profiles` is an optional top-level manifest field for role-level green-user
+behavior.
 
 ```yaml
 users:
@@ -45,70 +30,55 @@ npc_profiles:
       - reset_password
 ```
 
-Rules:
+## Rules
 
-- `npc_profiles` is optional. Omitting it preserves current compiler behavior.
-- Keys MUST match names declared in `users.roles`.
-- All fields are optional. Omitted fields fall back to the existing compiler
-  defaults for that role.
-- Profiles apply per role, not per individual user.
+- `npc_profiles` is optional.
+- Keys must match names declared in `users.roles`.
+- All fields are optional.
+- Omitting `npc_profiles` or setting it to `{}` preserves the pre-existing
+  compiler behavior.
 - `awareness` and all `susceptibility` values must be between `0.0` and `1.0`.
+- Profiles apply per role, not per individual user.
 
-## Field Definitions
+## Fields
 
 ### `awareness`
 
-`awareness` is a normalized caution score.
+Normalized caution score.
 
-- `0.0` means minimally aware.
-- `1.0` means maximally aware.
+- `0.0` = minimally aware
+- `1.0` = maximally aware
 
-Current V1 semantics:
+Current V1 use:
 
-- Used by the green scheduler when choosing which persona reacts in the
-  `small_llm` backend.
-- Higher awareness makes a persona more likely to be selected as the reporter.
-- Higher awareness also makes recovery actions more likely once a malicious
-  event has been observed.
+- Used by the `small_llm` green backend when choosing who reacts to a malicious
+  event.
+- Higher awareness also makes recovery actions more likely after detection.
 
 ### `susceptibility`
 
-`susceptibility` is a map from label to probability-like score.
+Map from label to score.
 
-- `0.0` means minimally susceptible for that label.
-- `1.0` means maximally susceptible for that label.
 - Keys are free-form strings at the schema level.
+- `0.0` = minimally susceptible
+- `1.0` = maximally susceptible
 
-Recommended stable keys for V1:
+Recommended V1 keys:
 
 - `initial_access`
 - `credential_obtained`
 - `unauthorized_credential_use`
 
-Current V1 semantics:
+Current V1 use:
 
-- The `small_llm` green backend first looks up the event-style key associated
-  with the observed malicious event.
-- If that exact key is missing, it falls back to the maximum value in the map.
-- Other backends currently do not use `susceptibility` directly.
-
-Implication:
-
-- Free-form labels such as `phishing`, `pretexting`, or `spear_phishing` are
-  accepted and preserved in the manifest and `WorldIR`.
-- For predictable runtime behavior today, prefer the event-style keys above.
+- The `small_llm` green backend looks up the event-style key first.
+- If that key is missing, it falls back to the maximum value in the map.
 
 ### `routine`
 
-`routine` is an ordered list of benign activities for that role.
+Ordered list of benign activities for the role.
 
-Current V1 semantics:
-
-- The green scheduler cycles through the list over time.
-- Each token is interpreted heuristically into a service target.
-- The order matters because the scheduler advances through the list.
-
-Recommended stable routine tokens for V1:
+Recommended V1 tokens:
 
 - `check_mail`
 - `browse_app`
@@ -127,35 +97,7 @@ Current service mapping:
 - tokens containing `payroll` -> database
 - everything else -> web app
 
-## Compiler Rules
+## Current Scope
 
-At compile time:
-
-- OpenRange validates that every `npc_profiles` key exists in `users.roles`.
-- A role profile is applied uniformly to all generated users for that role.
-- A profile only overrides fields that are explicitly set.
-- Omitted fields keep the same defaults as before the feature was added.
-
-## What This Covers Today
-
-`npc_profiles` is useful today for:
-
-- coarse role-level benign routine shaping
-- coarse role-level green reaction weighting in the `small_llm` backend
-- reproducible manifest-authored variation across snapshots
-
-## What This Does Not Cover Yet
-
-`npc_profiles` does not yet provide:
-
-- per-individual overrides within a role
-- an explicit click-through model for phishing links or attachments
-- a first-class taxonomy of social-engineering technique keys
-- uniform `susceptibility` semantics across all green backends
-- explicit policies for escalation, ticketing, or reporting thresholds beyond
-  the current scheduler heuristics
-
-If V1 needs "careless reps click every lure" or "admins report every anomaly"
-as first-class scenario semantics, the next step should be a dedicated NPC
-behavior model with explicit pre-compromise and post-compromise controls rather
-than relying only on the current `awareness` and `susceptibility` heuristics.
+This feature provides role-level routine and reaction shaping. It does not yet
+add per-user overrides, NPC memory, daily planning, or a richer social model.

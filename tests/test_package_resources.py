@@ -41,4 +41,4 @@ def test_bundled_docs_are_readable():
     assert "Python control plane" in contents
     assert "Blue has two distinct control actions" in weakness_contents
     assert "NPC Profile Spec" in npc_contents
-    assert "What This Does Not Cover Yet" in npc_contents
+    assert "Current Scope" in npc_contents
