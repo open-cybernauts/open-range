@@ -51,8 +51,8 @@ class RuntimeEvent(_StrictModel):
     malicious: bool
     observability_surfaces: tuple[str, ...] = Field(default_factory=tuple)
     linked_objective_predicates: tuple[str, ...] = Field(default_factory=tuple)
-    suspicious: bool = Field(default=False, exclude=True)
-    suspicious_reasons: tuple[str, ...] = Field(default_factory=tuple, exclude=True)
+    suspicious: bool = False
+    suspicious_reasons: tuple[str, ...] = Field(default_factory=tuple)
 
 
 class ServiceHealth(_StrictModel):
@@ -156,6 +156,7 @@ class IntegritySample(_StrictModel):
 
     service_id: str = Field(min_length=1)
     path: str = Field(min_length=1)
+    probe_ok: bool = True
     exists: bool
     digest: str = ""
 

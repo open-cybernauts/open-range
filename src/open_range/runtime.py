@@ -1112,6 +1112,7 @@ class ReferenceDrivenRuntime:
         return self._auditor.observe(
             action=action,
             executed_command=live.executed_command,
+            audit_command=command_text_for_action(action),
             sim_time=self._state.sim_time,
             controlled=controlled,
         )

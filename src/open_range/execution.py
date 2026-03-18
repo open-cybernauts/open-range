@@ -425,16 +425,22 @@ def _integrity_probe_command(path: str) -> str:
 def _parse_integrity_sample(service_id: str, path: str, result) -> IntegritySample:
     if not result.ok:
         return IntegritySample(
-            service_id=service_id, path=path, exists=False, digest=""
+            service_id=service_id, path=path, probe_ok=False, exists=False, digest=""
         )
     status, _sep, digest = result.stdout.partition("\t")
-    if status.strip() != "present":
+    normalized_status = status.strip()
+    if normalized_status == "missing":
         return IntegritySample(
             service_id=service_id, path=path, exists=False, digest=""
+        )
+    if normalized_status != "present":
+        return IntegritySample(
+            service_id=service_id, path=path, probe_ok=False, exists=False, digest=""
         )
     return IntegritySample(
         service_id=service_id,
         path=path,
+        probe_ok=True,
         exists=True,
         digest=digest.strip(),
     )

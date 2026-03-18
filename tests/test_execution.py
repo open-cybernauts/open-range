@@ -114,6 +114,10 @@ def test_capture_integrity_hashes_or_marks_missing_live_paths() -> None:
             del timeout
             if service == "svc-web" and "index.html" in cmd:
                 return ExecResult(stdout="present\tabc123\n", stderr="", exit_code=0)
+            if service == "svc-web" and "broken.bin" in cmd:
+                return ExecResult(
+                    stdout="error\tno-sha256-tool\n", stderr="", exit_code=1
+                )
             return ExecResult(stdout="missing\t\n", stderr="", exit_code=0)
 
     backend = PodActionBackend()
@@ -124,6 +128,7 @@ def test_capture_integrity_hashes_or_marks_missing_live_paths() -> None:
             "svc-web": (
                 "/var/www/html/index.html",
                 "/var/www/html/missing.php",
+                "/usr/sbin/broken.bin",
             )
         }
     )
@@ -138,6 +143,13 @@ def test_capture_integrity_hashes_or_marks_missing_live_paths() -> None:
         IntegritySample(
             service_id="svc-web",
             path="/var/www/html/missing.php",
+            exists=False,
+            digest="",
+        ),
+        IntegritySample(
+            service_id="svc-web",
+            path="/usr/sbin/broken.bin",
+            probe_ok=False,
             exists=False,
             digest="",
         ),

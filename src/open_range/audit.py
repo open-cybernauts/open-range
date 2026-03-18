@@ -8,7 +8,7 @@ import re
 import shlex
 from collections import Counter
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -37,6 +37,14 @@ DEFAULT_SUSPICIOUS_PATTERNS = (
 )
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 _VOLATILE_INTEGRITY_SUFFIXES = (".log",)
+_DEFAULT_BINARY_PATHS_BY_KIND = {
+    "web_app": ("/usr/local/bin/apache2-foreground", "/usr/sbin/apache2"),
+    "email": ("/usr/sbin/sendmail", "/usr/sbin/exim4", "/usr/sbin/postfix"),
+    "idp": ("/container/tool/run", "/usr/sbin/slapd"),
+    "fileshare": ("/usr/bin/samba.sh", "/usr/sbin/smbd"),
+    "db": ("/usr/local/bin/docker-entrypoint.sh", "/usr/sbin/mysqld"),
+    "siem": ("/bin/busybox",),
+}
 
 
 class _StrictModel(BaseModel):
@@ -83,11 +91,17 @@ class ActionAuditor:
         self._compiled_patterns = _compile_patterns(config.suspicious_patterns)
         self._records: list[AuditActionRecord] = []
         self._integrity_targets: dict[str, tuple[str, ...]] = {}
+        self._integrity_expected_keys: set[tuple[str, str]] = set()
         self._integrity_baseline: dict[tuple[str, str], IntegritySample] = {}
         self._integrity_available = False
 
     def bind_snapshot(self, snapshot: RuntimeSnapshot) -> None:
         self._integrity_targets = integrity_targets_for_snapshot(snapshot, self.config)
+        self._integrity_expected_keys = {
+            (service_id, path)
+            for service_id, paths in self._integrity_targets.items()
+            for path in paths
+        }
         self._integrity_baseline = {}
         self._integrity_available = False
 
@@ -103,16 +117,16 @@ class ActionAuditor:
         if not callable(capture_integrity) or not self._integrity_targets:
             return
         samples = capture_integrity(self._integrity_targets)
-        self._integrity_baseline = {
-            (sample.service_id, sample.path): sample for sample in samples
-        }
-        self._integrity_available = bool(self._integrity_baseline)
+        self._integrity_baseline, self._integrity_available = (
+            self._integrity_sample_map(samples)
+        )
 
     def observe(
         self,
         *,
         action: Action,
         executed_command: str,
+        audit_command: str = "",
         sim_time: float,
         controlled: bool,
     ) -> ActionAuditObservation | None:
@@ -123,7 +137,11 @@ class ActionAuditor:
         ):
             return None
         target = action_target(action)
-        command = (executed_command or command_text_for_action(action)).strip()
+        command = audit_command_for_action(
+            action,
+            audit_command=audit_command or command_text_for_action(action),
+            executed_command=executed_command,
+        )
         fingerprint_prefix = fingerprint_prefix_for_command(
             command or fallback_fingerprint_source(action),
             token_limit=self.config.fingerprint_token_limit,
@@ -267,9 +285,14 @@ class ActionAuditor:
                 checked_paths=checked_paths,
             )
         current_samples = capture_integrity(self._integrity_targets)
-        current_map = {
-            (sample.service_id, sample.path): sample for sample in current_samples
-        }
+        current_map, current_available = self._integrity_sample_map(current_samples)
+        if not current_available:
+            return BinaryIntegritySummary(
+                enabled=True,
+                available=False,
+                checked_services=checked_services,
+                checked_paths=checked_paths,
+            )
         deltas: list[IntegrityDelta] = []
         for key, baseline in sorted(self._integrity_baseline.items()):
             current = current_map.get(
@@ -277,6 +300,7 @@ class ActionAuditor:
                 IntegritySample(
                     service_id=baseline.service_id,
                     path=baseline.path,
+                    probe_ok=False,
                     exists=False,
                     digest="",
                 ),
@@ -309,6 +333,17 @@ class ActionAuditor:
             changed_paths=tuple(deltas),
         )
 
+    def _integrity_sample_map(
+        self, samples: tuple[IntegritySample, ...]
+    ) -> tuple[dict[tuple[str, str], IntegritySample], bool]:
+        sample_map = {(sample.service_id, sample.path): sample for sample in samples}
+        complete = (
+            bool(self._integrity_expected_keys)
+            and self._integrity_expected_keys.issubset(sample_map)
+            and all(sample.probe_ok for sample in sample_map.values())
+        )
+        return sample_map, complete
+
 
 def command_text_for_action(action: Action) -> str:
     """Return a stable textual action description for audit classification."""
@@ -339,6 +374,16 @@ def command_text_for_action(action: Action) -> str:
         )
         return f"submit_finding {event_type} {target}".strip()
     return action.kind
+
+
+def audit_command_for_action(
+    action: Action, *, audit_command: str, executed_command: str
+) -> str:
+    semantic_command = audit_command.strip()
+    raw_command = executed_command.strip()
+    if action.kind == "shell":
+        return raw_command or semantic_command
+    return semantic_command or raw_command
 
 
 def fallback_fingerprint_source(action: Action) -> str:
@@ -376,23 +421,21 @@ def integrity_targets_for_snapshot(
     selected_services = set(config.binary_integrity_services)
     chart_services = snapshot.artifacts.chart_values.get("services", {})
     targets: dict[str, tuple[str, ...]] = {}
-    for service_id, payload in sorted(chart_services.items()):
-        if selected_services and service_id not in selected_services:
+    for service in sorted(snapshot.world.services, key=lambda item: item.id):
+        if selected_services and service.id not in selected_services:
             continue
-        mount_paths = []
-        for item in payload.get("payloads", []):
-            path = item.get("mountPath")
-            if (
-                not isinstance(path, str)
-                or not path
-                or _is_volatile_integrity_path(path)
-            ):
-                continue
-            mount_paths.append(path)
-        mount_paths.extend(config.binary_integrity_paths)
-        unique_paths = tuple(dict.fromkeys(mount_paths))
+        payload = chart_services.get(service.id, {})
+        unique_paths = tuple(
+            dict.fromkeys(
+                (
+                    *_command_entrypoint_paths(payload.get("command", ())),
+                    *_DEFAULT_BINARY_PATHS_BY_KIND.get(service.kind, ()),
+                    *config.binary_integrity_paths,
+                )
+            )
+        )
         if unique_paths:
-            targets[service_id] = unique_paths[
+            targets[service.id] = unique_paths[
                 : config.binary_integrity_max_paths_per_service
             ]
     return targets
@@ -422,6 +465,16 @@ def _command_tokens(command: str) -> list[str]:
 
 def _is_volatile_integrity_path(path: str) -> bool:
     return path.endswith(_VOLATILE_INTEGRITY_SUFFIXES)
+
+
+def _command_entrypoint_paths(command: Any) -> tuple[str, ...]:
+    if isinstance(command, str):
+        return (command,) if command.startswith("/") else ()
+    if not isinstance(command, (list, tuple)):
+        return ()
+    return tuple(
+        token for token in command if isinstance(token, str) and token.startswith("/")
+    )
 
 
 def _truncate(command: str, limit: int = 512) -> str:

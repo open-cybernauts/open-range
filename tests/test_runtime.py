@@ -275,7 +275,7 @@ def test_runtime_flags_mock_git_clone_in_episode_audit(tmp_path: Path):
     assert audit.suspicious_actions[0].fingerprint_prefix == "git clone"
 
 
-def test_runtime_tags_emitted_events_when_a_live_command_matches_audit_pattern(
+def test_runtime_tags_emitted_events_when_a_live_action_matches_audit_pattern(
     tmp_path: Path,
 ):
     snapshot = _snapshot(tmp_path)
@@ -317,7 +317,7 @@ def test_runtime_tags_emitted_events_when_a_live_command_matches_audit_pattern(
         EpisodeConfig(
             mode="joint_pool",
             green_enabled=False,
-            audit={"suspicious_patterns": (r"wget -qO- http://svc-web",)},
+            audit={"suspicious_patterns": (r"api svc-web /search\.php",)},
         ),
     )
 
@@ -335,10 +335,40 @@ def test_runtime_tags_emitted_events_when_a_live_command_matches_audit_pattern(
 
     assert result.emitted_events
     assert result.emitted_events[0].suspicious is True
-    assert result.emitted_events[0].suspicious_reasons == (r"wget -qO- http://svc-web",)
+    assert result.emitted_events[0].suspicious_reasons == (r"api svc-web /search\.php",)
     audit = runtime.score().audit
     assert audit is not None
     assert audit.suspicious_event_ids == (result.emitted_events[0].id,)
+
+
+def test_runtime_serialized_events_keep_suspicious_fields(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    runtime = ReferenceDrivenRuntime()
+    runtime.reset(
+        snapshot,
+        EpisodeConfig(
+            mode="joint_pool",
+            green_enabled=False,
+            audit={"suspicious_patterns": (r"api svc-web /search\.php",)},
+        ),
+    )
+
+    first_step = snapshot.reference_bundle.reference_attack_traces[0].steps[0]
+    assert runtime.next_decision().actor == "red"
+    runtime.act(
+        "red",
+        Action(
+            actor_id="red",
+            role="red",
+            kind=first_step.kind,
+            payload={"target": first_step.target, **first_step.payload},
+        ),
+    )
+
+    payload = runtime.export_events()[0].model_dump(mode="json")
+
+    assert payload["suspicious"] is True
+    assert payload["suspicious_reasons"] == [r"api svc-web /search\.php"]
 
 
 def test_runtime_hard_done_rejects_more_decisions_and_actions(tmp_path: Path):
