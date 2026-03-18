@@ -957,6 +957,7 @@ class ReferenceDrivenRuntime:
         linked_objective_predicates: tuple[str, ...] = (),
         suspicious: bool = False,
         suspicious_reasons: tuple[str, ...] = (),
+        green_reactive: bool = True,
     ) -> RuntimeEvent:
         self._event_seq += 1
         event = RuntimeEvent(
@@ -978,7 +979,8 @@ class ReferenceDrivenRuntime:
             "red": self._state.sim_time,
             "blue": blue_delay,
         }
-        self.green_scheduler.record_event(event)
+        if green_reactive:
+            self.green_scheduler.record_event(event)
         if self.action_backend is not None:
             self.action_backend.record_event(event)
         return event
@@ -1157,6 +1159,7 @@ class ReferenceDrivenRuntime:
                 observability_surfaces=(),
                 suspicious=True,
                 suspicious_reasons=audit.matched_patterns,
+                green_reactive=False,
             )
         )
 

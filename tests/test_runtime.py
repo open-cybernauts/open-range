@@ -311,6 +311,45 @@ def test_runtime_hides_suspicious_audit_only_events_from_decision_observations(
     )
 
 
+def test_runtime_audit_only_events_do_not_trigger_green_reactions(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    runtime = ReferenceDrivenRuntime()
+    runtime.reset(
+        snapshot,
+        EpisodeConfig(
+            mode="joint_pool",
+            green_enabled=True,
+            audit={"suspicious_patterns": (r"\bgit\s+clone\b",)},
+        ),
+    )
+
+    assert runtime.next_decision().actor == "red"
+    runtime.act(
+        "red",
+        Action(
+            actor_id="red",
+            role="red",
+            kind="shell",
+            payload={"command": "git clone https://example.com/upstream.git"},
+        ),
+    )
+    assert runtime.next_decision().actor == "blue"
+    runtime.act(
+        "blue",
+        Action(actor_id="blue", role="blue", kind="sleep", payload={}),
+    )
+    runtime.next_decision()
+
+    assert any(
+        event.event_type == "SuspiciousActionObserved"
+        for event in runtime.export_events()
+    )
+    assert not any(
+        event.actor == "green" and event.event_type == "DetectionAlertRaised"
+        for event in runtime.export_events()
+    )
+
+
 def test_runtime_tags_emitted_events_when_a_live_action_matches_audit_pattern(
     tmp_path: Path,
 ):
