@@ -161,7 +161,7 @@ training slice:
 It does not expose the old public golden-path architecture or the legacy
 OpenEnv HTTP server surface from `main`.
 
-## Extras
+## Optional extras
 
 Training dependencies are optional:
 
@@ -217,11 +217,11 @@ The generator also writes role/source shards such as:
 - `sft_red_all.jsonl`
 - `sft_blue_all.jsonl`
 
-## Model-In-Loop Probe
+## Experimental model probe
 
-There is also a bounded red-only probe that loads the tiny LoRA adapter and
+This is an optional bounded red-only probe that loads a tiny LoRA adapter and
 uses it to score a small candidate action set at each runtime decision.
-This is intentionally narrower than a full policy evaluation: it is
+It is intentionally narrower than a full policy evaluation: it is
 reference-conditioned and red-only because the current tiny bootstrap dataset is
 not yet a full red/blue runtime-action corpus.
 
