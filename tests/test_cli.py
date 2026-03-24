@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import yaml
 from click.testing import CliRunner
 
+import open_range.cli as cli_module
 from open_range.cli import cli
 from tests.support import manifest_payload
 
@@ -135,3 +138,65 @@ def test_traces_command_writes_branch_native_datasets(tmp_path: Path):
     assert (output_dir / "decision_sft.jsonl").exists()
     assert (output_dir / "report.json").exists()
     assert "Trace dataset written to" in result.output
+
+
+def test_grpo_command_invokes_standalone_runner(monkeypatch):
+    commands: list[list[str]] = []
+
+    def _fake_run(command: list[str], check: bool) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        assert check is False
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(cli_module.subprocess, "run", _fake_run)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "grpo",
+            "--model",
+            "/tmp/model",
+            "--data",
+            "/tmp/data.jsonl",
+            "--output",
+            "/tmp/out",
+            "--reward",
+            "binary",
+            "--env-url",
+            "http://env",
+            "--seq",
+            "8192",
+            "--comp-len",
+            "1024",
+            "--num-gen",
+            "8",
+            "--epochs",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(commands) == 1
+    command = commands[0]
+    assert command[0] == sys.executable
+    assert command[1].endswith("scripts/run_grpo.py")
+    assert command[2:] == [
+        "--model",
+        "/tmp/model",
+        "--data",
+        "/tmp/data.jsonl",
+        "--output",
+        "/tmp/out",
+        "--reward",
+        "binary",
+        "--env-url",
+        "http://env",
+        "--seq",
+        "8192",
+        "--comp-len",
+        "1024",
+        "--num-gen",
+        "8",
+        "--epochs",
+        "2",
+    ]

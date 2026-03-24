@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
 from open_range.examples.bootstrap import run_bootstrap_demo
 from open_range.examples.demo import run_demo
 
@@ -21,3 +24,25 @@ def test_bootstrap_demo_runs_against_checked_in_manifest():
     assert set(result["bootstrap_roles"]) == {"blue", "red"}
     assert result["runtime_done"] is True
     assert result["runtime_winner"] == "blue"
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_demo_script_entrypoint_runs():
+    command_cwd = REPO_ROOT
+    command = [
+        sys.executable,
+        "examples/demo.py",
+        "--manifest",
+        "manifests/tier1_basic.yaml",
+        "--seed",
+        "7",
+    ]
+    result = subprocess.run(
+        command, capture_output=True, text=True, check=False, cwd=command_cwd
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "winner=" in result.stdout
+    assert "snapshot=" in result.stdout

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,16 @@ def _write_json(payload: dict[str, Any], dest: Path) -> Path:
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     return dest
+
+
+def _repo_script(script_name: str) -> Path:
+    root = Path(__file__).resolve().parents[2]
+    script_path = root / "scripts" / script_name
+    if not script_path.exists():
+        raise click.ClickException(
+            f"required runner script is unavailable: {script_path}"
+        )
+    return script_path
 
 
 @click.group()
@@ -277,6 +288,106 @@ def traces_cmd(
     click.echo(f"  Raw Rows: {report.raw_path}")
     click.echo(f"  Decision SFT: {report.decision_sft_path}")
     click.echo(f"  Report: {report_path}")
+
+
+@cli.command("grpo")
+@click.option(
+    "--model",
+    default="/workspace/outputs/sft-merged",
+    show_default=True,
+    help="Path to the SFT checkpoint used by the Qwen-focused GRPO runner.",
+)
+@click.option(
+    "--data",
+    default="/workspace/data/grpo_combined.jsonl",
+    show_default=True,
+    help="Path to the GRPO JSONL training data.",
+)
+@click.option(
+    "--output",
+    default="/workspace/outputs/grpo",
+    show_default=True,
+    help="Output directory for GRPO artifacts.",
+)
+@click.option(
+    "--reward",
+    default="online",
+    show_default=True,
+    type=click.Choice(["binary", "progressive", "online", "both"]),
+    help="Reward function selection passed through to the standalone runner.",
+)
+@click.option(
+    "--env-url",
+    default="http://localhost:8000",
+    show_default=True,
+    help="Environment URL when using online reward mode.",
+)
+@click.option(
+    "--seq",
+    default=4096,
+    show_default=True,
+    type=int,
+    help="Maximum sequence length.",
+)
+@click.option(
+    "--comp-len",
+    default=2048,
+    show_default=True,
+    type=int,
+    help="Maximum completion length.",
+)
+@click.option(
+    "--num-gen",
+    default=4,
+    show_default=True,
+    type=int,
+    help="Completions generated per prompt.",
+)
+@click.option(
+    "--epochs",
+    default=1,
+    show_default=True,
+    type=int,
+    help="Number of GRPO epochs.",
+)
+def grpo_cmd(
+    model: str,
+    data: str,
+    output: str,
+    reward: str,
+    env_url: str,
+    seq: int,
+    comp_len: int,
+    num_gen: int,
+    epochs: int,
+) -> None:
+    """Run the advanced GRPO training path through the standalone Qwen runner."""
+    runner = _repo_script("run_grpo.py")
+    command = [
+        sys.executable,
+        str(runner),
+        "--model",
+        model,
+        "--data",
+        data,
+        "--output",
+        output,
+        "--reward",
+        reward,
+        "--env-url",
+        env_url,
+        "--seq",
+        str(seq),
+        "--comp-len",
+        str(comp_len),
+        "--num-gen",
+        str(num_gen),
+        "--epochs",
+        str(epochs),
+    ]
+    result = subprocess.run(command, check=False)
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
 
 
 if __name__ == "__main__":

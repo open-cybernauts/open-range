@@ -14,7 +14,7 @@ Current usage:
 The preferred branch-native path is now dynamic trace generation from admitted snapshots:
 
 ```bash
-PYTHONPATH=src .venv/bin/python scripts/generate_traces.py \
+uv run scripts/generate_traces.py \
   --manifest manifests/tier1_basic.yaml \
   --roots 3 \
   --mutations 1 \
@@ -41,13 +41,13 @@ Tiny training path:
 
 ```bash
 HF_HOME=/tmp/hf-home TOKENIZERS_PARALLELISM=false \
-python scripts/train_tiny_sft.py \
+uv run scripts/train_tiny_sft.py \
   --data /tmp/openrange-traces/decision_sft.jsonl \
   --roles red \
   --outdir /tmp/openrange-sft-tiny
 
 HF_HOME=/tmp/hf-home TOKENIZERS_PARALLELISM=false \
-python scripts/eval_tiny_sft.py \
+uv run scripts/eval_tiny_sft.py \
   --data /tmp/openrange-traces/decision_sft.jsonl \
   --adapter /tmp/openrange-sft-tiny/adapter \
   --roles red

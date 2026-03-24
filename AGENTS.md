@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidance for Codex when working on the current `v1` OpenRange branch.
+Guidance for coding agents working on the current `v1` OpenRange branch.
 
 ## What OpenRange Is
 
@@ -150,7 +150,7 @@ Prefer `uv run -m ...` for Python commands in this repo.
 - run demos with `uv run -m open_range.examples.demo` and `uv run -m open_range.examples.bootstrap`
 - do not use `source .venv/bin/activate` for normal development flows
 - do not fall back to raw `python -m ...` when `uv run -m ...` is available
-- if Codex does not see `uv` on `PATH`, resolve the machine's local `uv` path first instead of falling back to venv activation
+- if `uv` is not on `PATH`, resolve the machine's local `uv` path first instead of falling back to venv activation
 - run `docker` and `kind` directly, without wrapping them in Python env activation
 
 ## PR Guidelines
