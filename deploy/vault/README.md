@@ -118,7 +118,7 @@ export OPENRANGE_VAULT_K8S_ROLE=openrange
 ## Python API
 
 ```python
-from open_range.server.vault_client import VaultCredentialProvider
+from open_range.vault_client import VaultCredentialProvider
 
 provider = VaultCredentialProvider.from_env()
 
@@ -129,7 +129,7 @@ key = provider.get_llm_api_key("OPENAI_API_KEY")
 mysql_pw = provider.get_mysql_root_password()
 
 # Direct Vault client access
-from open_range.server.vault_client import get_vault_client
+from open_range.vault_client import get_vault_client
 
 client = get_vault_client()  # None if Vault is not configured
 if client:

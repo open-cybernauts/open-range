@@ -27,7 +27,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 from copy import deepcopy
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -177,6 +179,7 @@ class SecurityIntegrator:
         if not self.config.enabled:
             return ctx
 
+        rng = random.Random(f"{world.world_id}:{world.seed}:{tier}")
         tier_cfg = self.config.tier_map.get(
             tier,
             self.config.tier_map.get(max(self.config.tier_map), SecurityTierConfig()),
@@ -197,10 +200,10 @@ class SecurityIntegrator:
             self._integrate_identity(ctx, services, domain, security_dir)
 
         if tier_cfg.envelope_encryption:
-            self._integrate_encryption(ctx, world, security_dir)
+            self._integrate_encryption(ctx, world, security_dir, rng)
 
         if tier_cfg.mtls:
-            self._integrate_mtls(ctx, services, domain, security_dir)
+            self._integrate_mtls(ctx, services, domain, security_dir, rng)
 
         if tier_cfg.npc_credential_lifecycle:
             self._integrate_npc_lifecycle(ctx, security_dir)
@@ -272,6 +275,12 @@ class SecurityIntegrator:
         # Generate startup script
         idp = SimulatedIdentityProvider(idp_config)
         startup_script = idp.generate_startup_script()
+        server_template = (
+            files("open_range")
+            .joinpath("templates")
+            .joinpath("identity_provider_server.py.tpl")
+            .read_text(encoding="utf-8")
+        )
 
         # Write IdP artifacts
         idp_dir = security_dir / "idp"
@@ -279,9 +288,17 @@ class SecurityIntegrator:
         (idp_dir / "config.json").write_text(
             json.dumps(idp_config.model_dump(), indent=2) + "\n", encoding="utf-8"
         )
-        (idp_dir / "server.py").write_text(startup_script, encoding="utf-8")
+        (idp_dir / "startup.sh").write_text(startup_script, encoding="utf-8")
+        (idp_dir / "identity_provider_server.py").write_text(
+            server_template,
+            encoding="utf-8",
+        )
         ctx.generated_files.extend(
-            [str(idp_dir / "config.json"), str(idp_dir / "server.py")]
+            [
+                str(idp_dir / "config.json"),
+                str(idp_dir / "startup.sh"),
+                str(idp_dir / "identity_provider_server.py"),
+            ]
         )
 
         logger.debug(
@@ -297,6 +314,7 @@ class SecurityIntegrator:
         ctx: SecurityContext,
         world: WorldIR,
         security_dir: Path,
+        rng: random.Random,
     ) -> None:
         """Generate envelope encryption config for credential secrets."""
         try:
@@ -312,7 +330,6 @@ class SecurityIntegrator:
 
         # Encrypt a subset of credential secret_refs
         import math
-        import random as _random
 
         credentials = list(world.credentials)
         if not credentials:
@@ -321,7 +338,7 @@ class SecurityIntegrator:
         n_encrypt = max(
             1, math.ceil(len(credentials) * self.config.encryption_fraction)
         )
-        indices = _random.sample(
+        indices = rng.sample(
             list(range(len(credentials))),
             min(n_encrypt, len(credentials)),
         )
@@ -389,6 +406,7 @@ class SecurityIntegrator:
         services: dict[str, str],
         domain: str,
         security_dir: Path,
+        rng: random.Random,
     ) -> None:
         """Generate TLS certificates for service-to-service mTLS."""
         try:
@@ -401,12 +419,10 @@ class SecurityIntegrator:
         if not mtls_services:
             return
 
-        import random as _random
-
         weaknesses: dict[str, list[str]] = {}
         if mtls_services and self.config.mtls_weakness_pool:
-            target_svc = _random.choice(mtls_services)
-            weakness = _random.choice(self.config.mtls_weakness_pool)
+            target_svc = rng.choice(mtls_services)
+            weakness = rng.choice(self.config.mtls_weakness_pool)
             weaknesses[target_svc] = [weakness]
 
         mtls_config = MTLSConfig(
@@ -492,6 +508,7 @@ class SecurityIntegrator:
 
 def _default_scopes_for_service(service_name: str) -> list[str]:
     """Return default authorization scopes for a service."""
+    normalized = service_name.removeprefix("svc-").removeprefix("sandbox-")
     scope_map: dict[str, list[str]] = {
         "web": ["data:read:patients/*", "data:read:referrals/*", "api:access:portal"],
         "db": ["data:read:*", "data:write:*"],
@@ -500,4 +517,4 @@ def _default_scopes_for_service(service_name: str) -> list[str]:
         "files": ["file:read:general/*", "file:read:hr/*"],
         "siem": ["log:read:*", "log:write:*", "alert:read:*"],
     }
-    return scope_map.get(service_name, [f"service:access:{service_name}"])
+    return scope_map.get(normalized, [f"service:access:{normalized}"])

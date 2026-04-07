@@ -78,14 +78,14 @@ The `PrometheusRewardDataSource` class in `src/open_range/server/prometheus_rewa
 
 ### Integration with training
 
-The data source is designed to complement `CompositeBlueReward` in `src/open_range/server/rewards.py`. A training harness can combine signals:
+The data source is designed to complement OpenRange's objective/event-grounded
+scoring or feed an external training harness. For example:
 
 ```python
-from open_range.server.prometheus_rewards import (
+from open_range.prometheus_rewards import (
     PrometheusConfig,
     PrometheusRewardDataSource,
 )
-from open_range.server.rewards import CompositeBlueReward
 
 source = PrometheusRewardDataSource(config=PrometheusConfig(
     url="http://localhost:9090",
@@ -93,9 +93,6 @@ source = PrometheusRewardDataSource(config=PrometheusConfig(
 
 availability = await source.service_availability("web")
 detection = await source.detection_score()
-
-# Feed into composite reward or use independently
-blue_reward = CompositeBlueReward()
 ```
 
 When Prometheus is unavailable, all methods return safe defaults (configurable via `PrometheusConfig`) so training is never blocked.

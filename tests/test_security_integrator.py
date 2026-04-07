@@ -140,6 +140,15 @@ class TestIdentityIntegration:
         data = json.loads(idp_config_path.read_text())
         assert data["enabled"] is True
 
+    def test_idp_runtime_files_written(self, sample_world, render_dir):
+        integrator = SecurityIntegrator(SecurityIntegratorConfig(enabled=True))
+        integrator.integrate(sample_world, render_dir=render_dir, tier=2)
+
+        assert (render_dir / "security" / "idp" / "startup.sh").exists()
+        assert (
+            render_dir / "security" / "idp" / "identity_provider_server.py"
+        ).exists()
+
     def test_spiffe_ids_in_identities(self, sample_world, render_dir):
         integrator = SecurityIntegrator(SecurityIntegratorConfig(enabled=True))
         ctx = integrator.integrate(sample_world, render_dir=render_dir, tier=2)
@@ -240,6 +249,10 @@ class TestNPCLifecycleIntegration:
 class TestHelpers:
     def test_default_scopes_for_known_service(self):
         scopes = _default_scopes_for_service("web")
+        assert any("patients" in s for s in scopes)
+
+    def test_default_scopes_for_service_id_alias(self):
+        scopes = _default_scopes_for_service("svc-web")
         assert any("patients" in s for s in scopes)
 
     def test_default_scopes_for_unknown_service(self):

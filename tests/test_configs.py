@@ -76,6 +76,47 @@ def test_build_config_can_filter_services_without_touching_manifest_schema(
     assert candidate.world.allowed_service_kinds == ("web_app", "idp", "siem")
 
 
+def test_build_config_can_enable_security_integration(tmp_path: Path):
+    pipeline = BuildPipeline(store=FileSnapshotStore(tmp_path / "snapshots"))
+    build_config = BuildConfig(
+        validation_profile="graph_only",
+        security_integration_enabled=True,
+        security_tier=3,
+    )
+
+    candidate = pipeline.build(
+        _manifest_payload(),
+        tmp_path / "rendered-security",
+        build_config,
+    )
+
+    assert candidate.build_config == build_config
+    assert candidate.artifacts.chart_values["security"]["tier"] == 3
+    assert any(
+        path.endswith("security/security-context.json")
+        for path in candidate.artifacts.rendered_files
+    )
+
+
+def test_build_config_can_select_k3d_and_cilium_outputs(tmp_path: Path):
+    pipeline = BuildPipeline(store=FileSnapshotStore(tmp_path / "snapshots"))
+    candidate = pipeline.build(
+        _manifest_payload(),
+        tmp_path / "rendered-k3d",
+        BuildConfig(
+            validation_profile="graph_only",
+            cluster_backend="k3d",
+            network_policy_backend="cilium",
+        ),
+    )
+
+    assert Path(candidate.artifacts.kind_config_path).name == "k3d-config.yaml"
+    assert candidate.artifacts.chart_values["cilium"]["enabled"] is True
+    assert (
+        Path(candidate.artifacts.chart_dir) / "templates" / "cilium-policies.yaml"
+    ).exists()
+
+
 def test_build_pipeline_threads_manifest_npc_profiles_into_personas(tmp_path: Path):
     pipeline = BuildPipeline(store=FileSnapshotStore(tmp_path / "snapshots"))
     payload = _manifest_payload()

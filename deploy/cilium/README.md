@@ -71,7 +71,7 @@ Without Hubble, the Blue agent relies on application-level logs (syslog, web ser
 The `hubble_observer.py` module provides an async Python API:
 
 ```python
-from open_range.server.hubble_observer import HubbleObserver, HubbleConfig
+from open_range.hubble_observer import HubbleObserver, HubbleConfig
 
 observer = HubbleObserver(config=HubbleConfig(
     hubble_addr="localhost:4245",
@@ -107,7 +107,7 @@ When Hubble is not available, all methods return empty results rather than raisi
 The `cilium_policies.py` module generates CiliumNetworkPolicy resources from the same zone/firewall configuration used for standard NetworkPolicy:
 
 ```python
-from open_range.server.cilium_policies import CiliumPolicyGenerator
+from open_range.cilium_policies import CiliumPolicyGenerator
 
 gen = CiliumPolicyGenerator(name_prefix="or-my-range")
 policies = gen.generate_zone_policies(zones, firewall_rules)
@@ -145,7 +145,7 @@ cilium connectivity test
 ### Using the Python API
 
 ```python
-from open_range.server.hubble_observer import HubbleObserver
+from open_range.hubble_observer import HubbleObserver
 
 observer = HubbleObserver()
 

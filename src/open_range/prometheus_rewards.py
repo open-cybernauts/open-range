@@ -2,8 +2,8 @@
 
 Provides a ``PrometheusRewardDataSource`` that queries a Prometheus server
 for metrics used to compute supplementary reward signals.  These signals
-feed into (but do not replace) the existing ``CompositeBlueReward`` in
-``open_range.server.rewards``.
+can complement OpenRange's objective/event-grounded scoring or feed into an
+external training harness.
 
 The module is entirely optional.  When Prometheus is unreachable, every
 method returns a safe default value so training can proceed without the

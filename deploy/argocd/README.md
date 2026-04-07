@@ -84,7 +84,7 @@ export OPENRANGE_GITOPS_COMMIT_AUTHOR_EMAIL=open-range@localhost
 From Python (e.g. in a training loop):
 
 ```python
-from open_range.server.gitops_publisher import GitOpsConfig, GitOpsPublisher
+from open_range.gitops_publisher import GitOpsConfig, GitOpsPublisher
 
 config = GitOpsConfig.from_env()
 publisher = GitOpsPublisher.from_config(config)
@@ -106,7 +106,7 @@ await publisher.unpublish("tier1-web-app-abc123")
 | `bootstrap-argocd.sh` | Installs Argo CD via Helm into the cluster |
 | `argocd-values.yaml` | Helm values optimised for local dev (minimal resources, no HA) |
 | `snapshot-application.yaml.tpl` | Argo CD Application template for a single snapshot (envsubst) |
-| `src/open_range/server/gitops_publisher.py` | Python module for publishing snapshots to the GitOps repo |
+| `src/open_range/gitops_publisher.py` | Python module for publishing snapshots to the GitOps repo |
 
 ## Environment variables reference
 
@@ -136,14 +136,14 @@ await publisher.unpublish("tier1-web-app-abc123")
 
 ## Integration with the training pipeline
 
-The `GitOpsPublisher` is designed to slot into the `ManagedSnapshotRuntime`
-training loop.  A typical integration:
+The `GitOpsPublisher` is designed to slot into the standalone
+build/render/admit flow. A typical integration:
 
-1. The runtime calls `builder.build()` to generate a snapshot spec.
+1. `BuildPipeline.build()` renders a candidate world into a local artifact directory.
 2. The renderer produces Helm chart artifacts in a local directory.
 3. If `OPENRANGE_GITOPS_ENABLED=true`, the publisher commits the artifacts
    to the GitOps repo and waits for Argo CD to reconcile.
-4. The environment runs the training episode against the live range.
+4. `OpenRange.reset()` can then run the episode against the admitted snapshot.
 5. After the episode, the publisher removes the snapshot from the GitOps
    repo, and Argo CD prunes the resources.
 
