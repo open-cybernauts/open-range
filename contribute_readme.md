@@ -29,3 +29,43 @@ start with the email channel and the NPC evaluation logic in `src/open_range/cha
 get that working end to end including the SIEM entry generation, validate it against the
 definition of done, and then move into voice pretext once the channel pattern is established
 and the community has had a chance to review the approach.
+
+
+
+## Reproduction Process
+
+### Environment Setup
+
+I cloned the repo and ran `docker compose up` to get the stack running locally.
+The main thing I hit early was the mail container being up but completely silent —
+no NPC was talking to it, no traffic flowing through it, nothing in the logs that
+suggested it was being used at all. That was actually the clearest confirmation
+that this issue is real. The infrastructure exists, the channel just isn't wired up yet.
+
+Python environment was straightforward — `pip install -e .` inside the repo root,
+no dependency conflicts. Docker Desktop on Mac needed the memory limit bumped to 4GB
+before the full stack would stay stable under load.
+
+### Steps to Reproduce
+
+1. Start the stack with `docker compose up`
+2. Run a Red agent action — any shell command via `docker exec`
+3. Check the mail container logs — `docker logs <mail_container_id>`
+4. Try to send anything resembling an email or attachment between agents
+
+### Observed Result
+
+Shell commands work exactly as expected. The mail container starts cleanly and
+stays up. But there is no mechanism for Red to compose an email, no NPC handler
+that processes incoming messages, and nothing in the SIEM output that reflects
+any email activity. The channel is structurally present and functionally absent.
+
+### Reproduction Evidence
+
+- **Commit showing reproduction:** https://github.com/VSAIBABA/open-range
+- **My findings:** The mail container is live but receives zero traffic during a
+  full Red agent run. `src/open_range/channels/` does not exist yet — the directory
+  is missing entirely, which confirms this is a greenfield implementation.
+  `green.py` has no multimodal event handlers. `runtime_events.py` has no
+  channel-specific event types. The gap between what exists and what the issue
+  describes is exactly what the issue says it is a clean starting point.
