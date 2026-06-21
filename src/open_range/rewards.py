@@ -17,6 +17,10 @@ _RED_MILESTONES = frozenset(
     }
 )
 
+# Objective predicates emitted exclusively by the email social-engineering
+# channel.  Matched against linked_objective_predicates for bonus shaping.
+_EMAIL_CHANNEL_PREDICATES = frozenset({"initial_access_via_email"})
+
 
 @dataclass
 class RewardEngine:
@@ -57,6 +61,14 @@ class RewardEngine:
             ):
                 self.red_paid_milestones.add(event.event_type)
                 reward += 0.1
+            # Extra +0.05 shaping bonus when the InitialAccess came via the
+            # email channel — rewards red for using social engineering.
+            if shaping_enabled and event.event_type == "InitialAccess":
+                for pred in getattr(event, "linked_objective_predicates", ()):
+                    pred_name = pred.split("(")[0]
+                    if pred_name in _EMAIL_CHANNEL_PREDICATES:
+                        reward += 0.05
+                        break
         return reward
 
     def on_blue_detection(
