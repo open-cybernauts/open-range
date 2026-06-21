@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from open_range.predicate_expr import predicate_inner, predicate_name
 from open_range.runtime_types import Action, RuntimeEvent
+
+if TYPE_CHECKING:
+    from open_range.world_ir import GreenPersona
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +31,29 @@ def action_target(action: Action) -> str:
     if isinstance(service, str) and service:
         return service
     return ""
+
+
+def email_channel_events(
+    action: Action,
+    *,
+    personas: tuple[GreenPersona, ...],
+    emit_event: EmitEvent,
+    service_surfaces: ServiceSurfaceResolver,
+) -> tuple[RuntimeEvent, ...]:
+    """Delegate email social-engineering actions to the email channel handler.
+
+    Called by the runtime when it sees kind='mail' + payload channel='email'.
+    Keeps the channel logic self-contained in channels/email.py while still
+    wiring into the shared emit_event / service_surfaces pipeline.
+    """
+    from open_range.channels.email import handle_email_action
+
+    return handle_email_action(
+        action,
+        personas=personas,
+        emit_event=emit_event,
+        service_surfaces=service_surfaces,
+    )
 
 
 def green_events_for_action(
@@ -71,6 +97,19 @@ def green_events_for_action(
                 target_entity=reported_target,
                 malicious=False,
                 observability_surfaces=("svc-siem",),
+            ),
+        )
+    if branch == "quarantine_mailbox":
+        # Email channel: green quarantines the mailbox, which counts as
+        # containment and raises a DetectionAlert visible to blue.
+        return (
+            emit_event(
+                event_type="ContainmentApplied",
+                actor="green",
+                source_entity=action.actor_id,
+                target_entity=reported_target,
+                malicious=False,
+                observability_surfaces=("svc-siem", "svc-email"),
             ),
         )
     return (

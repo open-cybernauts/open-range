@@ -44,6 +44,8 @@ PUBLIC_OBJECTIVE_PREDICATE_NAMES: tuple[str, ...] = STANDARD_ATTACK_OBJECTIVE_NA
     "intrusion_detected",
     "intrusion_contained",
     "service_health_above",
+    # Email social-engineering channel predicates
+    "initial_access_via_email",
 )
 
 ObjectiveGraderKind = Literal[
@@ -132,6 +134,10 @@ def objective_tags_for_predicate(
         return ("db_access",) if is_db else ("file_access",)
     if expr.name == "credential_obtained":
         return ("privilege_escalation",)
+    # Email social-engineering channel: phishing initial access maps to
+    # unauthorized_admin_login because the lure typically harvests credentials.
+    if expr.name == "initial_access_via_email":
+        return ("unauthorized_admin_login",)
     return ()
 
 
